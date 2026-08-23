@@ -1,5 +1,7 @@
 # wt
 
+[![CI](https://github.com/jordanwebster/wt/actions/workflows/ci.yml/badge.svg)](https://github.com/jordanwebster/wt/actions/workflows/ci.yml)
+
 `wt` is a worktree manager for humans and coding agents who need several
 copies of one repository running at the same time.
 
