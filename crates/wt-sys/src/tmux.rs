@@ -160,10 +160,13 @@ fn tmux_failed(action: &str, output: &ProcessOutput) -> CoreError {
 
 fn tool_error(error: CoreError) -> CoreError {
     if error.code.0 == "SPAWN_FAILED" {
+        // Carry the operating system's reason forward: "not installed" and
+        // "installed but momentarily unexecutable" are different problems and
+        // a bare TOOL_MISSING cannot be told apart from either.
         CoreError::new(
             ExitClass::State,
             "TOOL_MISSING",
-            "tmux is not installed or executable",
+            format!("tmux is not installed or executable ({})", error.message),
             "install tmux 3.2 or newer",
         )
     } else {
@@ -183,7 +186,6 @@ fn numeric_prefix(value: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     use tempfile::tempdir;
 
@@ -193,8 +195,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let program = dir.path().join("tmux");
         let record = dir.path().join("record");
-        fs::write(&program, script).unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::stub::write(&program, script);
         // The production default is ten seconds (SPEC §13.3); using that
         // deadline also keeps these process tests stable under parallel load.
         (dir, Tmux::new(program, Duration::from_secs(10)), record)

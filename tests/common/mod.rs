@@ -183,13 +183,35 @@ pub fn write_executable(path: &Path, body: &str) {
     let parent = path.parent().unwrap();
     wt_sys::fsx::create_private_dir(parent).unwrap();
     let name = path.file_name().unwrap().to_str().unwrap();
+    // A file still held open for writing cannot be executed (ETXTBSY), and
+    // these tests spawn processes from several threads at once: a sibling's
+    // fork can inherit this write descriptor and make the shim briefly
+    // unexecutable. Guard the body so a warm-up run has no side effect, then
+    // wait the window out before any test relies on the shim.
+    let (shebang, rest) = body.split_once('\n').expect("a shim needs a shebang");
+    let guarded = format!("{shebang}\n[ -n \"${{WT_STUB_WARMUP:-}}\" ] && exit 0\n{rest}");
     wt_sys::fsx::write_nofollow(
         parent,
         &wt_core::model::RelPath::new(name).unwrap(),
-        body.as_bytes(),
+        guarded.as_bytes(),
         0o755,
     )
     .unwrap();
+    settle_executable(path);
+}
+
+/// Waits out the ETXTBSY window described in `write_executable`.
+fn settle_executable(path: &Path) {
+    let mut request = CommandRequest::new(path);
+    request.env.insert("WT_STUB_WARMUP".into(), "1".into());
+    for _ in 0..200 {
+        match proc::capture(&request, Duration::from_secs(10)) {
+            Err(error) if error.code.0 == "SPAWN_FAILED" => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => return,
+        }
+    }
 }
 
 pub fn write(path: &Path, body: &str) {

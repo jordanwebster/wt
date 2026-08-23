@@ -810,7 +810,6 @@ fn resolved_duration(value: Option<&str>, key: &str) -> Result<Duration> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use std::time::Instant;
 
@@ -958,12 +957,10 @@ mod tests {
     fn fetch_class_uses_its_own_bounded_deadline() {
         let dir = tempdir().unwrap();
         let program = dir.path().join("git-stub");
-        std::fs::write(
+        crate::stub::write(
             &program,
             "#!/bin/sh\nif [ \"$1\" = rev-parse ]; then printf 'true\\n'; exit 0; fi\nif [ \"$1\" = fetch ]; then sleep 5; fi\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let deadlines = Deadlines {
             query: Duration::from_secs(1),
             fetch: Duration::from_millis(20),
@@ -980,15 +977,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let program = dir.path().join("git-stub");
         let record = dir.path().join("argv");
-        std::fs::write(
+        crate::stub::write(
             &program,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let git = Git::open_with_program(dir.path(), program, Deadlines::default()).unwrap();
         assert!(!record.exists(), "opening a handle must not query git");
