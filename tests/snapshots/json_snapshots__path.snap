@@ -1,0 +1,18 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "path",
+  "data": {
+    "path": "$ROOT/repos/repo",
+    "target": "repo"
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+: "${WT_STUB_LOG:?WT_STUB_LOG is required}"
+printf 'docker' >> "$WT_STUB_LOG"
+for argument in "$@"; do
+    printf '\t%s' "$argument" >> "$WT_STUB_LOG"
+done
+printf '\n' >> "$WT_STUB_LOG"
+
+state=${WT_STUB_STATE:-/dev/null}
+if grep -Fqx absent "$state" 2>/dev/null; then exit 1; fi
+exit_code=$(sed -n 's/^exit=//p' "$state" 2>/dev/null | head -n 1)
+exit "${exit_code:-0}"

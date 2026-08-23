@@ -1,0 +1,41 @@
+---
+source: crates/wt-core/src/report.rs
+expression: envelope
+---
+{
+  "wt": {
+    "schema": 1,
+    "version": "VERSION"
+  },
+  "ok": true,
+  "command": "command",
+  "data": {
+    "target": "repo/work",
+    "removed": true,
+    "destroyed": [
+      {
+        "scope": ".",
+        "task": "db",
+        "state": "dropped",
+        "child": {
+          "code": 0,
+          "signal": null
+        }
+      }
+    ],
+    "orphans_kept": [
+      "legacy"
+    ],
+    "branch_deleted": false,
+    "session_closed": false
+  },
+  "notices": [
+    {
+      "level": "info",
+      "code": "EXAMPLE",
+      "subject": "repo/work",
+      "message": "example notice"
+    }
+  ],
+  "error": null
+}

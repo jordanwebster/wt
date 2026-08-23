@@ -1,0 +1,35 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "fmt",
+  "data": {
+    "child": {
+      "code": 0,
+      "signal": null
+    },
+    "log": "<log>",
+    "steps": [
+      {
+        "child": {
+          "code": 0,
+          "signal": null
+        },
+        "duration_ms": "<duration_ms>",
+        "id": "fmt",
+        "scope": ".",
+        "status": "ok"
+      }
+    ],
+    "target": "repo",
+    "task": "fmt"
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

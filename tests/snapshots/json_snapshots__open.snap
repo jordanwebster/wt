@@ -1,0 +1,22 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "open",
+  "data": null,
+  "error": {
+    "class": "state",
+    "code": "CONFIG_INVALID",
+    "details": null,
+    "exit": 5,
+    "message": "no agent was selected",
+    "remedy": "pass --agent or configure default_agent"
+  },
+  "notices": [],
+  "ok": false,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

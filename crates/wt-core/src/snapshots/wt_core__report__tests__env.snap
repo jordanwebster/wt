@@ -1,0 +1,61 @@
+---
+source: crates/wt-core/src/report.rs
+expression: envelope
+---
+{
+  "wt": {
+    "schema": 1,
+    "version": "VERSION"
+  },
+  "ok": true,
+  "command": "command",
+  "data": {
+    "target": "repo/work",
+    "set": [
+      "WT_ROOT"
+    ],
+    "kept": [
+      "PORT"
+    ],
+    "overrode": [
+      "PATH"
+    ],
+    "restored": [
+      "WT_TARGET"
+    ],
+    "missing_bins": [
+      "missing/bin"
+    ],
+    "rendered": [
+      "generated.toml"
+    ],
+    "bins": [
+      {
+        "dir": "target/debug",
+        "exists": true,
+        "executables": [
+          "wt"
+        ]
+      }
+    ],
+    "env": {
+      "WT_ROOT": "/tree"
+    },
+    "activation": {
+      "v": 1,
+      "target": "repo/work",
+      "home": "/home",
+      "applied": {},
+      "prior": {}
+    }
+  },
+  "notices": [
+    {
+      "level": "info",
+      "code": "EXAMPLE",
+      "subject": "repo/work",
+      "message": "example notice"
+    }
+  ],
+  "error": null
+}

@@ -1,0 +1,37 @@
+---
+source: crates/wt-core/src/report.rs
+expression: envelope
+---
+{
+  "wt": {
+    "schema": 1,
+    "version": "VERSION"
+  },
+  "ok": true,
+  "command": "command",
+  "data": {
+    "locks": [
+      {
+        "level": 1,
+        "name": "repo/work",
+        "path": "/home/locks/repo/work.lock",
+        "held": true,
+        "holder": {
+          "pid": 42,
+          "target": "repo/work",
+          "verb": "run",
+          "since": "TIME"
+        }
+      }
+    ]
+  },
+  "notices": [
+    {
+      "level": "info",
+      "code": "EXAMPLE",
+      "subject": "repo/work",
+      "message": "example notice"
+    }
+  ],
+  "error": null
+}

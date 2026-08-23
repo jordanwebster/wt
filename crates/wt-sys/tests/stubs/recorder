@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+: "${WT_STUB_LOG:?WT_STUB_LOG is required}"
+printf 'recorder\tcwd=%s' "$PWD" >> "$WT_STUB_LOG"
+for argument in "$@"; do
+    printf '\t%s' "$argument" >> "$WT_STUB_LOG"
+done
+printf '\n' >> "$WT_STUB_LOG"
+
+state=${WT_STUB_STATE:-/dev/null}
+sleep_for=$(sed -n 's/^sleep=//p' "$state" 2>/dev/null | head -n 1)
+if [ -n "$sleep_for" ]; then sleep "$sleep_for"; fi
+exit_code=$(sed -n 's/^exit=//p' "$state" 2>/dev/null | head -n 1)
+exit "${exit_code:-0}"

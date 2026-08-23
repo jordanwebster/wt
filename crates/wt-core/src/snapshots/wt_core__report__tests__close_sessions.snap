@@ -1,0 +1,30 @@
+---
+source: crates/wt-core/src/report.rs
+expression: envelope
+---
+{
+  "wt": {
+    "schema": 1,
+    "version": "VERSION"
+  },
+  "ok": true,
+  "command": "command",
+  "data": {
+    "sessions": [
+      {
+        "target": "repo/work",
+        "session": "session",
+        "closed": true
+      }
+    ]
+  },
+  "notices": [
+    {
+      "level": "info",
+      "code": "EXAMPLE",
+      "subject": "repo/work",
+      "message": "example notice"
+    }
+  ],
+  "error": null
+}

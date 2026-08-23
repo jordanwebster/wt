@@ -1,0 +1,72 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "clone",
+  "data": {
+    "cloned": true,
+    "config_errors": [],
+    "declared": {
+      "bin": [],
+      "copy": [],
+      "env": [],
+      "files": [],
+      "ports": [],
+      "resources": [],
+      "tasks": []
+    },
+    "gitdir_id": "<gitdir_id>",
+    "label": "clone",
+    "path": "$ROOT/clone",
+    "registered": true,
+    "resumed": false,
+    "tree": {
+      "agent": null,
+      "behind_default": 0,
+      "branch": "main",
+      "canonical": true,
+      "detached_sha": null,
+      "dirty": {
+        "modified": 0,
+        "untracked": 0
+      },
+      "disk_kb": null,
+      "geometry": {
+        "base": 20000,
+        "port_base": 20032,
+        "stride": 16
+      },
+      "label": "clone",
+      "name": "canonical",
+      "path": "$ROOT/clone",
+      "phase": "ready",
+      "ports": [],
+      "resources": [],
+      "session": "no",
+      "session_name": "wt_clone_canonical_392990c2",
+      "slot": 2,
+      "sync": {
+        "at": null,
+        "changed": [],
+        "drift": [],
+        "state": "never"
+      },
+      "target": "clone",
+      "tree_id": "<tree_id>",
+      "upstream": {
+        "ahead": 0,
+        "behind": 0
+      },
+      "verify": null
+    },
+    "url": "$ROOT/repos/source"
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

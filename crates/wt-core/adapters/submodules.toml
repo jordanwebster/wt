@@ -1,0 +1,10 @@
+name = "submodules"
+detect = [".gitmodules"]
+default_tool = "git"
+
+[tools.git]
+requires = "git"
+sync_inputs = [".gitmodules"]
+
+[tools.git.task.sync]
+run = "git submodule update --init --recursive"

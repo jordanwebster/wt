@@ -1,0 +1,37 @@
+---
+source: crates/wt-core/src/report.rs
+expression: envelope
+---
+{
+  "wt": {
+    "schema": 1,
+    "version": "VERSION"
+  },
+  "ok": true,
+  "command": "command",
+  "data": {
+    "findings": [
+      {
+        "severity": "info",
+        "code": "NO_COORDINATION",
+        "subject": "repo",
+        "message": "healthy",
+        "remedy": "none"
+      }
+    ],
+    "counts": {
+      "error": 0,
+      "warn": 0,
+      "info": 1
+    }
+  },
+  "notices": [
+    {
+      "level": "info",
+      "code": "EXAMPLE",
+      "subject": "repo/work",
+      "message": "example notice"
+    }
+  ],
+  "error": null
+}

@@ -1,0 +1,24 @@
+[package]
+name = "wt-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "System effects layer for wt"
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+failpoints = []
+lock-trace = []
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wt-core = { path = "../wt-core" }
+
+[dev-dependencies]
+tempfile = "3"

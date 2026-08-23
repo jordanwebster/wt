@@ -1,0 +1,36 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "sync",
+  "data": {
+    "inputs": [
+      {
+        "hash": "ee8c1ee49b4799bbd170233915a897c19e3b55e1",
+        "path": "README.md"
+      }
+    ],
+    "ran": true,
+    "steps": [
+      {
+        "child": {
+          "code": 0,
+          "signal": null
+        },
+        "duration_ms": "<duration_ms>",
+        "id": "sync",
+        "scope": ".",
+        "status": "ok"
+      }
+    ],
+    "target": "repo"
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

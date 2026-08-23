@@ -1,0 +1,113 @@
+---
+source: crates/wt-core/src/report.rs
+expression: envelope
+---
+{
+  "wt": {
+    "schema": 1,
+    "version": "VERSION"
+  },
+  "ok": true,
+  "command": "command",
+  "data": {
+    "target": "repo/work",
+    "label": "repo",
+    "name": "work",
+    "canonical": false,
+    "tree_id": "TREE",
+    "path": "/tree",
+    "slot": 0,
+    "geometry": {
+      "base": 20000,
+      "stride": 16,
+      "port_base": 20000
+    },
+    "phase": "ready",
+    "branch": "main",
+    "detached_sha": null,
+    "dirty": {
+      "modified": 0,
+      "untracked": 0
+    },
+    "upstream": {
+      "ahead": 0,
+      "behind": 0
+    },
+    "behind_default": 0,
+    "sync": {
+      "state": "never",
+      "at": null,
+      "changed": [],
+      "drift": []
+    },
+    "verify": {
+      "ok": true,
+      "at": "TIME"
+    },
+    "session": "no",
+    "session_name": "session",
+    "agent": null,
+    "resources": [
+      {
+        "scope": ".",
+        "task": "db",
+        "tied_to": "tree",
+        "name": "repo_db",
+        "state": "declared",
+        "reason": null,
+        "external": false,
+        "undeclared": false,
+        "has_instance": false,
+        "last_probe": {
+          "at": "TIME",
+          "result": "absent"
+        },
+        "last_error": {
+          "at": "TIME",
+          "event": "probe",
+          "message": "none"
+        }
+      }
+    ],
+    "ports": [
+      {
+        "name": "http",
+        "port": 20000,
+        "bound": false
+      }
+    ],
+    "disk_kb": null,
+    "tasks": [
+      {
+        "id": "test",
+        "scope": ".",
+        "origin": "repo",
+        "cwd": ".",
+        "needs": [
+          "build"
+        ],
+        "resource": false,
+        "tied_to": null,
+        "lock": "tests",
+        "description": "run tests"
+      }
+    ],
+    "config_errors": [
+      {
+        "path": ".wt.toml",
+        "line": 2,
+        "col": 3,
+        "message": "example diagnostic"
+      }
+    ]
+  },
+  "notices": [
+    {
+      "level": "info",
+      "code": "EXAMPLE",
+      "subject": "repo/work",
+      "message": "example notice"
+    }
+  ],
+  "error": null
+}

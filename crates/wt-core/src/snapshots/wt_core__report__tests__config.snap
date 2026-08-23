@@ -1,0 +1,36 @@
+---
+source: crates/wt-core/src/report.rs
+expression: envelope
+---
+{
+  "wt": {
+    "schema": 1,
+    "version": "VERSION"
+  },
+  "ok": true,
+  "command": "command",
+  "data": {
+    "target": "repo/work",
+    "entries": [
+      {
+        "key": "task.test",
+        "scope": ".",
+        "layer": "repo",
+        "value": {
+          "needs": [
+            "build"
+          ]
+        }
+      }
+    ]
+  },
+  "notices": [
+    {
+      "level": "info",
+      "code": "EXAMPLE",
+      "subject": "repo/work",
+      "message": "example notice"
+    }
+  ],
+  "error": null
+}

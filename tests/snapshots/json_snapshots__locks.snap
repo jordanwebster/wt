@@ -1,0 +1,30 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "locks",
+  "data": {
+    "locks": [
+      {
+        "held": false,
+        "holder": {
+          "pid": "<pid>",
+          "since": "<since>",
+          "target": "repo",
+          "verb": "register"
+        },
+        "level": 1,
+        "name": "repo",
+        "path": "$ROOT/wt-home/locks/repo/canonical.lock"
+      }
+    ]
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

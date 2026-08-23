@@ -1,0 +1,43 @@
+---
+source: crates/wt-core/src/report.rs
+expression: envelope
+---
+{
+  "wt": {
+    "schema": 1,
+    "version": "VERSION"
+  },
+  "ok": true,
+  "command": "command",
+  "data": {
+    "target": "repo/work",
+    "ran": true,
+    "steps": [
+      {
+        "id": "sync",
+        "scope": ".",
+        "status": "ok",
+        "child": {
+          "code": 0,
+          "signal": null
+        },
+        "duration_ms": 12
+      }
+    ],
+    "inputs": [
+      {
+        "path": "Cargo.lock",
+        "hash": "HASH"
+      }
+    ]
+  },
+  "notices": [
+    {
+      "level": "info",
+      "code": "EXAMPLE",
+      "subject": "repo/work",
+      "message": "example notice"
+    }
+  ],
+  "error": null
+}

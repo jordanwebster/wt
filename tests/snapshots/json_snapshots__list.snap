@@ -1,0 +1,78 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "list",
+  "data": {
+    "locks": [],
+    "trees": [
+      {
+        "agent": null,
+        "behind_default": 0,
+        "branch": "main",
+        "canonical": true,
+        "detached_sha": null,
+        "dirty": {
+          "modified": 0,
+          "untracked": 0
+        },
+        "disk_kb": "<disk_kb>",
+        "geometry": {
+          "base": 20000,
+          "port_base": 20000,
+          "stride": 16
+        },
+        "label": "repo",
+        "name": "canonical",
+        "path": "$ROOT/repos/repo",
+        "phase": "ready",
+        "ports": [
+          {
+            "bound": false,
+            "name": "http",
+            "port": 20000
+          }
+        ],
+        "resources": [
+          {
+            "external": false,
+            "has_instance": false,
+            "last_error": null,
+            "last_probe": null,
+            "name": "repo_canonical_87657c73_service",
+            "reason": null,
+            "scope": ".",
+            "state": "declared",
+            "task": "service",
+            "tied_to": "tree",
+            "undeclared": false
+          }
+        ],
+        "session": "no",
+        "session_name": "wt_repo_canonical_be9ff5d9",
+        "slot": 0,
+        "sync": {
+          "at": null,
+          "changed": [],
+          "drift": [],
+          "state": "never"
+        },
+        "target": "repo",
+        "tree_id": "<tree_id>",
+        "upstream": {
+          "ahead": 0,
+          "behind": 0
+        },
+        "verify": null
+      }
+    ]
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

@@ -1,0 +1,36 @@
+---
+source: crates/wt-core/src/report.rs
+expression: envelope
+---
+{
+  "wt": {
+    "schema": 1,
+    "version": "VERSION"
+  },
+  "ok": true,
+  "command": "command",
+  "data": {
+    "applied": false,
+    "items": [
+      {
+        "target": "repo/old",
+        "reasons": [
+          "missing"
+        ],
+        "action": "remove",
+        "result": {
+          "removed": true
+        }
+      }
+    ]
+  },
+  "notices": [
+    {
+      "level": "info",
+      "code": "EXAMPLE",
+      "subject": "repo/work",
+      "message": "example notice"
+    }
+  ],
+  "error": null
+}

@@ -1,0 +1,36 @@
+# wt coordination: each checkout runs the whole stack on its own ports.
+# The ports feed the AppHost's Local:Ports:* keys (see LOCAL_DEV.md);
+# the browser-facing origin follows the frontend port inside the AppHost.
+
+ports = ["postgres", "server", "server_https", "frontend", "website", "dashboard", "otlp"]
+
+# Per-developer, gitignored; without them the MCP servers are missing.
+copy = [".mcp.json", ".claude/settings.local.json"]
+
+[env]
+Local__Ports__Postgres = "$WT_PORT_POSTGRES"
+Local__Ports__Server = "$WT_PORT_SERVER"
+Local__Ports__ServerHttps = "$WT_PORT_SERVER_HTTPS"
+Local__Ports__Frontend = "$WT_PORT_FRONTEND"
+Local__Ports__Website = "$WT_PORT_WEBSITE"
+Local__Ports__Dashboard = "$WT_PORT_DASHBOARD"
+Local__Ports__DashboardOtlp = "$WT_PORT_OTLP"
+
+[task.sync]
+run = "dotnet restore orbitcloud.sln && npm --prefix frontend ci && npm --prefix website ci"
+
+# Aspire creates this checkout's persistent containers, volumes and
+# network on first run, named from SHA256 of the lowercased AppHost
+# .csproj path. Declared here so removing a worktree reclaims them;
+# there is no `run`: the application creates it, wt only finds and
+# destroys it.
+[task.pgdata]
+tied_to = "tree"
+name = "aspire-${WT_LABEL}-${WT_NAME_SNAKE}"
+exists = '''docker info >/dev/null 2>&1 || exit 2; h=$(printf '%s' "$WT_ROOT/orbitcloud.AppHost/orbitcloud.AppHost.csproj" | tr A-Z a-z | shasum -a 256 | cut -c1-8); docker container inspect "postgres-$h" >/dev/null 2>&1'''
+destroy = '''
+h=$(printf '%s' "$WT_ROOT/orbitcloud.AppHost/orbitcloud.AppHost.csproj" | tr A-Z a-z | shasum -a 256 | cut -c1-10)
+docker ps -aq --filter "name=-${h%??}$" | xargs -r docker rm -f -v
+docker volume ls -q --filter "name=orbitcloud.apphost-$h-" | xargs -r docker volume rm -f
+docker network ls -q --filter "name=aspire-persistent-network-${h%??}-" | xargs -r docker network rm
+'''

@@ -1,0 +1,60 @@
+name = "python"
+detect = ["pyproject.toml", "requirements.txt", "setup.py"]
+default_tool = "pip"
+
+[[nudge]]
+if_tool = "pip"
+want = "uv"
+hint = "uv installs from a shared wheel cache across trees; consider migrating"
+
+[[nudge]]
+if_tool = "poetry"
+want = "uv"
+hint = "uv reads pyproject.toml directly and installs much faster than poetry"
+
+[tools.uv]
+lockfile = ["uv.lock"]
+requires = "uv"
+sync_inputs = ["uv.lock", "pyproject.toml"]
+seed = [".venv"]
+
+[tools.uv.task.sync]
+run = "uv sync --frozen"
+[tools.uv.task.test]
+run = "uv run pytest"
+[tools.uv.task.lint]
+run = "uv run ruff check ."
+[tools.uv.task.fmt]
+run = "uv run ruff format ."
+[tools.uv.task.build]
+run = "uv build"
+
+[tools.poetry]
+lockfile = ["poetry.lock"]
+requires = "poetry"
+sync_inputs = ["poetry.lock", "pyproject.toml"]
+
+[tools.poetry.task.sync]
+run = "poetry install"
+[tools.poetry.task.test]
+run = "poetry run pytest"
+[tools.poetry.task.lint]
+run = "poetry run ruff check ."
+[tools.poetry.task.fmt]
+run = "poetry run ruff format ."
+[tools.poetry.task.build]
+run = "poetry build"
+
+[tools.pip]
+requires = "python3"
+sync_inputs = ["requirements.txt", "pyproject.toml"]
+seed = [".venv"]
+
+[tools.pip.task.sync]
+run = '''test -d .venv || python3 -m venv .venv; if [ -f requirements.txt ]; then .venv/bin/pip install -r requirements.txt; else .venv/bin/pip install -e . 2>/dev/null || true; fi'''
+[tools.pip.task.test]
+run = ".venv/bin/pytest"
+[tools.pip.task.lint]
+run = ".venv/bin/ruff check ."
+[tools.pip.task.fmt]
+run = ".venv/bin/ruff format ."

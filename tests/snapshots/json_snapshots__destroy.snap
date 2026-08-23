@@ -1,0 +1,25 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "destroy",
+  "data": {
+    "after": "declared",
+    "before": "present",
+    "child": {
+      "code": 0,
+      "signal": null
+    },
+    "scope": ".",
+    "target": "repo",
+    "task": "service"
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

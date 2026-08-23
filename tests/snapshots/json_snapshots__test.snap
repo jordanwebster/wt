@@ -1,0 +1,35 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "test",
+  "data": {
+    "child": {
+      "code": 0,
+      "signal": null
+    },
+    "log": "<log>",
+    "steps": [
+      {
+        "child": {
+          "code": 0,
+          "signal": null
+        },
+        "duration_ms": "<duration_ms>",
+        "id": "test",
+        "scope": ".",
+        "status": "ok"
+      }
+    ],
+    "target": "repo",
+    "task": "test"
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

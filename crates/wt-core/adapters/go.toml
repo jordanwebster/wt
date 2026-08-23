@@ -1,0 +1,18 @@
+name = "go"
+detect = ["go.mod"]
+default_tool = "go"
+
+[tools.go]
+requires = "go"
+sync_inputs = ["go.sum", "go.mod"]
+
+[tools.go.task.sync]
+run = "go mod download"
+[tools.go.task.build]
+run = "go build ./..."
+[tools.go.task.test]
+run = "go test ./..."
+[tools.go.task.lint]
+run = "go vet ./..."
+[tools.go.task.fmt]
+run = "gofmt -l -w ."

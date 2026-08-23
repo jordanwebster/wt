@@ -1,0 +1,363 @@
+# Requirements addendum (product decisions made after the problem statement)
+
+These are requirements, not implementation. They were settled after running the first implementation against three
+real repositories. A clean design must satisfy them; it is free to satisfy them
+with a different schema or structure than the current tool uses.
+
+## A1. One environment per tree, several doors
+
+Every way of running something inside a tree computes the *same*
+environment: a one-shot command, a declared task, an interactive shell,
+and a background session (tmux) for a human or a coding agent. What the
+user types in a shell and what a task runs must never disagree about which
+binary, port, socket or config file is in play.
+
+## A2. Outside a door, nothing changes
+
+A plain shell in any checkout (including the main checkout) behaves
+exactly as if the tool did not exist: the repo's own default ports, the
+installed binaries on PATH. Activation is always explicit.
+
+## A3. The main checkout is a tree too
+
+The canonical checkout (`~/source/orbit`) is addressable like any tree and
+gets its own coordinates (port block, generated files, resources, session)
+on first use, without a creation step. Motivation: a dev build of a daemon
+in the main checkout must be able to run beside the *installed* release of
+the same daemon, each with its own socket/state/identity.
+
+## A4. Worktree-specific binaries shadow installed ones
+
+A repo can declare directories (e.g. `target/debug`) that are prepended to
+PATH inside every door, so `orbit` inside a tree is that tree's build. The
+tool must make "which binary am I running" cheap to answer (e.g. listing
+the resolved binaries, a variable the prompt can show, the session's
+status bar naming the tree), and must warn when a declared directory does
+not exist yet rather than letting commands silently fall through to
+installed copies.
+
+## A5. Aliases yield to the user; activation is re-entrant
+
+Non-tool environment keys a repo declares (e.g. `PORT`, `RCT_METRO_PORT`,
+`ORBIT_CONFIG`) are applied only when the invoking shell does not already
+set them; a force flag overrides; the tool reports what it kept. However,
+keys that a *previous activation of the tool* set must be treated as the
+tool's own and replaced — entering tree B's shell from inside tree A's
+shell must yield B's values, not A's.
+
+## A6. Tool-owned directory, nothing to gitignore
+
+Per-tree generated artefacts (sockets, state, rendered config, logs) live
+in a directory the tool owns inside the tree (`.wt/`), and the tool keeps
+it — and any file it renders — out of `git status` without the repo
+having to change its `.gitignore`. Rendered file templates see the fully
+assembled environment (aliases included) and are (re)rendered on every
+door so a deleted file is restored before anything depends on it.
+
+## A7. Resources die with the tree, even unrecorded ones
+
+Anything a tree declares with a destroy recipe is torn down when the tree
+is removed. This includes resources the application created on its own
+without going through the tool (a dev server that lazily starts a
+container): on removal, every declared resource's existence probe is
+consulted and hits are destroyed.
+
+## A8. Registration is consent; no content-trust protocol
+
+Registering a repository authorizes its declared tooling to run;
+registration shows what is declared. There is no hash-tracking of the
+repo's config, no separate trust verb, no refusal when the file changes.
+Rationale: shipped adapters already execute repo-controlled code (`npm
+ci`, `cargo test`) unconditionally, so guarding only the config file was
+false comfort, and it taxed agents editing the config in their own trees.
+
+## A9. Concrete acceptance targets
+
+Three real repositories must work, with configuration files of roughly
+the shape attached (`orbit.wt.toml`, `orbitapp.wt.toml`,
+`orbitcloud.wt.toml`). The schema may change if a better one is found, but
+every need those files express must be expressible:
+
+- orbit (Rust workspace): per-tree daemon config rendered from a template;
+  `target/debug` on PATH; tasks overriding adapter defaults because the
+  workspace's default-members differ from CI; the daemon as a tree-bound
+  resource with exists/run/destroy.
+- orbitapp (Expo/React Native): one port alias (`RCT_METRO_PORT`); a task
+  that links a sibling checkout into place (`$WT_REPO/../orbit`) before
+  another task runs.
+- orbitcloud (.NET Aspire + two npm apps): seven port aliases in
+  `Section__Key` form; copying gitignored per-developer files into new
+  trees; a custom `sync`; a resource whose `run` is a no-op and whose
+  `exists`/`destroy` are multi-line shell computing a hash of a path.
+
+## A10. Coding agents are first-class users
+
+Every command must be scriptable: `--json` with a stable envelope,
+non-interactive unless attached to a TTY, stable exit-code classes, and
+error messages that name the remedy. Agents will create trees, run tasks,
+and open sessions without a human watching.
+
+---
+
+# Addendum 2 — decisions taken after the first design review
+
+Binding. These resolve the questions the first design review raised.
+They are settled.
+
+## A11. `create` runs `sync`; `verify` is explicit
+
+R3's bar ("the project's own declared verify step succeeds") is met by
+the verify step being available and runnable on a freshly created tree;
+creation itself runs only dependency installation. Full test suites take
+minutes (orbit: ~15) and agents control wall-clock. `wt new --verify`
+runs it as part of creation and reports its outcome distinctly.
+
+## A12. Package-manager caches are assumed concurrency-safe
+
+cargo, npm, pnpm, yarn, bun, uv, poetry, pip, dotnet and go lock their
+own shared caches. wt does not serialise adapter `sync` tasks across
+trees or repos and does not isolate caches. R5's "toolchain cache locks"
+refers to *per-tree build outputs* (target/, node_modules, bin/obj),
+which are per tree by construction.
+
+## A13. Application behaviour is not enforced
+
+wt supplies distinct coordinates to every tree and offers declared
+`lock`s for repos that want hard mutual exclusion. Whether an
+application honours injected values is out of scope (the problem
+statement's non-goal "process supervision" covers it). S2's "refuses
+loudly" is satisfied by: distinct values always, a declared lock when
+the repo wants refusal, and port-bound findings in `doctor`.
+
+## A14. Bounded runtime applies to wt's control plane
+
+Every operation wt performs on its own behalf (git, probes, locks,
+state) is bounded and has a timeout. Child processes the user asks for
+(one-shot commands, tasks, shells, sessions) run as long as they run;
+tasks may declare `timeout`. Idempotent re-run applies to lifecycle and
+state verbs (register, new, sync, remove, prune, doctor), not to running
+a user's command twice.
+
+## A15. Keep the approved verbs, schema keys and variable names
+
+This command surface is settled and is not to be renamed:
+
+    wt register | unregister | clone
+    wt new <label>/<name> [--branch B] [--from REF] [--detach] [--no-sync] [--verify]
+    wt list | remove | prune | path | doctor
+    wt run <task> [target]            # declared tasks; sync/test/lint/fmt/build are aliases
+    wt exec [target] -- <cmd…>        # one-shot door
+    wt shell [target]                 # interactive door
+    wt env [target] [--sh|--dotenv|--json]
+    wt open [target] [--agent X] [--no-attach] [--all]  /  wt close [target|--all]
+    wt destroy <task> [target]  /  wt refresh <task> [target]
+
+New verbs may be added (`adopt`, `forget`, `which`, `tasks`, `config`,
+`locks`). `.wt.toml` keys stay as they are (`ports`, `env`, `bin`,
+`copy`, `files` with `content`/`source`/`marker`, `task.*` with
+`run`/`exists`/`destroy`/`needs`/`lock`/`name`/`tied_to`/`env`/`cwd`/
+`timeout`/`description`, `dirs."sub"`, `adapters`); new keys may be
+added (`seed`, `ready_within`, `scope` is NOT introduced — `tied_to`
+stays). Variables stay: `WT_LABEL`, `WT_NAME`, `WT_NAME_SNAKE`,
+`WT_NAME_SHORT`, `WT_TARGET`, `WT_BRANCH`, `WT_ROOT`, `WT_REPO`
+(canonical path), `WT_HOME`, `WT_PORT_BASE`, `WT_PORT_<NAME>`,
+`WT_SESSION`, `WT_SELF`, `WT_TASK`; new ones may be added (`WT_SLOT`,
+`WT_BIN`, activation metadata). The canonical tree is named
+`canonical`. The managed exclude block keeps its marker text
+`# >>> wt managed >>>` / `# <<< wt managed <<<`. The three attached
+configs must parse unchanged.
+
+## A16. No state migration; a clean home is acceptable
+
+The existing `~/.wt` holds no worktrees and no resources (three
+canonical entries only, created today). The new implementation may
+require a fresh `$WT_HOME`; it must detect an old-format home and refuse
+with the remedy "move or delete it, then re-register". Port block
+geometry may change. The JSON envelope may change shape; no automation
+depends on the old one.
+
+## A17. `open` without tmux
+
+When attached to a TTY, `wt open --agent X` without tmux runs the agent
+in the foreground and says so; with `--no-attach`, `--all`, or no TTY
+it fails with a remedy. `list` reports sessions as unknown when tmux is
+absent. (This is the existing behaviour; R13 is satisfied by the clear
+message.)
+
+## A18. Three crates, state under `$WT_HOME`
+
+The pure core and the effects layer are separate crates; CLI and
+orchestration share the binary crate. All state wt needs to tear a tree
+down (resource snapshots, coordinates, rendered-file inventory) lives
+under `$WT_HOME`, keyed by tree identity, never only inside the tree.
+
+## A19. The shell door's promise is at spawn; rc files are detected, not fought
+
+`wt shell` starts the user's shell with the assembled environment. Shell
+startup files may alter PATH or other keys; wt cannot prevent that
+without owning the shell. The binding promise for the shell door is:
+the environment *handed to the shell* equals every other door's, and
+`wt doctor` (and the shell banner) detect and name the case where the
+running shell's PATH no longer begins with `WT_BIN`
+(`PATH_NOT_SHADOWED`, remedy: the `shell-init` guard or fixing the rc
+file). A1/A4 are read with that qualification for interactive shells
+only; tasks, `exec`, and the agent command inside a session are
+unaffected because they do not source rc files.
+
+## A20. Passthrough doors have no JSON envelope
+
+`exec`, `shell`, and an attaching `open` hand stdout/stderr and the exit
+code to the child; they refuse `--json` with a remedy. The machine
+contract for those cases is the exit code plus `wt env --json` (what the
+child will see) and `wt run --json` (captured output, one envelope).
+A10 is read with that exemption.
+
+## A21. Teardown never falls through to an installed binary
+
+A resource snapshot records, for each recipe, the absolute path the
+first argv word resolved to at snapshot time when it resolved inside a
+declared `bin` directory. At teardown, if that path no longer exists the
+recipe is not run; the resource is marked orphaned with the remedy
+"rebuild the tree's binaries or destroy by hand". wt does not stage
+copies of binaries or rendered files under `$WT_HOME`; rendered file
+*contents* referenced by a recipe's environment may be preserved in the
+snapshot if small (≤ 64 KiB), otherwise the same orphan rule applies.
+
+## A22. A resource without `run` is "declared"
+
+A task with `destroy` and no `run` is a resource the application
+creates. `wt run <it>` succeeds with the notice "declared; created by
+the application" and leaves it `declared`/`present` per the probe;
+`refresh` destroys if present and returns to `declared`. The orbitcloud
+acceptance config has been edited to drop its `run = "true"`.
+
+## A23. Render race with a concurrent human edit is an accepted residual
+
+Between wt's hash check of a rendered file and its rename, a human
+editor may save the same path. wt holds its render lock against other
+wt processes, not against editors; the window is documented and the
+provenance header tells the human the file is regenerated. No further
+mechanism is required. 
+
+## A24. Sessions hold the gate only while their inner door runs a task
+
+A tmux session's long-lived process is the agent or shell, launched
+through an inner `wt exec`; that inner door holds the tree gate only
+while *wt itself* is mutating (render/inventory), then releases it
+before handing control to the child. Sessions are therefore closed by
+`remove` under the exclusive gate as specified; the gate is not a
+liveness lease for sessions — tmux is. One-shot `wt exec` and `wt run`
+keep the gate for the child's lifetime as before. (Settles the
+deadlock; the specification defines the exact hand-off.)
+
+## A25. Teardown of a missing tree never runs a recipe that names a tree binary
+
+No recipe grammar restriction. At instance-freeze time the snapshot
+records the inventory of executable names found in the tree's declared
+`bin` directories. At teardown, if the tree root is gone (or any
+recorded `bin` directory is gone), the recipe is run only if none of its
+words (split on whitespace and the shell metacharacters `;|&()<>`,
+quotes stripped) equals a recorded executable name; otherwise the
+resource is `orphaned(exe_missing)` with the by-hand remedy. The tree's
+`bin` directories are never on PATH during such a teardown. Recipes in a
+repo with no `bin` declarations are unaffected. (Replaces the pinning
+rule; settles R3/S3.)
+
+## A26. No reincarnation over an undestroyed predecessor
+
+Tombstones are always record-free: a tree's resource records are gone
+before its tombstone exists. `wt new` for an address whose *live* entry
+has lost its directory but still has resource records refuses with
+`TREE_MISSING_PENDING` and the remedy `wt prune --records
+<label>/<name>`. A reincarnation therefore always starts from a
+record-free tombstone (or a record-free missing entry), inherits its
+coordinates and identity values, and the tombstone is deleted — no
+predecessor chain is kept. (Settles R4/S4; wording aligned with the
+final design's T6/T7.)
+
+## A27. Hostile rename of a tree directory during `remove` is an accepted residual
+
+`remove` verifies `.wt/tree_id` and the common gitdir through a directory
+fd under the exclusive gate immediately before the first destructive
+step. A non-wt actor renaming the directory between that check and
+git's own open is documented and not defended against. (Settles R5.)
+
+## A28. Repo-tied snapshots carry no tree-specific environment
+
+Repo-tied recipes may not reference tree-specific variables (already a
+validation rule); their snapshot `env` therefore excludes `WT_ROOT`,
+`WT_TARGET`, `WT_NAME*`, `WT_SLOT`, `WT_PORT_*`, `WT_SESSION`, `WT_BIN`,
+`PATH` and is compared for agreement on what remains. (Settles R6/S5.)
+
+## A29. Path-derived resource identities are shared by whatever occupies the path
+
+A recipe that derives a resource's identity from `$WT_ROOT` (orbitcloud's
+Aspire container names are SHA256 of the AppHost path) names the same
+external object for every checkout that ever occupies that path. When
+the predecessor's records are cleaned up after the directory was
+replaced, destroying that object also affects the replacement; this is
+the recipe's own semantics and is accepted. wt's guarantee is narrower:
+it never *runs* in the replacement directory and never puts the
+replacement's binaries on PATH (A25/T5). (Settles T5.)
+
+## A30. Pragmatic simplifications of crash-consistency machinery
+
+Decided by weighing hot-path cost against failure likelihood. These
+apply over the corresponding SPEC text; the spec's guarantees are weakened exactly as stated here and no
+further.
+
+1. **Rendering is single-phase.** No `intent` record. A rendered file is
+   wt's iff its bytes hash to the recorded `hash`; a crash between
+   writing the file and recording its hash makes the next door report
+   `RENDER_ONTO_USER_FILE` with the remedy `rm <path>`. The render lock
+   and the tracked/symlink refusals stay.
+2. **State RMW holds its lock across read-modify-write.** No `gen`
+   compare-and-retry; `STATE_CONTENDED` does not exist. RMW locks remain
+   leaf locks held for the duration of one read-modify-write only.
+3. **Failpoint tests are representative, not exhaustive.** One named
+   failpoint per lifecycle verb (`new` after `worktree add`, `sync`
+   mid-task, `remove` after destroy before `worktree remove`, render
+   after write) plus the resource destroy→record-drop boundary. The
+   resume/recovery *behaviour* specified for every transition still
+   holds; only the test matrix is reduced.
+
+Everything else in the crash-consistency model (atomic writes, derived
+phase, resume-from-first-unfinished-step, op claims, identity files,
+teardown snapshots, tombstones, the lock order) stands.
+
+## A31. Minimality review adopted
+
+An independent review with no access to the design history assessed
+every mechanism for BUILD / SIMPLIFY / CUT against R1–R13 and A1–A30.
+Its verdict table is adopted in full, with two exceptions and the clause
+edits it names:
+
+- Exceptions: (1) `shell` keeps the shared gate, at no cost — the gate
+  fd survives `execvp` (shells do not close inherited fds), so
+  `wt remove` of a tree someone is sitting in reports `TREE_IN_USE`
+  naming the shell; (2) the squat probe stays bind+connect on v4 only.
+- A28 is read as "stripped", not "compared for agreement": there is no
+  repo-tied agreement mechanism; the invoking tree's stripped
+  declaration is effective until an instance is frozen.
+- A30's "op claims stand" is read as: one op record in the tree state
+  file; no registry claim and no `op_id`.
+- The door parent process is dropped: passthrough doors `execvp` with
+  the gate fd inherited; a child that closes inherited fds releases the
+  gate early — accepted residual alongside A23/A27.
+- `forget` is folded into `remove`; the session hand-off ticket is
+  replaced by `wt exec --no-gate` (prelude, release, `execvp`), honoured
+  only under `$TMUX`.
+- Resources have three states (`declared`, `present`, `orphaned`) plus a
+  frozen `instance`, `external`, `last_probe`, `last_error`; probes
+  decide; no persisted op records, no preserved inputs.
+- Activation keeps `applied`/`prior`; `deactivate` restores without
+  comparing current values (a user edit to a tool-set key inside a door
+  is overridden by the next door; L3 is withdrawn).
+- Ports are recorded as an append-only name→index map.
+
+The review's under-built items are also adopted: probes must exit
+≥ 2 on infrastructure errors and the orbitcloud acceptance config gains
+`docker info >/dev/null 2>&1 || exit 2;` before its `exists`; `wt remove
+--keep-orphans`; `PATH_OCCUPIED` on `new`; lockfile drift against the
+base branch in `list`; `WT_BRANCH` documented as at-spawn; `.wt/logs`
+kept to the last 20 per task.

@@ -1,0 +1,74 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "adopt",
+  "data": {
+    "adopted": true,
+    "resumed": false,
+    "tree": {
+      "agent": null,
+      "behind_default": 0,
+      "branch": "adopted",
+      "canonical": false,
+      "detached_sha": null,
+      "dirty": {
+        "modified": 0,
+        "untracked": 0
+      },
+      "disk_kb": null,
+      "geometry": {
+        "base": 20000,
+        "port_base": 20016,
+        "stride": 16
+      },
+      "label": "repo",
+      "name": "adopted",
+      "path": "$ROOT/adopted",
+      "phase": "ready",
+      "ports": [
+        {
+          "bound": false,
+          "name": "http",
+          "port": 20016
+        }
+      ],
+      "resources": [
+        {
+          "external": false,
+          "has_instance": false,
+          "last_error": null,
+          "last_probe": null,
+          "name": "repo_adopted_f54fc4f2_service",
+          "reason": null,
+          "scope": ".",
+          "state": "declared",
+          "task": "service",
+          "tied_to": "tree",
+          "undeclared": false
+        }
+      ],
+      "session": "no",
+      "session_name": "wt_repo_adopted_451c69a9",
+      "slot": 1,
+      "sync": {
+        "at": null,
+        "changed": [],
+        "drift": [],
+        "state": "never"
+      },
+      "target": "repo/adopted",
+      "tree_id": "<tree_id>",
+      "upstream": null,
+      "verify": null
+    }
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

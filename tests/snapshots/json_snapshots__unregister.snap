@@ -1,0 +1,35 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "unregister",
+  "data": {
+    "artifacts": [
+      {
+        "action": "deleted",
+        "path": "$ROOT/repos/repo/.wt"
+      }
+    ],
+    "destroyed": [
+      {
+        "child": {
+          "code": 0,
+          "signal": null
+        },
+        "scope": ".",
+        "state": "dropped",
+        "task": "service"
+      }
+    ],
+    "label": "repo",
+    "unregistered": true
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

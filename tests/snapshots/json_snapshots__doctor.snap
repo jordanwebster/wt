@@ -1,0 +1,30 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "doctor",
+  "data": {
+    "counts": {
+      "error": 0,
+      "info": 1,
+      "warn": 0
+    },
+    "findings": [
+      {
+        "code": "NO_ADAPTER",
+        "message": "no built-in adapter matched this checkout",
+        "remedy": "configure tasks explicitly or add a supported project manifest",
+        "severity": "info",
+        "subject": "repo"
+      }
+    ]
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

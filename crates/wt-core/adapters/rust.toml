@@ -1,0 +1,48 @@
+name = "cargo"
+detect = ["Cargo.toml"]
+default_tool = "cargo"
+
+[[nudge]]
+want = "sccache"
+used_if_env = ["RUSTC_WRAPPER=sccache"]
+hint = "set RUSTC_WRAPPER=sccache in ~/.wt/config.toml [repos.<label>.env] to share compiled crates across trees"
+
+[tools.cargo]
+requires = "cargo"
+sync_inputs = ["Cargo.lock", "Cargo.toml"]
+seed = ["target"]
+
+[tools.cargo.task.sync]
+run = "cargo fetch"
+[tools.cargo.task.build]
+run = "cargo build --all-targets"
+[tools.cargo.task.test]
+run = "cargo test"
+[tools.cargo.task.lint]
+run = "cargo clippy --all-targets -- -D warnings"
+[tools.cargo.task.fmt]
+run = "cargo fmt"
+
+[tools.cargo-nightly-fmt]
+requires = "cargo"
+sync_inputs = ["Cargo.lock", "Cargo.toml"]
+seed = ["target"]
+sniff = [
+  { file = "rustfmt.toml", toml_key = "unstable_features" },
+  { file = ".rustfmt.toml", toml_key = "unstable_features" },
+  { file = "rustfmt.toml", toml_key = "group_imports" },
+  { file = ".rustfmt.toml", toml_key = "group_imports" },
+  { file = "rustfmt.toml", toml_key = "imports_granularity" },
+  { file = ".rustfmt.toml", toml_key = "imports_granularity" },
+]
+
+[tools.cargo-nightly-fmt.task.sync]
+run = "cargo fetch"
+[tools.cargo-nightly-fmt.task.build]
+run = "cargo build --all-targets"
+[tools.cargo-nightly-fmt.task.test]
+run = "cargo test"
+[tools.cargo-nightly-fmt.task.lint]
+run = "cargo clippy --all-targets -- -D warnings"
+[tools.cargo-nightly-fmt.task.fmt]
+run = "cargo +nightly fmt"

@@ -1,0 +1,76 @@
+name = "node"
+detect = ["package.json"]
+default_tool = "npm"
+
+[[nudge]]
+if_tool = "npm"
+want = "pnpm"
+hint = "pnpm shares one content-addressed store across trees; `pnpm import` converts package-lock.json"
+
+[tools.npm]
+lockfile = ["package-lock.json", "npm-shrinkwrap.json"]
+requires = "npm"
+sync_inputs = ["package-lock.json", "npm-shrinkwrap.json", "package.json"]
+seed = ["node_modules"]
+
+[tools.npm.task.sync]
+run = "npm ci"
+[tools.npm.task.test]
+run = "npm test"
+[tools.npm.task.lint]
+run = "npm run lint"
+[tools.npm.task.fmt]
+run = "npm run format"
+[tools.npm.task.build]
+run = "npm run build"
+
+[tools.pnpm]
+lockfile = ["pnpm-lock.yaml"]
+requires = "pnpm"
+sync_inputs = ["pnpm-lock.yaml", "package.json"]
+seed = ["node_modules"]
+
+[tools.pnpm.task.sync]
+run = "pnpm install --frozen-lockfile"
+[tools.pnpm.task.test]
+run = "pnpm test"
+[tools.pnpm.task.lint]
+run = "pnpm run lint"
+[tools.pnpm.task.fmt]
+run = "pnpm run format"
+[tools.pnpm.task.build]
+run = "pnpm run build"
+
+[tools.yarn]
+lockfile = ["yarn.lock"]
+requires = "yarn"
+sync_inputs = ["yarn.lock", "package.json"]
+seed = ["node_modules"]
+
+[tools.yarn.task.sync]
+run = "yarn install --immutable"
+[tools.yarn.task.test]
+run = "yarn test"
+[tools.yarn.task.lint]
+run = "yarn run lint"
+[tools.yarn.task.fmt]
+run = "yarn run format"
+[tools.yarn.task.build]
+run = "yarn run build"
+
+[tools.bun]
+lockfile = ["bun.lockb", "bun.lock"]
+requires = "bun"
+sync_inputs = ["bun.lockb", "bun.lock", "package.json"]
+seed = ["node_modules"]
+
+[tools.bun.task.sync]
+run = "bun install --frozen-lockfile"
+[tools.bun.task.test]
+run = "bun test"
+[tools.bun.task.lint]
+run = "bun run lint"
+[tools.bun.task.fmt]
+run = "bun run format"
+[tools.bun.task.build]
+run = "bun run build"

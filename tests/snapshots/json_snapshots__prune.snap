@@ -1,0 +1,29 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "prune",
+  "data": {
+    "applied": true,
+    "items": [
+      {
+        "action": "collect",
+        "reasons": [
+          "tombstone"
+        ],
+        "result": {
+          "collected": true
+        },
+        "target": "repo/work"
+      }
+    ]
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

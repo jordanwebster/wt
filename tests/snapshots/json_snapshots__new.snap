@@ -1,0 +1,79 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "new",
+  "data": {
+    "created": true,
+    "resumed": false,
+    "sync": null,
+    "tree": {
+      "agent": null,
+      "behind_default": 0,
+      "branch": "work",
+      "canonical": false,
+      "detached_sha": null,
+      "dirty": {
+        "modified": 0,
+        "untracked": 0
+      },
+      "disk_kb": null,
+      "geometry": {
+        "base": 20000,
+        "port_base": 20016,
+        "stride": 16
+      },
+      "label": "repo",
+      "name": "work",
+      "path": "$ROOT/wt-home/trees/repo/work",
+      "phase": "ready",
+      "ports": [
+        {
+          "bound": false,
+          "name": "http",
+          "port": 20016
+        }
+      ],
+      "resources": [
+        {
+          "external": false,
+          "has_instance": false,
+          "last_error": null,
+          "last_probe": null,
+          "name": "repo_work_a6ff5944_service",
+          "reason": null,
+          "scope": ".",
+          "state": "declared",
+          "task": "service",
+          "tied_to": "tree",
+          "undeclared": false
+        }
+      ],
+      "session": "no",
+      "session_name": "wt_repo_work_38e4c9ab",
+      "slot": 1,
+      "sync": {
+        "at": null,
+        "changed": [],
+        "drift": [],
+        "state": "never"
+      },
+      "target": "repo/work",
+      "tree_id": "<tree_id>",
+      "upstream": {
+        "ahead": 0,
+        "behind": 0
+      },
+      "verify": null
+    },
+    "verify": null
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

@@ -1,0 +1,22 @@
+---
+source: crates/wt-core/src/report.rs
+expression: "Envelope::<Value>::failure(\"new\", \"VERSION\",\nCoreError::new(crate::ExitClass::Conflict, \"NAME_TAKEN\", \"target exists\",\n\"choose another name\",),)"
+---
+{
+  "wt": {
+    "schema": 1,
+    "version": "VERSION"
+  },
+  "ok": false,
+  "command": "new",
+  "data": null,
+  "notices": [],
+  "error": {
+    "class": "conflict",
+    "exit": 4,
+    "code": "NAME_TAKEN",
+    "message": "target exists",
+    "remedy": "choose another name",
+    "details": null
+  }
+}

@@ -1,0 +1,22 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "exec",
+  "data": null,
+  "error": {
+    "class": "usage",
+    "code": "JSON_UNSUPPORTED",
+    "details": null,
+    "exit": 2,
+    "message": "passthrough doors have no JSON envelope",
+    "remedy": "use `wt env --json` or `wt run --json`"
+  },
+  "notices": [],
+  "ok": false,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

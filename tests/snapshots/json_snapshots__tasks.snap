@@ -1,0 +1,107 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "tasks",
+  "data": {
+    "target": "repo",
+    "tasks": [
+      {
+        "cwd": ".",
+        "description": null,
+        "id": "build",
+        "lock": null,
+        "needs": [],
+        "origin": "repo",
+        "resource": false,
+        "scope": ".",
+        "tied_to": null
+      },
+      {
+        "cwd": ".",
+        "description": null,
+        "id": "fmt",
+        "lock": null,
+        "needs": [],
+        "origin": "repo",
+        "resource": false,
+        "scope": ".",
+        "tied_to": null
+      },
+      {
+        "cwd": ".",
+        "description": null,
+        "id": "hello",
+        "lock": null,
+        "needs": [],
+        "origin": "repo",
+        "resource": false,
+        "scope": ".",
+        "tied_to": null
+      },
+      {
+        "cwd": ".",
+        "description": null,
+        "id": "lint",
+        "lock": null,
+        "needs": [],
+        "origin": "repo",
+        "resource": false,
+        "scope": ".",
+        "tied_to": null
+      },
+      {
+        "cwd": ".",
+        "description": null,
+        "id": "service",
+        "lock": null,
+        "needs": [],
+        "origin": "repo",
+        "resource": true,
+        "scope": ".",
+        "tied_to": "tree"
+      },
+      {
+        "cwd": ".",
+        "description": null,
+        "id": "sync",
+        "lock": null,
+        "needs": [],
+        "origin": "repo",
+        "resource": false,
+        "scope": ".",
+        "tied_to": null
+      },
+      {
+        "cwd": ".",
+        "description": null,
+        "id": "test",
+        "lock": null,
+        "needs": [],
+        "origin": "repo",
+        "resource": false,
+        "scope": ".",
+        "tied_to": null
+      },
+      {
+        "cwd": ".",
+        "description": null,
+        "id": "verify",
+        "lock": null,
+        "needs": [],
+        "origin": "repo",
+        "resource": false,
+        "scope": ".",
+        "tied_to": null
+      }
+    ]
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

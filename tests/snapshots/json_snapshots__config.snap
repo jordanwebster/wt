@@ -1,0 +1,174 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "config",
+  "data": {
+    "entries": [
+      {
+        "key": "effective",
+        "layer": "merged",
+        "scope": ".",
+        "value": {
+          "adapters": {},
+          "bin": [],
+          "copy": [],
+          "detect": {
+            "depth": null,
+            "ignore": null
+          },
+          "dirs": {},
+          "env": {
+            "APP_PORT": "$WT_PORT_HTTP"
+          },
+          "files": {
+            ".wt/generated": {
+              "content": "port=$WT_PORT_HTTP",
+              "marker": "#",
+              "mode": "0644",
+              "source": null
+            }
+          },
+          "ports": [
+            "http"
+          ],
+          "seed": [],
+          "sync_inputs": [
+            "README.md"
+          ],
+          "task": {
+            "build": {
+              "cwd": null,
+              "description": null,
+              "destroy": null,
+              "env": {},
+              "exists": null,
+              "lock": null,
+              "name": null,
+              "needs": [],
+              "ready_within": null,
+              "run": "true",
+              "snapshot_env": [],
+              "tied_to": null,
+              "timeout": null
+            },
+            "fmt": {
+              "cwd": null,
+              "description": null,
+              "destroy": null,
+              "env": {},
+              "exists": null,
+              "lock": null,
+              "name": null,
+              "needs": [],
+              "ready_within": null,
+              "run": "true",
+              "snapshot_env": [],
+              "tied_to": null,
+              "timeout": null
+            },
+            "hello": {
+              "cwd": null,
+              "description": null,
+              "destroy": null,
+              "env": {},
+              "exists": null,
+              "lock": null,
+              "name": null,
+              "needs": [],
+              "ready_within": null,
+              "run": "true",
+              "snapshot_env": [],
+              "tied_to": null,
+              "timeout": null
+            },
+            "lint": {
+              "cwd": null,
+              "description": null,
+              "destroy": null,
+              "env": {},
+              "exists": null,
+              "lock": null,
+              "name": null,
+              "needs": [],
+              "ready_within": null,
+              "run": "true",
+              "snapshot_env": [],
+              "tied_to": null,
+              "timeout": null
+            },
+            "service": {
+              "cwd": null,
+              "description": null,
+              "destroy": "rm -f \"$WT_ROOT/.service\"",
+              "env": {},
+              "exists": "test -f \"$WT_ROOT/.service\"",
+              "lock": null,
+              "name": null,
+              "needs": [],
+              "ready_within": null,
+              "run": "touch \"$WT_ROOT/.service\"",
+              "snapshot_env": [],
+              "tied_to": "tree",
+              "timeout": null
+            },
+            "sync": {
+              "cwd": null,
+              "description": null,
+              "destroy": null,
+              "env": {},
+              "exists": null,
+              "lock": null,
+              "name": null,
+              "needs": [],
+              "ready_within": null,
+              "run": "true",
+              "snapshot_env": [],
+              "tied_to": null,
+              "timeout": null
+            },
+            "test": {
+              "cwd": null,
+              "description": null,
+              "destroy": null,
+              "env": {},
+              "exists": null,
+              "lock": null,
+              "name": null,
+              "needs": [],
+              "ready_within": null,
+              "run": "true",
+              "snapshot_env": [],
+              "tied_to": null,
+              "timeout": null
+            },
+            "verify": {
+              "cwd": null,
+              "description": null,
+              "destroy": null,
+              "env": {},
+              "exists": null,
+              "lock": null,
+              "name": null,
+              "needs": [],
+              "ready_within": null,
+              "run": "true",
+              "snapshot_env": [],
+              "tied_to": null,
+              "timeout": null
+            }
+          }
+        }
+      }
+    ],
+    "target": "repo"
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

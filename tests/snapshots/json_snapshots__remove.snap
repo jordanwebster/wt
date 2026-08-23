@@ -1,0 +1,29 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "remove",
+  "data": {
+    "branch_deleted": false,
+    "destroyed": [
+      {
+        "child": null,
+        "scope": ".",
+        "state": "dropped",
+        "task": "service"
+      }
+    ],
+    "orphans_kept": [],
+    "removed": true,
+    "session_closed": false,
+    "target": "repo/work"
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

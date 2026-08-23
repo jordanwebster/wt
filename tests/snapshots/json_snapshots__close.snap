@@ -1,0 +1,23 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "close",
+  "data": {
+    "sessions": [
+      {
+        "closed": false,
+        "session": "wt_repo_canonical_be9ff5d9",
+        "target": "repo"
+      }
+    ]
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

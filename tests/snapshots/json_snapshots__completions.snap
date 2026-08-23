@@ -1,0 +1,19 @@
+---
+source: tests/json_snapshots.rs
+assertion_line: 128
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "completions",
+  "data": {
+    "script": "#compdef wt\n_wt() {\n  local -a targets\n  targets=(\"${(@f)$(command wt list --json | tr '{' '\\n' | sed -n 's/.*\\\"target\\\":\\\"\\([^\\\"]*\\)\\\".*/\\1/p')}\")\n  _describe 'wt target' targets\n}\ncompdef _wt wt",
+    "shell": "zsh"
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}
