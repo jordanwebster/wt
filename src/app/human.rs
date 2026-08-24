@@ -350,13 +350,13 @@ fn render_sessions(data: SessionsData, notices: &[Notice]) -> String {
     } else {
         format!("Updated {} sessions", rows.len())
     };
-    let facts = (rows.len() > 1)
-        .then(|| {
-            rows.into_iter()
-                .map(|(target, state)| ("session", format!("{target}: {state}")))
-                .collect()
-        })
-        .unwrap_or_default();
+    let facts = if rows.len() > 1 {
+        rows.into_iter()
+            .map(|(target, state)| ("session", format!("{target}: {state}")))
+            .collect()
+    } else {
+        Vec::new()
+    };
     block(headline, facts, notices)
 }
 
