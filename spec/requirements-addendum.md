@@ -375,3 +375,49 @@ does not exist before the first build. Tables are reserved for commands
 whose answer is tabular; `path` and `which` remain one-value
 answers. Rationale: the default interface is read by developers, while the
 stable envelope remains an explicit automation contract.
+
+## A33. Sessions are provisioning; agents are work
+
+`wt new` completes the tree, prints its summary, then creates its session and
+attaches when the session attachment predicate permits. A session without an
+agent runs the same interactive shell selected by `wt shell`; `wt open` never
+refuses merely because no agent is configured. `wt new --no-open` creates no
+session, while `--no-attach` still provisions one. `wt new` has no agent flag;
+`wt open --agent X` remains the explicit one-off agent selection. Rationale: a
+detached shell is inert, free, and reversible provisioning, while starting an
+agent spends resources and may cause work in the repository.
+
+## A34. Agent recipes run only on session creation
+
+An agent's `start` recipe runs only when wt successfully creates the tmux
+session. Attaching or switching to a live session never runs an agent recipe.
+A tree's agent field is written only for a `start` recipe that wt launched; it
+is the durable intent used for a later `resume`. Rationale: attaching is a
+navigation operation and must not duplicate paid or acting work.
+
+## A35. The session backend is declared once
+
+`session.backend` is `"tmux"` or `"none"`. When the key is absent,
+`register` checks once for tmux 3.2 or newer, writes the result to the user
+configuration, and reports the choice and how to change it. Later commands
+obey the setting and do not infer capability from the host. The session
+settings also contain `attach` and the optional `agent`; the removed
+top-level agent setting is an error whose remedy names `session.agent`.
+Rationale: stable configuration should not change behavior as PATH or host
+tooling changes between invocations.
+
+## A36. `open --all` provisions every live tree and resumes intent
+
+`wt open --all` ensures a session for every live tree and attaches to none.
+When a tree records an agent, wt uses that agent's `resume` recipe; otherwise
+it starts the explicitly configured `session.agent` or a shell. Rationale:
+the tree registry defines the live fleet, while the recorded agent denotes
+continuation rather than fresh work.
+
+## A37. A disabled backend refuses explicitly
+
+A17's foreground-agent fallback is replaced. With `session.backend =
+"none"`, `open` and `close` refuse with a message naming the setting and the
+value that enables tmux. `list`, `remove`, and `prune` execute no tmux process.
+Rationale: falling back from a declared session model to an unrecorded
+foreground process makes configuration lie and changes lifetime semantics.

@@ -157,12 +157,13 @@ A resource's scope is the scope at which its effective task was declared.
 
 ### 5.4 Settings and geometry
 ```
-Settings := { schema?: 1, trees_dir?, default_agent?, agents?: Map<String, { start: Cmd, resume: Cmd }>,
+Settings := { schema?: 1, trees_dir?, agents?: Map<String, { start: Cmd, resume: Cmd }>,
               ports?: { base?: u16 (20000), stride?: u8 (16) }, git?: { timeouts?: GitTimeouts }, task?: TaskDefaults,
-              locks?: LockWaits, session?: { status_bar?: bool (true), tmux_timeout?: Duration ("10s") },
+              locks?: LockWaits, session?: { backend?: "tmux"|"none", attach?: bool (true), agent?: String|null,
+                                            status_bar?: bool (true), tmux_timeout?: Duration ("10s") },
               logs?: { keep?: u16 (20) } ★, shell?: { program?: AbsPath }, repos?: Map<Label, Config> }
 ```
-Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ base ≤ 65535`; `1 ≤ stride ≤ 255`; `max_slots = (65536 − base)/stride ≥ 1`. Geometry is per incarnation and immutable (§7); `assemble` uses `TreeRec.geometry`; settings changes affect only future allocations; doctor `GEOMETRY_CHANGED` (info). Per tree `ports.len() ≤ geometry.stride` else `CONFIG_INVALID`. Built-in agents: `claude` (`claude` / `claude --continue`), `codex` (`codex` / `codex resume --last`).
+Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ base ≤ 65535`; `1 ≤ stride ≤ 255`; `max_slots = (65536 − base)/stride ≥ 1`; `session.agent`, when set, names a declared agent. The removed top-level agent setting is rejected with a remedy naming `session.agent`. At `register`, if `session.backend` is absent, wt checks once for tmux ≥ 3.2, writes `"tmux"` when found and `"none"` otherwise, and reports the choice and how to change it. No later command detects a session backend from installed tools. Geometry is per incarnation and immutable (§7); `assemble` uses `TreeRec.geometry`; settings changes affect only future allocations; doctor `GEOMETRY_CHANGED` (info). Per tree `ports.len() ≤ geometry.stride` else `CONFIG_INVALID`. Built-in agents: `claude` (`claude` / `claude --continue`), `codex` (`codex` / `codex resume --last`).
 
 ### 5.5 Tool variables (A15; ★ new)
 `WT_LABEL`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_TARGET`, `WT_BRANCH`, `WT_ROOT`, `WT_REPO` (canonical path), `WT_HOME` (resolved home), `WT_SLOT` ★, `WT_PORT_BASE`, `WT_PORT_<NAME>`, `WT_SESSION`, `WT_BIN` ★, `WT_ACTIVATION` ★ (the marker, §8.1), `WT_TASK`, `WT_SELF`. `WT_BRANCH` is the HEAD branch **at spawn** (empty if detached), read by one bounded `git symbolic-ref --short -q HEAD`; it is not updated while a shell or session lives (A31). All except `WT_ACTIVATION` are ordinary variables with a recorded prior (§8.1). **Tree-specific keys** (used by §10.3): `WT_ROOT`, `WT_TARGET`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_SLOT`, `WT_PORT_BASE`, `WT_PORT_*`, `WT_SESSION`, `WT_BIN`, `PATH`.
@@ -292,7 +293,7 @@ Used by `exec`, `run` (per plan, §10.1), `shell`, `open` and `env`. The door-eq
 cwd: caller's cwd if inside the tree, else the tree root (`run`: node cwd). `BIN_DIR_MISSING` is expected-state guidance: text mode renders an actionable `next` line in the command summary (or immediately before a passthrough child), including under `--quiet`; it is never formatted as `wt: BIN_DIR_MISSING — …`. Its notice remains in `notices[]` in JSON. Other notices go to stderr on a TTY or `--verbose`, and always to `notices[]`. Port-bound findings are reported by `list`/`status`/`doctor` (§12), never by a door (§0).
 
 ### 9.2 Spawn: `execvp`, the `run` parent, `--no-gate`
-**Passthrough doors** (`exec`, `shell`, foreground `open`): after D6 the wt process clears `FD_CLOEXEC` on the tree-lock and door-file fds and `execvp`s the child with the assembled env; the pid is unchanged, so the door file names the running process. `flock` is held by the open file description and survives `exec`; a child that closes every inherited fd releases the lock early — an accepted residual (A31; alongside A23/A27). Shells keep inherited fds, so `wt remove` of a tree someone is sitting in reports `TREE_IN_USE` naming the shell (A31 exception 1).
+**Passthrough doors** (`exec`, `shell`): after D6 the wt process clears `FD_CLOEXEC` on the tree-lock and door-file fds and `execvp`s the child with the assembled env; the pid is unchanged, so the door file names the running process. `flock` is held by the open file description and survives `exec`; a child that closes every inherited fd releases the lock early — an accepted residual (A31; alongside A23/A27). Shells keep inherited fds, so `wt remove` of a tree someone is sitting in reports `TREE_IN_USE` naming the shell (A31 exception 1).
 
 **`run` nodes** keep a wt parent for the child's lifetime: it holds the lock fds (`FD_CLOEXEC` set, not inherited), spawns the child with inherited stdio (`--json`: stdout captured, §9.3), tees output to the log, enforces `timeout`, waits, and exits with the child's code or `128+n` on signal death.
 
@@ -301,27 +302,31 @@ cwd: caller's cwd if inside the tree, else the tree root (`run`: node cwd). `BIN
 ### 9.3 Machine protocol per door (A20)
 | Door | `--json` | stdout / stderr | exit status |
 |---|---|---|---|
-| `exec`, `shell`, attaching `open` | refused: `JSON_UNSUPPORTED` (2), remedy "passthrough doors have no envelope: use `wt env --json` or `wt run --json`" | child's | child's |
-| `open --no-attach`, `open --all`, `close` | supported | one envelope / notices | classes |
+| `exec`, `shell` | refused: `JSON_UNSUPPORTED` (2), remedy "passthrough doors have no envelope: use `wt env --json` or `wt run --json`" | child's | child's |
+| `open`, `open --all`, `close` | supported; JSON suppresses attachment | one envelope / notices | classes |
 | `run <task>` text | — | child stdio tee'd to the log and inherited; notices on stderr | child's once started; signal `n` → `128+n` |
 | `run <task> --json` | supported | stdout = exactly one envelope; child stdout+stderr merged to stderr and the log | classes (0 / 6 `TASK_FAILED` with `error.details.child` / 8) |
 | `env` | supported | envelope or export lines | classes |
 
 Transport (A19): `exec` and `run` children receive the assembled env; `shell` execs `settings.shell.program` (default `$SHELL`, else `/bin/sh`) interactive, non-login, with the assembled env — the promise is at spawn; rc files may alter PATH; the pre-spawn banner names `WT_BIN`; `wt doctor` inside reports `PATH_NOT_SHADOWED` (remedy: the `shell-init` guard, §14.6, or the rc file).
 
-### 9.4 Sessions (A17)
-`wt open [target] [--agent X] [--no-attach] [--all]`, `wt close [target|--all]`. Requires tmux ≥ 3.2 (`TMUX_OLD` 5 otherwise).
+### 9.4 Sessions
+`wt open [target] [--agent X] [--no-attach] [--all]`, `wt close [target|--all]`. `session.backend = "tmux"` declares tmux as the backend; commands do not probe its version after registration.
 
 | Situation | Behaviour |
 |---|---|
-| tmux present, session exists (`has-session`) | release the tree lock (D2 fd and door file) as soon as `has-session` answers; then attach (`switch-client` inside tmux, else `attach-session`) or, with `--no-attach`, report. Attach is a tmux client and holds no wt lock. |
-| tmux present, absent | `tmux new-session -d -s <session_name> -c <root> -- wt exec --no-gate <target> -- <agent start|resume>` (the inner door assembles the environment; nothing is passed with `-e`); if `new-session` fails because the session now exists (a concurrent `open` won) proceed as "exists"; record `agent`; set `status-left` on that session; release the lock; attach unless `--no-attach` |
-| `--all` | every tree with a recorded `agent`: ensure with `resume`, never attach |
-| tmux absent | TTY with `--agent X` and neither `--no-attach` nor `--all`: print "tmux not found; running `X` in the foreground", `execvp` through §9.2, record `agent`; otherwise `TOOL_MISSING` (5); `list` reports `session: "unknown"` |
+| session exists (`has-session`) | release the tree lock (D2 fd and door file) as soon as `has-session` answers; never start or resume an agent; then attach when the attachment predicate below holds. Attach is a tmux client and holds no wt lock. |
+| session absent, agent selected by `--agent X` or `session.agent` | `tmux new-session -d -s <session_name> -c <root> -- wt exec --no-gate <target> -- <agent start>` (the inner door assembles the environment; nothing is passed with `-e`); record the agent only after this process creates the session. A concurrent creator wins without causing a second start. |
+| session absent, tree has a recorded agent and no explicit override | create through the recorded agent's `resume` recipe; the record is unchanged. |
+| session absent, no agent selected or recorded | create through `wt exec --no-gate <target> -- <interactive shell>` using the same program and arguments as `wt shell`; leave the tree's agent null. |
+| `--all` | every live tree gets a session; recorded agents use `resume`, unrecorded trees use `session.agent`'s `start` when configured and shells otherwise; never attach. |
+| `session.backend = "none"` | `open` and `close` refuse with `SESSION_DISABLED` (5), naming `session.backend` and the `"tmux"` value that enables them. `list`, `remove`, and `prune` execute no tmux process. There is no foreground-agent fallback. |
+
+Attachment occurs only when all hold: `session.attach = true`; stdout is a terminal; output is not JSON; `$WT_ACTIVATION` is unset; neither `--no-attach` nor `--all` applies. Inside tmux wt uses `switch-client`; otherwise it uses `attach-session`. These conditions affect attachment only: except for `new --no-open`, an absent session is still created. An agent therefore starts only when wt successfully creates a session, never when it attaches to one.
 
 Consequently the only tree-lock holders are passthrough doors (through their exec'd child), `run` parents, and doors in their prelude (D2–D6); sessions and attach clients hold none. Sessions are closed by `remove`/`unregister` (§11.4 step 5), by `prune` before tombstoning (§12), and by `wt close`.
 
-**`wt close [target|--all]`**: resolve the target; tmux absent → `TOOL_MISSING` (5); if `has-session <session_name>` → `kill-session` (no lock is taken: sessions hold none); JSON is always `{ sessions: [ { target, session: session_name, closed: bool } ] }` — one element without `--all` (`closed: false` when no session existed); `--all` iterates every live tree with a recorded `agent`. Idempotent.
+**`wt close [target|--all]`**: resolve the target; backend `none` → the refusal above; if `has-session <session_name>` → `kill-session` (no lock is taken: sessions hold none); JSON is always `{ sessions: [ { target, session: session_name, closed: bool } ] }` — one element without `--all` (`closed: false` when no session existed); `--all` iterates every live tree. Idempotent.
 
 ## 10. Tasks and resources
 ### 10.1 Plans, `lock_plan`, execution
@@ -415,7 +420,7 @@ TreeState := { schema: 1, tree_id, label, name, phase: initialising|bootstrappin
 
 ### 11.2 `new`
 ```
-wt new <label>/<name> [--branch B] [--from REF] [--detach] [--no-sync] [--verify] [--no-fetch] [--agent X]
+wt new <label>/<name> [--branch B] [--from REF] [--detach] [--no-sync] [--verify] [--no-fetch] [--no-open] [--no-attach]
 REF := <local branch> | <remote>/<branch> | pr:N | <PR URL> | <rev>
 ```
 `--from` bare `X`: `refs/heads/X` → `refs/remotes/origin/X` → rev; both present and different → local wins with `FROM_LOCAL_SHADOWS_REMOTE`; `origin/X` forces remote. Default start `origin/<default>` after a bounded fetch (`--no-fetch` skips; unpushed local default-branch commits need `--from main`). Default branch: `origin/HEAD` → `main`/`master`/`trunk` → HEAD, cached, refreshed on fetch. PR refspec by origin host: github `refs/pull/N/head`; gitlab `refs/merge-requests/N/head`; bitbucket `refs/pull-requests/N/from`; unknown: pull then merge-requests; fetched as `refs/wt/pr/N`, local branch `pr/N`, default name `pr-N`. A PR URL selects the label whose normalised origin (https or scp-style ssh, `.git` stripped) matches host and `owner/repo`; zero/many → error with remedy. `B` defaults to `<name>`; `--branch feature/x` without a name → `feature-x`. `AddSpec`: existing branch · `-b B <start>` with `--no-track` unless start is `refs/remotes/*` · `--detach`.
@@ -442,9 +447,11 @@ Decision (inside the registry transaction, under the exclusive tree lock):
 | S3 | `copy`, `seed` (§11.7); record `materialized`; exclude | 6, 5 |
 | S4 | `PORTS` (§7); assemble + declaration refresh (§10.5) + render (§8.3) | 5, 6 |
 | S5 | `sync` through §10.1 under the held lock (unless `--no-sync`) | 2,3,4,6 |
-| S6 | state: `sync.inputs`, phase `ready`, `op = null`, `verify_pending = --verify`; registry: record `agent` | 6, 5 |
+| S6 | state: `sync.inputs`, phase `ready`, `op = null`, `verify_pending = --verify` | 6 |
 | V | `--verify`: run `verify` through §10.1; state `verify = {at, ok, log}`, `verify_pending = false` | 2,3,4,6 |
 | F | release | — |
+
+After F, `new` prints its phase-1 human summary, then applies §9.4: with backend `tmux`, it ensures the session and attaches when the attachment predicate holds. `--no-open` skips both creation and attachment. `--no-attach` still creates the session. Backend `none` leaves the ready tree without a session. Agent selection comes only from `session.agent`; `new` has no agent flag.
 
 Failures: G → class 7/5/4, entry stays (`claimed`, resumable); S4/S5 → `failed`, tree remains (R3); V → `VERIFY_FAILED` (6), tree `ready` with `verify_pending` cleared. Never `created:false` without `ready`.
 
@@ -507,7 +514,7 @@ Run exactly once per incarnation at `new` S3 (never for canonical or adopted tre
 | `ADAPTER_TOOL_MISSING`, `ACCELERATOR_*`, `NO_LOCKFILE`, `NO_ADAPTER`, `NO_VERIFY` | §6 |
 | `NO_COORDINATION` (info: the label's effective root config declares no `ports`, no `env` alias and no resource, so parallel trees share the application's default coordinates; remedy "declare `ports`/`env` in `.wt.toml` or `$WT_HOME/config.toml [repos.<label>]`"; A13) | §12 |
 | `BIN_DIR_MISSING`, `PATH_NOT_SHADOWED`, `PORT_BOUND` (info); `EXCLUDE_MISSING`, `EXCLUDE_REPAIRED`, `ACTIVATION_IGNORED` | §9, §12, §4.2, §8.1 |
-| `IDENTIFIER_LONG` (resource name > 63); `TREE_IN_USE` (info, holders), `GIT_TOO_OLD` (< 2.31), `TMUX_OLD` (< 3.2) | §5, §13, tooling |
+| `IDENTIFIER_LONG` (resource name > 63); `TREE_IN_USE` (info, holders), `GIT_TOO_OLD` (< 2.31) | §5, §13, tooling |
 
 `wt prune [label] [--yes] [--merged] [--gone] [--records <target>]`: retries orphaned destroys (`Destroy` on `orphaned`); runs §11.4's missing-directory path for `missing` trees (ending in a tombstone); `git worktree prune`; deletes `STATE_ORPHAN` files; `--merged`/`--gone` remove clean trees so classified (dirty ⇒ `keep`). Before any step that creates a tombstone, `prune` `kill-session`s the address's session if tmux reports it (consented by the same prompt). `--records <target>` applies to **live entries** in phase `missing`, `replaced` or `remove-interrupted`: it drives that entry's records with `Destroy{teardown}` from their own snapshots (§10.3, `tree_missing = true` for `missing`/`replaced`) and never acts on any directory; it creates no tombstone (the entry stays live until `wt remove`/`wt new`). **Tombstone collection**: for each tombstone of the label, after the session check, delete the tombstone and recompute the exclude block in one registry RMW (5). Consent: TTY without `--yes` → prompt; **non-TTY without `--yes` → print the plan, exit 0 with `data.applied = false` and notice `CONFIRM_REQUIRED`** (prune is a report-then-act verb; §14.2).
 
@@ -561,7 +568,7 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 | `wt register [path] [--label L] [--move-to PATH] [--repair]` | yes (resumes/repairs) | §11.6 |
 | `wt unregister <label> [--yes] [--force]` | yes | §11.5 |
 | `wt clone <url> [--label L] [--path P]` | yes | `git clone` (class `clone`) to `P` (default `$PWD/<stem>`), then §11.6 |
-| `wt new <label>/<name> …` | yes (phase-aware) | §11.2 |
+| `wt new <label>/<name> [--branch B] [--from REF] [--detach] [--no-sync] [--verify] [--no-fetch] [--no-open] [--no-attach]` | yes (phase-aware) | §11.2 |
 | `wt adopt <path> [--label L] [--name N]` ★ | yes | §11.6 |
 | `wt remove <target> [--yes] [--force] [--delete-branch] [--keep-orphans] [--wait d]` | yes | §11.4 |
 | `wt sync [target] [--force]` | yes | §11.3 |
@@ -599,7 +606,7 @@ Control-plane deadlines per §13.3; user children run as long as they run. Idemp
 | 2 | usage | `CONFIRM_REQUIRED`, `JSON_UNSUPPORTED`, `USE_UNREGISTER`, `NO_GATE_REFUSED` |
 | 3 | not found | `NOT_FOUND` |
 | 4 | conflict | `NAME_TAKEN`, `BRANCH_IN_USE`, `LOCK_HELD`, `TREE_BUSY`, `TREE_IN_USE`, `SLOTS_EXHAUSTED`, `NAME_SHADOWS_LABEL`, `PATH_REGISTERED`, `GITDIR_REGISTERED`, `GEOMETRY_CONFLICT`, `PORTS_EXHAUSTED`, `IDENTITY_COLLISION`, `TREE_MISSING_PENDING` |
-| 5 | state | `TREE_DIRTY`, `CONFIG_INVALID` (+ subcodes), `SETTINGS_INVALID`, `ENV_UNDEFINED`, `TOOL_MISSING`, `COPY_TRACKED`, `RENDER_ONTO_*`, `PATH_OCCUPIED`, `HOME_OLD_FORMAT`, `*_CORRUPT`, `NOT_A_WORKTREE`, `VERIFY_PENDING`, `ROOT_IS_SYMLINK`, `TREE_REPLACED`, `TREES_EXIST`, `CWD_MISSING`, `FILE_SOURCE_MISSING`, `TMUX_OLD` |
+| 5 | state | `TREE_DIRTY`, `CONFIG_INVALID` (+ subcodes), `SETTINGS_INVALID`, `SESSION_DISABLED`, `ENV_UNDEFINED`, `TOOL_MISSING`, `COPY_TRACKED`, `RENDER_ONTO_*`, `PATH_OCCUPIED`, `HOME_OLD_FORMAT`, `*_CORRUPT`, `NOT_A_WORKTREE`, `VERIFY_PENDING`, `ROOT_IS_SYMLINK`, `TREE_REPLACED`, `TREES_EXIST`, `CWD_MISSING`, `FILE_SOURCE_MISSING` |
 | 6 | child failed | `SYNC_FAILED`, `TASK_FAILED`, `DESTROY_FAILED`, `VERIFY_FAILED`, `NOT_READY`, `RESOURCE_PROBE_FAILED`, `RESOURCE_ORPHANED`, `TASK_PROBE_FAILED` |
 | 7 | external | `GIT_FAILED`, `FETCH_FAILED`, `TMUX_FAILED` |
 | 8 | timeout | `TIMEOUT`, `LOCK_TIMEOUT` |
