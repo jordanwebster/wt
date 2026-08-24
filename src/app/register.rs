@@ -528,7 +528,29 @@ pub(crate) fn initial_config(
         .get(label)
         .cloned()
         .unwrap_or_default();
-    Ok(config::merge(&[(Layer::Repo, repo), (Layer::User, user)]))
+    let preliminary = config::merge(&[(Layer::Repo, repo.clone()), (Layer::User, user.clone())]);
+    let mut adapter = config::Config::default();
+    let mut hits = Vec::new();
+    for scope in std::iter::once(".").chain(preliminary.dirs.keys().map(String::as_str)) {
+        let relative = wt_core::model::RelPath::new(scope)?;
+        let snapshot = wt_sys::fsx::capture_dir_snapshot(
+            path,
+            &relative,
+            &[
+                "package.json".to_owned(),
+                "rustfmt.toml".to_owned(),
+                ".rustfmt.toml".to_owned(),
+            ],
+        )?;
+        let effective = config::effective_scope(&preliminary, scope)?;
+        hits.extend(wt_core::adapters::detect(&snapshot, &effective.adapters)?);
+    }
+    wt_core::adapters::apply_contribution(&mut adapter, &wt_core::adapters::contribution(&hits)?)?;
+    Ok(config::merge(&[
+        (Layer::Adapter, adapter),
+        (Layer::Repo, repo),
+        (Layer::User, user),
+    ]))
 }
 
 fn default_label(path: &Path) -> String {

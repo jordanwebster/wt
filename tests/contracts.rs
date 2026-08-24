@@ -892,6 +892,82 @@ fn copy_reporting_distinguishes_absent_and_tracked_sources() {
 }
 
 #[test]
+fn cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs() {
+    let h = Harness::new();
+    common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
+    let repo = h.repo("repo", "");
+    common::write(
+        &repo.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
+    );
+    common::write(&repo.join("Cargo.lock"), "# generated fixture lockfile\n");
+    common::write(&repo.join(".gitignore"), "/target/\n");
+    wt_sys::fsx::create_private_dir(&repo.join("target")).unwrap();
+    common::write(&repo.join("target/cache.bin"), "warm cache\n");
+    common::git(&repo, &["add", "Cargo.toml", "Cargo.lock", ".gitignore"]);
+    common::git(&repo, &["commit", "-qm", "add cargo fixture"]);
+    common::git(&repo, &["push", "-q", "origin", "main"]);
+
+    let probe_root = h.root.join("reflink-probe");
+    wt_sys::fsx::create_private_dir(&probe_root).unwrap();
+    let probe = wt_sys::fsx::copy_contained(
+        &repo,
+        &probe_root,
+        &wt_core::model::RelPath::new("target").unwrap(),
+        wt_sys::fsx::CopyPolicy::PreferReflink,
+    )
+    .unwrap();
+    let reflink_supported = probe.files.iter().all(|file| file.reflinked);
+
+    h.register(&repo);
+    let created = h.json(&["new", "repo/work", "--no-sync"]);
+    let tree_root = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
+    assert_eq!(
+        wt_sys::fsx::read_string(&tree_root.join("target/cache.bin")).unwrap(),
+        Some("warm cache\n".to_owned())
+    );
+    let fallback_reported = created["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "SEED_COPIED_NOT_CLONED");
+    assert_eq!(fallback_reported, !reflink_supported);
+
+    let target = wt_core::model::Target::parse("repo/work").unwrap();
+    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
+        &h.home.join(wt_core::model::tree_state_path(&target)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(state.materialized.iter().any(|entry| {
+        entry.path == "target" && entry.kind == wt_core::lifecycle::MaterializedKind::Seeded
+    }));
+
+    let synced = h.json(&["sync", "repo/work"]);
+    let inputs = synced["data"]["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|input| input["path"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(inputs, BTreeSet::from(["Cargo.lock", "Cargo.toml"]));
+
+    common::write(
+        &repo.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.2.0'\nedition='2021'\n",
+    );
+    common::git(&repo, &["add", "Cargo.toml"]);
+    common::git(&repo, &["commit", "-qm", "advance cargo input"]);
+    common::git(&repo, &["push", "-q", "origin", "main"]);
+    let status = h.json(&["status", "repo/work"]);
+    assert_eq!(
+        status["data"]["sync"]["drift"],
+        serde_json::json!(["Cargo.toml"])
+    );
+}
+
+#[test]
 fn sync_rechecks_tracked_render_paths_even_when_they_have_records() {
     let h = Harness::new();
     let repo = h.repo(
