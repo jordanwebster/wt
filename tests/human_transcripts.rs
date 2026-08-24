@@ -80,6 +80,31 @@ fn bin_directory_guidance_is_a_summary_fact_even_when_quiet() {
 }
 
 #[test]
+fn canonical_repair_transcript() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        "[files.'.wt/generated']\ncontent='generated for $WT_TARGET'\n",
+    );
+    h.register(&repo);
+    wt_sys::fsx::remove_path(&repo.join(".wt/tree_id")).unwrap();
+    wt_sys::fsx::remove_path(&repo.join(".wt/generated")).unwrap();
+
+    transcript(&h, "doctor_repair", &["doctor", "repo"]);
+    transcript(
+        &h,
+        "register_repair",
+        &[
+            "register",
+            repo.to_str().unwrap(),
+            "--label",
+            "repo",
+            "--repair",
+        ],
+    );
+}
+
+#[test]
 fn every_successful_verb_uses_intentional_human_text() {
     let h = Harness::new();
     let repo = h.repo("repo", HUMAN_FIXTURE);

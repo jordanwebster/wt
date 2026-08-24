@@ -1,0 +1,7 @@
+---
+source: tests/human_transcripts.rs
+expression: "normalize(h, &output.stdout)"
+---
+Doctor found 1 errors, 0 warnings, 0 notes
+  error  TREE_REPLACED repo - tree phase is replaced
+  next   run `wt register <ROOT>/repos/repo --label repo --repair`

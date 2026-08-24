@@ -361,3 +361,17 @@ The review's under-built items are also adopted: probes must exit
 --keep-orphans`; `PATH_OCCUPIED` on `new`; lockfile drift against the
 base branch in `list`; `WT_BRANCH` documented as at-spawn; `.wt/logs`
 kept to the last 20 per task.
+
+## A32. Human output is complete and JSON is opt-in
+
+Every verb has an intentional human rendering in text mode. JSON envelopes
+are emitted only when the caller passes `--json`, subject to A20's
+passthrough exception; there is no generic pretty-printed JSON fallback.
+Human output does not change shape when stdout is redirected, apart from
+colour being omitted according to `--color`. Summaries start with what
+happened, align concise lower-case facts underneath, and include an
+actionable `next` line for expected states such as a bin directory that
+does not exist before the first build. Tables are reserved for commands
+whose answer is tabular; `path` and `which` remain one-value
+answers. Rationale: the default interface is read by developers, while the
+stable envelope remains an explicit automation contract.

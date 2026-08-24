@@ -1,0 +1,9 @@
+---
+source: tests/human_transcripts.rs
+expression: "normalize(h, &output.stdout)"
+---
+repo is registered
+  path      <ROOT>/repos/repo
+  phase     ready
+  branch    main
+  declared  1 files

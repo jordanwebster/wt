@@ -289,7 +289,7 @@ Used by `exec`, `run` (per plan, §10.1), `shell`, `open` and `env`. The door-eq
 | D6 | render (§8.3) and, if the materialised set changed, exclude (§4.2) | 6, 5 |
 | D7 | spawn (§9.2); for `env` print and release | — |
 
-cwd: caller's cwd if inside the tree, else the tree root (`run`: node cwd). `BIN_DIR_MISSING` is always visible (stderr in text mode, `notices[]` in JSON); other notices go to stderr on a TTY or `--verbose`, and always to `notices[]`. Port-bound findings are reported by `list`/`status`/`doctor` (§12), never by a door (§0).
+cwd: caller's cwd if inside the tree, else the tree root (`run`: node cwd). `BIN_DIR_MISSING` is expected-state guidance: text mode renders an actionable `next` line in the command summary (or immediately before a passthrough child), including under `--quiet`; it is never formatted as `wt: BIN_DIR_MISSING — …`. Its notice remains in `notices[]` in JSON. Other notices go to stderr on a TTY or `--verbose`, and always to `notices[]`. Port-bound findings are reported by `list`/`status`/`doctor` (§12), never by a door (§0).
 
 ### 9.2 Spawn: `execvp`, the `run` parent, `--no-gate`
 **Passthrough doors** (`exec`, `shell`, foreground `open`): after D6 the wt process clears `FD_CLOEXEC` on the tree-lock and door-file fds and `execvp`s the child with the assembled env; the pid is unchanged, so the door file names the running process. `flock` is held by the open file description and survives `exec`; a child that closes every inherited fd releases the lock early — an accepted residual (A31; alongside A23/A27). Shells keep inherited fds, so `wt remove` of a tree someone is sitting in reports `TREE_IN_USE` naming the shell (A31 exception 1).
@@ -475,7 +475,7 @@ Classification (pure over git results): "unpushed" = upstream present ∧ `rev-l
 `wt unregister <label> [--yes] [--force]`: refuses while non-canonical trees exist (`TREES_EXIST` 5) unless `--force` (removes them first via §11.4, one consent prompt listing all). For the canonical tree the teardown is performed inline: §11.4 step 1 **without** its canonical refusal, then steps 2–8 exactly as written (step 8 is the **only** tree-tied teardown pass), then **every repo-tied record** with `Destroy{teardown}`; **failure barrier**: if any tree-tied or repo-tied record is not dropped → `DESTROY_FAILED` (6), the canonical tree stays `removing` → `remove-interrupted`, and nothing below runs; otherwise artefact cleanup — hash-owned rendered files deleted via §5.7, `.wt/` deleted (consented; it may hold application data), anything else `ARTIFACT_KEPT` with its exclusion retained; exclude block removed if nothing kept; registry and state records deleted. The checkout is never deleted.
 
 ### 11.6 `register` and `adopt`
-`wt register [path] [--label L] [--move-to PATH]`, `wt adopt <path> [--label L] [--name N]`:
+`wt register [path] [--label L] [--move-to PATH] [--repair]`, `wt adopt <path> [--label L] [--name N]`:
 
 | Step | Action | Lock |
 |---|---|---|
@@ -487,6 +487,8 @@ Classification (pure over git results): "unpushed" = upstream present ∧ `rev-l
 | I4 | state `ready`, `sync: null`, `op = null` | 6 |
 
 `adopt` requires the path to be listed by `git worktree list` of that gitdir (`NOT_A_WORKTREE` 5). `register --move-to` updates the canonical path and runs `git worktree repair`.
+
+`register <path> --label L --repair` recovers a canonical checkout in derived phase `replaced` because its `.wt/tree_id` marker is absent or wrong. It succeeds only when `path` is label `L`'s recorded canonical path, its common gitdir still matches the label, and the phase is `replaced`; otherwise `REPAIR_REFUSED` (5). Under the exclusive tree lock it rewrites the marker from the registry entry, recomputes the exclude block, and re-renders hash-owned files. It does not allocate or append coordinates, refresh resource declarations, alter resource/sync/verify state, or touch tombstones. `doctor`'s `TREE_REPLACED` remedy for a canonical tree names this command.
 
 ### 11.7 `copy` and `seed`
 Run exactly once per incarnation at `new` S3 (never for canonical or adopted trees). Source root = the canonical checkout. Per entry: source absent → `COPY_ABSENT` info; tracked by git → `COPY_TRACKED` (5), `new` aborts at S3 (`incomplete`, resumable); destination exists → `COPY_EXISTS` info, never overwritten; otherwise copied via §5.7 (files byte-for-byte with mode, directories recursively, symlinks recreated); record `materialized {kind: copied|seeded, hash: null}`. `seed` is the same with reflink attempted per file (`SEED_COPIED_NOT_CLONED` info on fallback; adapter default seeds per §6.1). Copied/seeded paths are not hash-owned and are never re-rendered or individually deleted; they are excluded while the tree or its tombstone exists. Task side effects outside the tree are never tracked; a side effect that occupies a future tree path surfaces as `PATH_OCCUPIED` at that tree's `new` (§11.2 G).
@@ -556,7 +558,7 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 ### 14.1 Commands (A15 verbs; ★ added)
 | Command | Idempotent | Owner |
 |---|---|---|
-| `wt register [path] [--label L] [--move-to PATH]` | yes (resumes) | §11.6 |
+| `wt register [path] [--label L] [--move-to PATH] [--repair]` | yes (resumes/repairs) | §11.6 |
 | `wt unregister <label> [--yes] [--force]` | yes | §11.5 |
 | `wt clone <url> [--label L] [--path P]` | yes | `git clone` (class `clone`) to `P` (default `$PWD/<stem>`), then §11.6 |
 | `wt new <label>/<name> …` | yes (phase-aware) | §11.2 |
@@ -576,8 +578,18 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 
 Global: `--json`, `--yes`, `--quiet`, `--verbose`, `--color auto|always|never`, `--home DIR`. Unknown subcommand → exit 2 with the three closest names; every `--help` carries one example.
 
+Text mode is the default and every verb has an intentional human rendering; JSON is emitted only with `--json` (passthrough exceptions: A20). There is no generic JSON-to-text fallback. Summaries use:
+
+```
+<headline: what happened>
+  <key>  <value>
+  next   <action, when one is needed>
+```
+
+The headline comes first. Fact keys are lower case and aligned within the block. Empty optional sections are omitted, but failures, orphaned resources and pending verification remain visible. `status`, `doctor` and `config` summarise rather than restating their JSON payloads. `path` prints only the root and `which` prints only the resolved executable (or `not found`). `list`, `tasks`, `config` and `locks` use aligned columns with a header where it aids reading; `tasks` is the effective task table, `config` shows effective keys with scope and layer, and `locks` is the coordination lock table. Output is plain ASCII apart from optional ANSI colour on existing diagnostic codes.
+
 ### 14.2 TTY and bounded-runtime rules (A14)
-Control-plane deadlines per §13.3; user children run as long as they run. Idempotent re-run applies to `register`, `unregister`, `clone`, `new`, `adopt`, `sync`, `remove`, `prune`, `open --no-attach`, `close`. stdin not a TTY ⇒ never prompt; stdout not a TTY or `--json` ⇒ no colour/pager/tables. Every destructive lifecycle verb whose only purpose is destruction (`remove`, `unregister`, `destroy`, `refresh`) prompts on a TTY without `--yes` and requires `--yes` otherwise (`CONFIRM_REQUIRED` 2); a declined prompt exits 0 with `*: false` and mutates nothing. **Exception**: `prune` is a report-then-act verb; without `--yes` on a non-TTY it prints its plan and exits 0 with `data.applied = false` and the notice `CONFIRM_REQUIRED` (§12).
+Control-plane deadlines per §13.3; user children run as long as they run. Idempotent re-run applies to `register`, `unregister`, `clone`, `new`, `adopt`, `sync`, `remove`, `prune`, `open --no-attach`, `close`. stdin not a TTY ⇒ never prompt. Human stdout has the same format when redirected as it has on a terminal; only ANSI colour is omitted according to `--color`. `--json` selects the envelope instead. Every destructive lifecycle verb whose only purpose is destruction (`remove`, `unregister`, `destroy`, `refresh`) prompts on a TTY without `--yes` and requires `--yes` otherwise (`CONFIRM_REQUIRED` 2); a declined prompt exits 0 with `*: false` and mutates nothing. **Exception**: `prune` is a report-then-act verb; without `--yes` on a non-TTY it prints its plan and exits 0 with `data.applied = false` and the notice `CONFIRM_REQUIRED` (§12).
 
 ### 14.3 Exit classes and error type
 | Code | Class | Examples |
