@@ -76,12 +76,21 @@ fn tree_findings(
     let report = list::tree_report(context, tree, true, false, probe)?;
     let phase = context.phase(tree, state.as_ref())?;
     if let Some((severity, code, remedy)) = phase_finding(phase) {
+        let remedy = if phase == wt_core::lifecycle::DerivedPhase::Replaced && tree.canonical {
+            format!(
+                "run `wt register {} --label {} --repair`",
+                tree.path.as_str(),
+                tree.label
+            )
+        } else {
+            remedy.to_owned()
+        };
         findings.push(finding(
             severity,
             code,
             report.target.clone(),
             format!("tree phase is {}", report.phase),
-            remedy,
+            &remedy,
         ));
     }
     if state.as_ref().is_some_and(|state| state.verify_pending) {

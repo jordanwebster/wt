@@ -175,6 +175,9 @@ pub struct Register {
     pub label: Option<String>,
     #[arg(long, value_name = "PATH")]
     pub move_to: Option<PathBuf>,
+    /// Restore a canonical checkout's missing wt identity marker.
+    #[arg(long)]
+    pub repair: bool,
 }
 
 #[derive(Debug, Args)]

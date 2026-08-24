@@ -15,7 +15,14 @@ use crate::cli::Register;
 use super::{door, executor, list, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Register) -> Result<Output, CoreError> {
-    perform(context, args.path, args.label, args.move_to, false)
+    perform(
+        context,
+        args.path,
+        args.label,
+        args.move_to,
+        args.repair,
+        false,
+    )
 }
 
 pub(crate) fn perform(
@@ -23,8 +30,17 @@ pub(crate) fn perform(
     path: PathBuf,
     label_arg: Option<String>,
     move_to: Option<PathBuf>,
+    repair: bool,
     cloned: bool,
 ) -> Result<Output, CoreError> {
+    if repair && move_to.is_some() {
+        return Err(CoreError::new(
+            ExitClass::Usage,
+            "REPAIR_REFUSED",
+            "--repair cannot be combined with --move-to",
+            "use --repair at the registered path or --move-to after moving the checkout",
+        ));
+    }
     if let Some(destination) = move_to {
         return move_existing(context, path, label_arg, destination);
     }
@@ -53,6 +69,48 @@ pub(crate) fn perform(
     let common = wt_sys::fsx::canonicalize(&git.common_dir()?)?;
     let label = Label::new(label_arg.unwrap_or_else(|| default_label(&path)))?;
     let target = Target::canonical(label.clone());
+
+    if repair {
+        let existing = context
+            .registry
+            .trees
+            .iter()
+            .find(|tree| tree.canonical && tree.label == label)
+            .cloned()
+            .ok_or_else(|| {
+                CoreError::new(
+                    ExitClass::State,
+                    "REPAIR_REFUSED",
+                    format!("label {label} has no registered canonical checkout"),
+                    "register the checkout without --repair",
+                )
+            })?;
+        let registered = &context.registry.labels[&label];
+        if existing.path.as_str() != path.to_string_lossy()
+            || registered.path.as_str() != path.to_string_lossy()
+            || registered.gitdir_id != gitdir_id(&common.to_string_lossy())
+        {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "REPAIR_REFUSED",
+                format!(
+                    "{} is not {label}'s registered canonical checkout",
+                    path.display()
+                ),
+                format!("run this command at {}", existing.path.as_str()),
+            ));
+        }
+        let state = context.read_state(&target)?;
+        if context.phase(&existing, state.as_ref())? != wt_core::lifecycle::DerivedPhase::Replaced {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "REPAIR_REFUSED",
+                format!("{label}'s canonical checkout is not replaced"),
+                "omit --repair for an ordinary idempotent registration",
+            ));
+        }
+        return repair_canonical(context, existing);
+    }
 
     if let Some(existing) = context
         .registry
@@ -191,7 +249,28 @@ pub(crate) fn perform(
         Ok(())
     })?;
     drop(token);
-    finish_with_door(context, tree, true, cloned, Some(prepared))
+    finish_with_door(context, tree, true, cloned, Some(prepared), false)
+}
+
+fn repair_canonical(context: &mut Context, tree: TreeRec) -> Result<Output, CoreError> {
+    let target = super::context::target_of(&tree);
+    let holder = context.holder(target.to_string(), "register")?;
+    let token = lock::tree(
+        &context.tree_lock_path(&target),
+        Mode::Exclusive,
+        &holder,
+        context.tree_wait(None),
+    )?;
+    wt_sys::fsx::write_nofollow(
+        Path::new(tree.path.as_str()),
+        &wt_core::model::RelPath::new(".wt/tree_id")?,
+        format!("{}\n", tree.tree_id).as_bytes(),
+        0o600,
+    )?;
+    door::recompute_exclude(context, &tree.label)?;
+    let prepared = door::repair_held(context, tree.clone(), "register")?;
+    drop(token);
+    finish_with_door(context, tree, false, false, Some(prepared), false)
 }
 
 fn resume_initialising(
@@ -222,7 +301,7 @@ fn resume_initialising(
         Ok(())
     })?;
     drop(token);
-    finish_with_door(context, tree, false, cloned, Some(prepared))
+    finish_with_door(context, tree, false, cloned, Some(prepared), false)
 }
 
 fn move_existing(
@@ -358,7 +437,7 @@ pub(crate) fn finish(
     registered: bool,
     _cloned: bool,
 ) -> Result<Output, CoreError> {
-    finish_with_door(context, tree, registered, _cloned, None)
+    finish_with_door(context, tree, registered, _cloned, None, true)
 }
 
 fn finish_with_door(
@@ -367,8 +446,10 @@ fn finish_with_door(
     registered: bool,
     _cloned: bool,
     prepared: Option<door::Door>,
+    refresh_declarations: bool,
 ) -> Result<Output, CoreError> {
     context.reload_registry()?;
+    let had_prepared = prepared.is_some();
     let door = if let Some(door) = prepared {
         door
     } else {
@@ -384,9 +465,14 @@ fn finish_with_door(
             }
             Err(error) => return Err(error),
         };
-        executor::refresh_all_declarations(context, &door)?;
+        if refresh_declarations {
+            executor::refresh_all_declarations(context, &door)?;
+        }
         door
     };
+    if had_prepared && refresh_declarations {
+        executor::refresh_all_declarations(context, &door)?;
+    }
     let config = door.config.clone();
     let catalog = context.task_catalog(&tree, &config)?;
     let mut resources = catalog

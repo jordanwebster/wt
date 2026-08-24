@@ -30,6 +30,7 @@ pub(crate) struct Door {
 struct PrepareOptions {
     force_env: bool,
     check_all_tracked: bool,
+    append_ports: bool,
     tree_token: Option<TreeToken>,
     door_token: Option<DoorToken>,
     state: Option<TreeState>,
@@ -119,6 +120,7 @@ pub(crate) fn enter(
         PrepareOptions {
             force_env,
             check_all_tracked: false,
+            append_ports: true,
             tree_token: Some(tree_token),
             door_token: Some(door_token),
             state,
@@ -156,6 +158,32 @@ pub(crate) fn enter_held(
         PrepareOptions {
             force_env,
             check_all_tracked,
+            append_ports: true,
+            tree_token: None,
+            door_token: None,
+            state,
+        },
+    )
+}
+
+/// Re-renders owned files while preserving the frozen registration record.
+pub(crate) fn repair_held(
+    context: &mut Context,
+    tree: TreeRec,
+    verb: &str,
+) -> Result<Door, CoreError> {
+    let target = target_of(&tree);
+    let holder = context.holder(target.to_string(), verb)?;
+    let state = context.read_state(&target)?;
+    prepare(
+        context,
+        target,
+        tree,
+        &holder,
+        PrepareOptions {
+            force_env: false,
+            check_all_tracked: true,
+            append_ports: false,
             tree_token: None,
             door_token: None,
             state,
@@ -173,13 +201,16 @@ fn prepare(
     let PrepareOptions {
         force_env,
         check_all_tracked,
+        append_ports,
         tree_token,
         door_token,
         state,
     } = options;
     let config = context.load_config(&tree)?;
-    let appended = wt_core::ports::append(&tree.ports, &config.ports, tree.geometry.stride)?;
-    if !appended.appended.is_empty() {
+    let appended = append_ports
+        .then(|| wt_core::ports::append(&tree.ports, &config.ports, tree.geometry.stride))
+        .transpose()?;
+    if let Some(appended) = appended.filter(|result| !result.appended.is_empty()) {
         let ports = appended.ports;
         context.mutate_registry(holder, |registry| {
             let record = registry
