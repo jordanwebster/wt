@@ -68,7 +68,10 @@ cargo build --release
 ./target/release/wt --version
 ```
 
-`wt` supports POSIX systems and requires Git 2.31 or newer. tmux 3.2 or newer
+`wt` supports POSIX systems and requires Git 2.31 or newer. Windows is not
+supported natively; under WSL it behaves as it does on Linux, and
+[docs/windows-support.md](docs/windows-support.md) records what a native
+port would involve. tmux 3.2 or newer
 is optional and enables detached sessions. The adapters only require the
 tools selected by the repository being used.
 
