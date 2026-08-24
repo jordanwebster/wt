@@ -15,7 +15,7 @@ that belonged to it.
 ```sh
 wt register ~/source/myapp
 wt new myapp/fix-login
-wt shell myapp/fix-login
+# new lands in the tree's session; leave it before removing the tree
 wt run test myapp/fix-login
 wt remove myapp/fix-login --yes
 ```
@@ -73,7 +73,8 @@ supported natively; under WSL it behaves as it does on Linux, and
 [docs/windows-support.md](docs/windows-support.md) records what a native
 port would involve. tmux 3.2 or newer
 is optional and enables detached sessions. The adapters only require the
-tools selected by the repository being used. On the first `wt register`, wt
+tools selected by the repository being used. On the first `wt register` (or
+the first session-relevant command in a home created by an older wt), wt
 records `session.backend = "tmux"` when tmux 3.2 or newer is available and
 `"none"` otherwise; it does not guess again on later commands.
 
@@ -105,7 +106,7 @@ $ wt new myapp/fix-login --from main
 Created myapp/fix-login
   path    /home/me/.wt/trees/myapp/fix-login
   branch  fix-login
-  sync    1 step passed
+  sync    1/1 passed
 
 # now inside the tree's session, with its environment active
 $ command -v myapp
@@ -120,7 +121,9 @@ wt status myapp/fix-login
 Worktrees normally live under `$WT_HOME/trees/<label>/<name>`. `wt path`
 prints the exact root, and `wtcd` from shell initialization changes to it.
 Use `--no-attach` to provision a detached session or `--no-open` to create no
-session at all.
+session at all. If session provisioning fails after the tree is ready, `new`
+still succeeds, reports the tree path, and points to `wt open <target>` as the
+retry.
 
 ### Doors: `run`, `exec`, `shell`, and sessions
 

@@ -143,7 +143,7 @@ a user's command twice.
 This command surface is settled and is not to be renamed:
 
     wt register | unregister | clone
-    wt new <label>/<name> [--branch B] [--from REF] [--detach] [--no-sync] [--verify]
+    wt new <label>/<name> [--branch B] [--from REF] [--detach] [--no-sync] [--verify] [--no-open] [--no-attach]
     wt list | remove | prune | path | doctor
     wt run <task> [target]            # declared tasks; sync/test/lint/fmt/build are aliases
     wt exec [target] -- <cmd…>        # one-shot door
@@ -387,6 +387,12 @@ session, while `--no-attach` still provisions one. `wt new` has no agent flag;
 detached shell is inert, free, and reversible provisioning, while starting an
 agent spends resources and may cause work in the repository.
 
+Session provisioning remains subordinate to tree creation. If creating the
+session fails after the tree is ready, `new` reports a warning with `wt open
+<target>` as the retry, returns the complete tree result, and exits 0. Rationale:
+automation must not lose the durable result of the primary operation because an
+optional navigation aid failed.
+
 ## A34. Agent recipes run only on session creation
 
 An agent's `start` recipe runs only when wt successfully creates the tmux
@@ -399,8 +405,10 @@ navigation operation and must not duplicate paid or acting work.
 
 `session.backend` is `"tmux"` or `"none"`. When the key is absent,
 `register` checks once for tmux 3.2 or newer, writes the result to the user
-configuration, and reports the choice and how to change it. Later commands
-obey the setting and do not infer capability from the host. The session
+configuration, and reports the choice and how to change it. A home registered
+before this key existed performs the same one-time resolution on its first
+`new`, `open`, or `close`, so upgrading cannot silently disable sessions. Later
+commands obey the written setting and do not infer capability from the host. The session
 settings also contain `attach` and the optional `agent`; the removed
 top-level agent setting is an error whose remedy names `session.agent`.
 Rationale: stable configuration should not change behavior as PATH or host
@@ -414,6 +422,12 @@ it starts the explicitly configured `session.agent` or a shell. Rationale:
 the tree registry defines the live fleet, while the recorded agent denotes
 continuation rather than fresh work.
 
+Failures are contained per tree: every remaining tree is attempted, each
+failure is present in the session data, and the final exit class is the worst
+outcome. Rationale: a batch that has already mutated earlier sessions must
+report partial progress instead of discarding it or making retries repeat the
+same hidden prefix.
+
 ## A37. A disabled backend refuses explicitly
 
 A17's foreground-agent fallback is replaced. With `session.backend =
@@ -421,3 +435,21 @@ A17's foreground-agent fallback is replaced. With `session.backend =
 value that enables tmux. `list`, `remove`, and `prune` execute no tmux process.
 Rationale: falling back from a declared session model to an unrecorded
 foreground process makes configuration lie and changes lifetime semantics.
+
+## A38. A wt-owned tmux status line is deferred
+
+wt does not set `status-left`, and there is no `session.status_bar` setting.
+Tree identity remains available through the tmux session name and the wt
+environment. A designed wt-owned status line may be added later together with
+its ownership and composition rules. Rationale: an inert setting promises
+control it does not provide, while overwriting a developer's status line
+without a composition design is not acceptable.
+
+## A39. Adapter seeds never become byte copies
+
+Repository-declared seeds continue to prefer reflinks and fall back to copying.
+Adapter-contributed defaults such as Cargo's `target` and Python's `.venv` are
+reflink-only: when cloning is unavailable, wt removes any partial destination,
+skips the entry, and reports `SEED_SKIPPED_NO_REFLINK`. Rationale: an adapter
+default must not turn routine tree creation into an implicit multi-gigabyte
+copy on a filesystem that lacks cloning.
