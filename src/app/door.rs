@@ -7,7 +7,7 @@ use wt_core::env::{EnvInputs, EnvOutput};
 use wt_core::lifecycle::{DerivedPhase, Materialized, MaterializedKind, TreeState};
 use wt_core::model::{RelPath, Target, TreeIdentity, TreeRec};
 use wt_core::render::{Decision as RenderDecision, RenderRecord};
-use wt_core::report::{Notice, NoticeLevel};
+use wt_core::report::{Notice, NoticeGuidance, NoticeLevel};
 use wt_core::resource::ResourceState;
 use wt_core::{CoreError, ExitClass};
 use wt_sys::lock::{self, DoorToken, Mode, TreeToken};
@@ -55,16 +55,9 @@ impl Door {
     pub fn emit_notices(&self, context: &Context) {
         for notice in &self.notices {
             if notice.code == "BIN_DIR_MISSING" {
-                let path = notice
-                    .message
-                    .strip_prefix("declared bin directory ")
-                    .and_then(|message| message.strip_suffix(" is missing"))
-                    .unwrap_or("the declared binary directory");
-                let target = notice
-                    .subject
-                    .clone()
-                    .unwrap_or_else(|| self.target.to_string());
-                eprintln!("  next  run `wt build {target}` to create {path}");
+                if let Some(next) = notice.next_step() {
+                    eprintln!("  next  {next}");
+                }
             } else if !context.quiet && (context.tty.stderr || context.verbose) {
                 eprintln!("wt: {} — {}", notice.code, notice.message);
             }
@@ -141,6 +134,7 @@ pub(crate) fn enter(
             code: "TREE_NOT_READY".to_owned(),
             subject: Some(door.target.to_string()),
             message: "tree is usable but its last lifecycle operation failed".to_owned(),
+            guidance: None,
         };
         context.pending_notices.push(notice.clone());
         door.notices.push(notice);
@@ -275,7 +269,7 @@ fn prepare(
         state.as_ref(),
         check_all_tracked,
     )?;
-    let notices = env_notices(&target, &env);
+    let notices = env_notices(&target, &env, effective.tasks.contains_key("build"));
     context.pending_notices.extend(notices.clone());
     let cwd = door_cwd(context, &tree);
     Ok(Door {
@@ -334,7 +328,7 @@ fn present_resource_env_from(
     Ok(contributed)
 }
 
-fn env_notices(target: &Target, output: &EnvOutput) -> Vec<Notice> {
+fn env_notices(target: &Target, output: &EnvOutput, has_build_task: bool) -> Vec<Notice> {
     let subject = Some(target.to_string());
     let mut notices = output
         .report
@@ -345,6 +339,11 @@ fn env_notices(target: &Target, output: &EnvOutput) -> Vec<Notice> {
             code: "BIN_DIR_MISSING".to_owned(),
             subject: subject.clone(),
             message: format!("declared bin directory {path} is missing"),
+            guidance: Some(NoticeGuidance::MissingBin {
+                target: target.to_string(),
+                path: path.clone(),
+                has_build_task,
+            }),
         })
         .collect::<Vec<_>>();
     if output.report.activation_ignored {
@@ -353,6 +352,7 @@ fn env_notices(target: &Target, output: &EnvOutput) -> Vec<Notice> {
             code: "ACTIVATION_IGNORED".to_owned(),
             subject: subject.clone(),
             message: "invalid WT_ACTIVATION metadata was ignored".to_owned(),
+            guidance: None,
         });
     }
     notices.extend(output.report.kept.iter().map(|key| Notice {
@@ -360,6 +360,7 @@ fn env_notices(target: &Target, output: &EnvOutput) -> Vec<Notice> {
         code: "ENV_KEPT".to_owned(),
         subject: subject.clone(),
         message: format!("kept the caller's value for {key}"),
+        guidance: None,
     }));
     notices.sort_by(|left, right| {
         (&left.level, &left.code, &left.subject, &left.message).cmp(&(

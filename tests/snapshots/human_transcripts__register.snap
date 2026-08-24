@@ -2,7 +2,7 @@
 source: tests/human_transcripts.rs
 expression: "normalize(h, &output.stdout)"
 ---
-wt: [33mSESSION_BACKEND_SELECTED[0m — session backend set to `tmux`; change `session.backend` in $WT_HOME/config.toml to choose another
+sessions: tmux 3.4 (set session.backend to change)
 Registered repo
   path      <ROOT>/repos/repo
   phase     ready

@@ -7,7 +7,7 @@ expression: "normalize(value, &h.root)"
   "data": {
     "counts": {
       "error": 0,
-      "info": 1,
+      "info": 2,
       "warn": 0
     },
     "findings": [
@@ -17,6 +17,13 @@ expression: "normalize(value, &h.root)"
         "remedy": "configure tasks explicitly or add a supported project manifest",
         "severity": "info",
         "subject": "repo"
+      },
+      {
+        "code": "SESSION_BACKEND",
+        "message": "session backend is tmux",
+        "remedy": "set `session.backend` in `$WT_HOME/config.toml` to change it",
+        "severity": "info",
+        "subject": "sessions"
       }
     ]
   },

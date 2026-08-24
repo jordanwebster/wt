@@ -102,7 +102,6 @@ pub struct SessionSettings {
     pub backend: SessionBackend,
     pub attach: bool,
     pub agent: Option<String>,
-    pub status_bar: bool,
     pub tmux_timeout: String,
 }
 
@@ -112,7 +111,6 @@ impl Default for SessionSettings {
             backend: SessionBackend::None,
             attach: true,
             agent: None,
-            status_bar: true,
             tmux_timeout: "10s".to_owned(),
         }
     }
@@ -284,6 +282,22 @@ pub fn declare_backend(source: &str, backend: SessionBackend) -> Result<String, 
     if backend_is_declared(source)? {
         return Ok(source.to_owned());
     }
+    let table = source.parse::<toml::Table>().map_err(|error| {
+        CoreError::new(
+            ExitClass::State,
+            "SETTINGS_INVALID",
+            error.to_string(),
+            "fix `$WT_HOME/config.toml`",
+        )
+    })?;
+    if table.contains_key("session") && session_header_end(source).is_none() {
+        return Err(CoreError::new(
+            ExitClass::State,
+            "SETTINGS_INVALID",
+            "cannot add session.backend to a non-table session declaration",
+            "rewrite `session = { ... }` as a `[session]` table, then retry",
+        ));
+    }
     let mut output = source.to_owned();
     if !output.is_empty() && !output.ends_with('\n') {
         output.push('\n');
@@ -439,5 +453,14 @@ mod tests {
         let settings = parse(&updated).unwrap();
         assert_eq!(settings.session.backend, SessionBackend::Tmux);
         assert!(!settings.session.attach);
+    }
+
+    #[test]
+    fn backend_declaration_explains_how_to_rewrite_an_inline_session_table() {
+        let source = "session = { attach = false }\n";
+        let error = declare_backend(source, SessionBackend::Tmux).unwrap_err();
+        assert_eq!(error.code.0, "SETTINGS_INVALID");
+        assert!(error.remedy.contains("[session]"));
+        assert!(error.remedy.contains("retry"));
     }
 }

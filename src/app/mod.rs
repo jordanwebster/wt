@@ -160,9 +160,21 @@ pub fn main(cli: Cli) -> i32 {
                         let _ = writeln!(std::io::stderr(), "wt: {} — {}", code, notice.message);
                     }
                 }
+                if matches!(human_kind, human::HumanKind::Run) {
+                    let guidance = human::with_expected_next(String::new(), &output.notices);
+                    if !guidance.is_empty() {
+                        let _ = writeln!(std::io::stderr(), "{guidance}");
+                    }
+                }
                 let text = output
                     .text
-                    .map(|text| human::with_expected_next(text, &output.notices))
+                    .map(|text| {
+                        if matches!(human_kind, human::HumanKind::Run) {
+                            text
+                        } else {
+                            human::with_expected_next(text, &output.notices)
+                        }
+                    })
                     .unwrap_or_else(|| human_kind.render(&output.data, &output.notices));
                 write_stdout(text);
             }

@@ -6,12 +6,12 @@ Effective config for repo/work
   key          scope  layer   value
   adapters     .      merged  -
   bin          .      merged  bin
-  copy         .      merged  
+  copy         .      merged  -
   detect       .      merged  depth, ignore
   dirs         .      merged  -
-  env          .      merged  
+  env          .      merged  -
   files        .      merged  -
-  ports        .      merged  
-  seed         .      merged  
+  ports        .      merged  -
+  seed         .      merged  -
   sync_inputs  .      merged  README.md
   task         .      merged  build, fmt, hello, lint, service, sync, test

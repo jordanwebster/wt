@@ -586,6 +586,7 @@ fn finish_under_lock(
                     code: "COPY_ABSENT".to_owned(),
                     subject,
                     message: format!("copy source {path} is absent"),
+                    guidance: None,
                 });
                 continue;
             }
@@ -607,6 +608,7 @@ fn finish_under_lock(
                     code: "COPY_EXISTS".to_owned(),
                     subject,
                     message: format!("copy destination {path} already exists"),
+                    guidance: None,
                 });
                 continue;
             }
@@ -625,6 +627,7 @@ fn finish_under_lock(
                             message: format!(
                                 "adapter seed {path} was skipped because reflink is unavailable"
                             ),
+                            guidance: None,
                         });
                         continue;
                     }
@@ -638,6 +641,7 @@ fn finish_under_lock(
                     code: "SEED_COPIED_NOT_CLONED".to_owned(),
                     subject,
                     message: format!("seed {path} was copied because reflink was unavailable"),
+                    guidance: None,
                 });
             }
             copied.push(Materialized {
@@ -876,6 +880,7 @@ fn source_notices(
             code: code.to_owned(),
             subject: Some(target.to_string()),
             message: "local branch takes precedence over a different origin branch".to_owned(),
+            guidance: None,
         });
     }
     notices

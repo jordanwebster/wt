@@ -426,8 +426,13 @@ fn render_doctor(data: DoctorData, notices: &[Notice]) -> String {
         "Doctor found no problems".to_owned()
     } else {
         format!(
-            "Doctor found {} errors, {} warnings, {} notes",
-            data.counts.error, data.counts.warn, data.counts.info
+            "Doctor found {} {}, {} {}, {} {}",
+            data.counts.error,
+            plural(data.counts.error, "error", "errors"),
+            data.counts.warn,
+            plural(data.counts.warn, "warning", "warnings"),
+            data.counts.info,
+            plural(data.counts.info, "note", "notes")
         )
     };
     let mut facts = Vec::new();
@@ -541,16 +546,14 @@ fn render_run(value: &Value, notices: &[Notice]) -> String {
                 ]
             })
             .collect::<Vec<_>>();
-        return with_expected_next(
-            table(
-                format!("Plan for {task}"),
-                ["task", "scope", "layer", "cwd"],
-                rows,
-            ),
-            notices,
+        return table(
+            format!("Plan for {task}"),
+            ["task", "scope", "layer", "cwd"],
+            rows,
         );
     }
-    with_expected_next(String::new(), notices)
+    let _ = notices;
+    String::new()
 }
 
 fn format_sync(sync: &wt_core::report::SyncTreeReport) -> String {
@@ -569,7 +572,15 @@ fn format_steps(steps: &[wt_core::report::StepReport]) -> String {
         "no steps".to_owned()
     } else {
         let passed = steps.iter().filter(|step| step.status == "ok").count();
-        format!("{passed}/{} passed", steps.len())
+        let skipped = steps
+            .iter()
+            .filter(|step| matches!(step.status.as_str(), "skipped" | "present"))
+            .count();
+        if skipped == 0 {
+            format!("{passed}/{} passed", steps.len())
+        } else {
+            format!("{passed} passed, {skipped} skipped")
+        }
     }
 }
 
@@ -577,7 +588,13 @@ fn summarize_config(key: &str, value: &Value) -> String {
     if key == "env" {
         return value
             .as_object()
-            .map(|values| values.keys().cloned().collect::<Vec<_>>().join(", "))
+            .map(|values| {
+                if values.is_empty() {
+                    "-".to_owned()
+                } else {
+                    values.keys().cloned().collect::<Vec<_>>().join(", ")
+                }
+            })
             .unwrap_or_default();
     }
     summarize_value(value)
@@ -589,14 +606,20 @@ fn summarize_value(value: &Value) -> String {
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
         Value::String(value) => value.clone(),
-        Value::Array(values) => values
-            .iter()
-            .map(|value| match value {
-                Value::String(value) => value.clone(),
-                _ => compact(value),
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
+        Value::Array(values) => {
+            if values.is_empty() {
+                "-".to_owned()
+            } else {
+                values
+                    .iter()
+                    .map(|value| match value {
+                        Value::String(value) => value.clone(),
+                        _ => compact(value),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        }
         Value::Object(values) => {
             let keys = values.keys().cloned().collect::<Vec<_>>();
             if keys.is_empty() {
@@ -633,16 +656,16 @@ fn expected_next(notices: &[Notice]) -> Vec<(&'static str, String)> {
     notices
         .iter()
         .filter(|notice| notice.code == "BIN_DIR_MISSING")
-        .map(|notice| {
-            let target = notice.subject.as_deref().unwrap_or("the tree");
-            let path = notice
-                .message
-                .strip_prefix("declared bin directory ")
-                .and_then(|message| message.strip_suffix(" is missing"))
-                .unwrap_or("the declared binary directory");
-            ("next", format!("run `wt build {target}` to create {path}"))
-        })
+        .filter_map(|notice| notice.next_step().map(|step| ("next", step)))
         .collect()
+}
+
+fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 {
+        singular
+    } else {
+        plural
+    }
 }
 
 pub(crate) fn with_expected_next(mut text: String, notices: &[Notice]) -> String {

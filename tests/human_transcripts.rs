@@ -64,6 +64,26 @@ fn redirected_output_matches_the_terminal_text() {
         assert!(redirected.stderr.is_empty());
         assert_eq!(terminal_text(&terminal.stdout), redirected.stdout);
     }
+
+    let terminal_h = Harness::new();
+    let terminal_repo = terminal_h.repo("repo", HUMAN_FIXTURE);
+    terminal_h.register(&terminal_repo);
+    let terminal = terminal_h.pty_output(&["new", "repo/work", "--no-sync"], b"");
+    assert_eq!(terminal.child.code, Some(0));
+
+    let redirected_h = Harness::new();
+    let redirected_repo = redirected_h.repo("repo", HUMAN_FIXTURE);
+    redirected_h.register(&redirected_repo);
+    let redirected = redirected_h
+        .wt()
+        .args(["new", "repo/work", "--no-sync"])
+        .output()
+        .unwrap();
+    assert!(redirected.status.success());
+    assert_eq!(
+        terminal_text(normalize(&terminal_h, &terminal.stdout).as_bytes()),
+        normalize(&redirected_h, &redirected.stdout).into_bytes()
+    );
 }
 
 #[test]
@@ -77,6 +97,21 @@ fn bin_directory_guidance_is_a_summary_fact_even_when_quiet() {
     assert!(!text.contains("wt: BIN_DIR_MISSING"));
     assert!(text.contains("  next"));
     assert!(text.contains("wt build repo/work"));
+}
+
+#[test]
+fn new_calls_skipped_sync_nodes_skipped() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        "[task.sync]\nrun='true'\nneeds=['noop']\n[task.noop]\nrun='true'\nexists='true'\n",
+    );
+    h.register(&repo);
+    let output = h.wt().args(["new", "repo/work"]).output().unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("1 passed, 1 skipped"), "{text}");
+    assert!(!text.contains("1/2 passed"), "{text}");
 }
 
 #[test]

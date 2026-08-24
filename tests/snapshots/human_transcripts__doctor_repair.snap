@@ -2,6 +2,8 @@
 source: tests/human_transcripts.rs
 expression: "normalize(h, &output.stdout)"
 ---
-Doctor found 1 errors, 0 warnings, 0 notes
+Doctor found 1 error, 0 warnings, 1 note
   error  TREE_REPLACED repo - tree phase is replaced
   next   run `wt register <ROOT>/repos/repo --label repo --repair`
+  note   SESSION_BACKEND sessions - session backend is tmux
+  next   set `session.backend` in `$WT_HOME/config.toml` to change it

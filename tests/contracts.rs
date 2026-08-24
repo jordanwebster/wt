@@ -401,6 +401,27 @@ fn session_verbs_resolve_a_backend_for_preexisting_homes_once() {
 }
 
 #[test]
+fn register_explains_how_to_rewrite_an_inline_session_table() {
+    let h = Harness::new();
+    common::write(
+        &h.home.join("config.toml"),
+        "session = { attach = false }\n",
+    );
+    let repo = h.repo("repo", BASIC);
+    let output = h
+        .wt()
+        .args(["register", repo.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("rewrite `session = { ... }`"));
+    let config = wt_sys::fsx::read_string(&h.home.join("config.toml"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(config, "session = { attach = false }\n");
+}
+
+#[test]
 fn new_keeps_its_payload_when_session_creation_fails() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
@@ -1332,7 +1353,8 @@ fn door_notices_stay_in_json_and_missing_bins_render_as_next_steps() {
         .assert()
         .success()
         .stderr(predicate::str::contains("next"))
-        .stderr(predicate::str::contains("wt build repo"))
+        .stderr(predicate::str::contains("create "))
+        .stderr(predicate::str::contains("wt build repo").not())
         .stderr(predicate::str::contains("BIN_DIR_MISSING").not());
     assert!(h.json(&["env", "repo"])["notices"]
         .as_array()
@@ -1344,6 +1366,23 @@ fn door_notices_stay_in_json_and_missing_bins_render_as_next_steps() {
         .assert()
         .code(6)
         .stdout(predicate::str::contains("BIN_DIR_MISSING"));
+}
+
+#[test]
+fn text_run_keeps_wt_guidance_off_the_child_stdout() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        "bin=['missing-bin']\n[task.print-version]\nrun='printf 1.2.3'\n",
+    );
+    h.register(&repo);
+    h.wt()
+        .args(["run", "print-version", "repo"])
+        .assert()
+        .success()
+        .stdout("1.2.3")
+        .stderr(predicate::str::contains("next"))
+        .stderr(predicate::str::contains("missing-bin"));
 }
 
 #[test]
@@ -1632,6 +1671,7 @@ fn doctor_condition_contracts_cover_every_documented_code() {
         "NO_ADAPTER",
         "NO_VERIFY",
         "NO_COORDINATION",
+        "SESSION_BACKEND",
         "BIN_DIR_MISSING",
         "PATH_NOT_SHADOWED",
         "PORT_BOUND",

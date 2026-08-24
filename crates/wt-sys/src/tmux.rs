@@ -90,13 +90,6 @@ impl Tmux {
         success(output, "create tmux session").map(|_| ())
     }
 
-    /// Sets the session-local status-left text to identify the wt tree.
-    pub fn set_status_left(&self, session: &str, target: &str) -> Result<()> {
-        let value = format!("[{target}] ");
-        let output = self.status(&["set-option", "-t", session, "status-left", &value])?;
-        success(output, "set tmux status-left").map(|_| ())
-    }
-
     /// Kills one session; callers use `has_session` for idempotence.
     pub fn kill_session(&self, session: &str) -> Result<()> {
         let output = self.status(&["kill-session", "-t", session])?;

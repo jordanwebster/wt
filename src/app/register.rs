@@ -302,6 +302,7 @@ pub(crate) fn resolve_session_backend(
         code: "SESSION_BACKEND_SELECTED".to_owned(),
         subject: None,
         message: format!("sessions: {selection} (set session.backend to change)"),
+        guidance: None,
     };
     context.pending_notices.push(notice.clone());
     Ok(Some(notice))

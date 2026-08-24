@@ -2,7 +2,7 @@
 source: tests/human_transcripts.rs
 expression: "normalize(h, &output.stdout)"
 ---
-Doctor found 0 errors, 3 warnings, 4 notes
+Doctor found 0 errors, 3 warnings, 5 notes
   warning  BIN_DIR_MISSING repo - declared bin directory <ROOT>/repos/repo/bin is missing
   next     create the directory by running the build task
   warning  BIN_DIR_MISSING repo/work - declared bin directory <ROOT>/wt-home/trees/repo/work/bin is missing
@@ -17,3 +17,5 @@ Doctor found 0 errors, 3 warnings, 4 notes
   next     declare task.verify when lifecycle verification is desired
   note     NO_VERIFY repo/work - no verify task is declared
   next     declare task.verify when lifecycle verification is desired
+  note     SESSION_BACKEND sessions - session backend is tmux
+  next     set `session.backend` in `$WT_HOME/config.toml` to change it

@@ -107,7 +107,7 @@ expression: "normalize(value, &h.root)"
     {
       "code": "SESSION_BACKEND_SELECTED",
       "level": "info",
-      "message": "session backend set to `tmux`; change `session.backend` in $WT_HOME/config.toml to choose another",
+      "message": "sessions: tmux 3.4 (set session.backend to change)",
       "subject": null
     }
   ],

@@ -23,7 +23,11 @@ pub(crate) fn run(context: &mut Context, args: Open) -> Result<Output, CoreError
         let target = context.resolve(args.target.as_deref())?;
         vec![context.tree(&target)?]
     };
-    let (sessions, notices, failure) = open_trees(context, trees, args.agent.as_deref(), args.all)?;
+    let OpenBatch {
+        sessions,
+        notices,
+        failure,
+    } = open_trees(context, trees, args.agent.as_deref(), args.all)?;
     let attach = (!args.all && should_attach(context, args.no_attach))
         .then(|| {
             sessions.first().and_then(|session| match session {
@@ -51,15 +55,15 @@ pub(crate) fn provision_new(context: &mut Context, target: &str) -> Result<Vec<N
     }
     let target = context.resolve(Some(target))?;
     let tree = context.tree(&target)?;
-    let (_, notices, _) = open_trees(context, vec![tree], None, false)?;
-    Ok(notices)
+    Ok(open_trees(context, vec![tree], None, false)?.notices)
 }
 
 pub(crate) fn open_new_after_summary(context: &mut Context, target: &str) -> Result<(), CoreError> {
     let target = context.resolve(Some(target))?;
     let tree = context.tree(&target)?;
-    let (sessions, _, _) = open_trees(context, vec![tree], None, false)?;
-    let session = sessions
+    let batch = open_trees(context, vec![tree], None, false)?;
+    let session = batch
+        .sessions
         .first()
         .and_then(|session| match session {
             SessionReport::Open(session) => Some(session),
@@ -123,7 +127,7 @@ fn open_trees(
     trees: Vec<TreeRec>,
     agent_override: Option<&str>,
     contain_failures: bool,
-) -> Result<(Vec<SessionReport>, Vec<Notice>, Option<CoreError>), CoreError> {
+) -> Result<OpenBatch, CoreError> {
     let tmux = tmux(context);
     let mut sessions = Vec::new();
     let mut notices = Vec::new();
@@ -139,11 +143,12 @@ fn open_trees(
                     code: error.code.0.clone(),
                     subject: Some(target.to_string()),
                     message: format!("{}; remedy: {}", error.message, error.remedy),
+                    guidance: None,
                 };
                 notices.push(notice);
                 if worst
                     .as_ref()
-                    .map_or(true, |current: &CoreError| error.exit() > current.exit())
+                    .is_none_or(|current: &CoreError| error.exit() > current.exit())
                 {
                     worst = Some(error.clone());
                 }
@@ -162,7 +167,17 @@ fn open_trees(
         notices.extend(tree_notices);
         sessions.push(SessionReport::Open(session));
     }
-    Ok((sessions, notices, worst))
+    Ok(OpenBatch {
+        sessions,
+        notices,
+        failure: worst,
+    })
+}
+
+struct OpenBatch {
+    sessions: Vec<SessionReport>,
+    notices: Vec<Notice>,
+    failure: Option<CoreError>,
 }
 
 fn open_tree(
@@ -245,6 +260,7 @@ pub(crate) fn session_failure_notice(target: &str, error: &CoreError) -> Notice 
             "session for {target} was not created: {}; run `wt open {target}` to retry",
             error.message
         ),
+        guidance: None,
     }
 }
 

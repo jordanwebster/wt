@@ -76,7 +76,7 @@ impl PrivateTmux {
                 Instant::now() < deadline,
                 "timed out waiting for private tmux session {session}"
             );
-            std::thread::yield_now();
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -93,7 +93,7 @@ impl PrivateTmux {
                 "timed out waiting for {marker:?} in {session}; pane:\n{pane}\nstderr: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            std::thread::yield_now();
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -121,7 +121,7 @@ impl PrivateTmux {
                 "timed out waiting for a client attached to {session}; wrapper calls: {:?}",
                 wt_sys::fsx::read_string(&self.harness.shim_state.join("real-tmux.log")).unwrap()
             );
-            std::thread::yield_now();
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 

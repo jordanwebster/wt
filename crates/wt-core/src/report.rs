@@ -24,6 +24,32 @@ pub struct Notice {
     pub code: String,
     pub subject: Option<String>,
     pub message: String,
+    #[serde(skip)]
+    pub guidance: Option<NoticeGuidance>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NoticeGuidance {
+    MissingBin {
+        target: String,
+        path: String,
+        has_build_task: bool,
+    },
+}
+
+impl Notice {
+    pub fn next_step(&self) -> Option<String> {
+        match self.guidance.as_ref()? {
+            NoticeGuidance::MissingBin {
+                target,
+                path,
+                has_build_task,
+            } if *has_build_task => Some(format!("run `wt build {target}` to create {path}")),
+            NoticeGuidance::MissingBin { path, .. } => {
+                Some(format!("create {path} before running tree binaries"))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -833,6 +859,7 @@ mod tests {
             code: "EXAMPLE".to_owned(),
             subject: Some("repo/work".to_owned()),
             message: "example notice".to_owned(),
+            guidance: None,
         });
         insta::assert_json_snapshot!(name, envelope);
     }
