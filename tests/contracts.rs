@@ -258,7 +258,7 @@ fn session_transport_uses_inner_no_gate_door_without_tmux_e() {
     h.register(&repo);
     common::write(
         &h.home.join("config.toml"),
-        "default_agent='probe'\n[agents.probe]\nstart=['true']\nresume=['true']\n",
+        "[session]\nbackend='tmux'\nagent='probe'\n[agents.probe]\nstart=['true']\nresume=['true']\n",
     );
     let opened = h.json(&["open", "repo", "--no-attach"]);
     assert_eq!(opened["data"]["sessions"][0]["created"], true);
@@ -299,6 +299,67 @@ fn old_format_is_rejected_before_current_state_is_written() {
         .code(5)
         .stderr(predicate::str::contains("HOME_OLD_FORMAT"));
     assert!(!h.home.join("registry.json").exists());
+}
+
+#[test]
+fn register_declares_the_session_backend_once_and_legacy_agent_setting_is_rejected() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    let registered = h.register(&repo);
+    assert!(registered["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| {
+            notice["code"] == "SESSION_BACKEND_SELECTED"
+                && notice["message"].as_str().unwrap().contains("`tmux`")
+        }));
+    let config = wt_sys::fsx::read_string(&h.home.join("config.toml"))
+        .unwrap()
+        .unwrap();
+    assert!(config.contains("backend = \"tmux\""));
+    assert!(!config.contains("agent ="));
+
+    let record = h.shim_state.join("backend-resolution.log");
+    common::write_executable(
+        &h.shims.join("tmux"),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$1\" in has-session) exit 1;; *) exit 0;; esac\n",
+            record.display()
+        ),
+    );
+    h.register(&repo);
+    let calls = wt_sys::fsx::read_string(&record)
+        .unwrap()
+        .unwrap_or_default();
+    assert!(!calls.lines().any(|line| line == "-V"));
+
+    let unavailable = Harness::new();
+    common::write_executable(
+        &unavailable.shims.join("tmux"),
+        "#!/bin/sh\nif [ \"$1\" = -V ]; then echo 'tmux 3.1'; exit 0; fi\nexit 1\n",
+    );
+    let unavailable_repo = unavailable.repo("unavailable", BASIC);
+    let registered = unavailable.register(&unavailable_repo);
+    assert!(registered["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| { notice["message"].as_str().unwrap().contains("`none`") }));
+    let config = wt_sys::fsx::read_string(&unavailable.home.join("config.toml"))
+        .unwrap()
+        .unwrap();
+    assert!(config.contains("backend = \"none\""));
+
+    let legacy = Harness::new();
+    common::write(&legacy.home.join("config.toml"), "default_agent='codex'\n");
+    legacy
+        .wt()
+        .arg("list")
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("SETTINGS_INVALID"))
+        .stderr(predicate::str::contains("session.agent"));
 }
 
 #[test]
@@ -752,7 +813,7 @@ fn refresh_recreates_a_present_resource() {
 }
 
 #[test]
-fn shell_and_attaching_open_refuse_json() {
+fn shell_refuses_json_while_open_provisions_without_attaching() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
     h.register(&repo);
@@ -761,11 +822,8 @@ fn shell_and_attaching_open_refuse_json() {
         .assert()
         .code(2)
         .stdout(predicate::str::contains("JSON_UNSUPPORTED"));
-    h.wt()
-        .args(["open", "repo", "--json"])
-        .assert()
-        .code(2)
-        .stdout(predicate::str::contains("JSON_UNSUPPORTED"));
+    let opened = h.json(&["open", "repo"]);
+    assert_eq!(opened["data"]["sessions"][0]["created"], true);
 }
 
 #[test]
@@ -800,7 +858,7 @@ tied_to='tree'
     h.json(&["run", "service", "repo/work"]);
     common::write(
         &h.home.join("config.toml"),
-        "default_agent='probe'\n[agents.probe]\nstart=['true']\nresume=['true']\n",
+        "[session]\nbackend='tmux'\nagent='probe'\n[agents.probe]\nstart=['true']\nresume=['true']\n",
     );
     h.json(&["open", "repo/work", "--no-attach"]);
     assert_eq!(
@@ -1402,7 +1460,6 @@ fn doctor_manufactures_repository_capacity_lock_and_tooling_conditions() {
         "UPSTREAM_GONE",
         "TREE_IN_USE",
         "GIT_TOO_OLD",
-        "TMUX_OLD",
         "REPO_PATH_MISSING",
         "PORTS_EXHAUSTED",
     ] {
@@ -1458,7 +1515,6 @@ fn doctor_condition_contracts_cover_every_documented_code() {
         "IDENTIFIER_LONG",
         "TREE_IN_USE",
         "GIT_TOO_OLD",
-        "TMUX_OLD",
     ]);
     assert_eq!(
         covered,

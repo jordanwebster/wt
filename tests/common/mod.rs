@@ -47,6 +47,7 @@ impl Harness {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("LC_ALL", "C")
+            .env("TERM", "xterm-256color")
             .env("WT_SHIM_STATE", &self.shim_state)
             .env(
                 "PATH",
@@ -66,6 +67,7 @@ impl Harness {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("LC_ALL", "C")
+            .env("TERM", "xterm-256color")
             .env("WT_SHIM_STATE", &self.shim_state)
             .env(
                 "PATH",
@@ -83,7 +85,7 @@ impl Harness {
         wt_sys::proc::pty_capture(&self.pty_request(args), input, Duration::from_secs(10)).unwrap()
     }
 
-    fn pty_request(&self, args: &[&str]) -> CommandRequest {
+    pub fn pty_request(&self, args: &[&str]) -> CommandRequest {
         let mut request = CommandRequest::new(env!("CARGO_BIN_EXE_wt"));
         request.args = proc::os_args(args);
         request.clear_env = true;
@@ -96,6 +98,7 @@ impl Harness {
             ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
             ("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned()),
             ("LC_ALL".to_owned(), "C".to_owned()),
+            ("TERM".to_owned(), "xterm-256color".to_owned()),
             (
                 "WT_SHIM_STATE".to_owned(),
                 self.shim_state.to_string_lossy().into_owned(),

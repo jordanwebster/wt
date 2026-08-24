@@ -6,7 +6,7 @@ repo/work is ready
   path       <ROOT>/wt-home/trees/repo/work
   branch     work
   sync       never
-  session    no
+  session    yes
   changes    0 modified, 0 untracked
   resources  1
   tasks      8

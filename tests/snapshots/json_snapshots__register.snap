@@ -103,7 +103,14 @@ expression: "normalize(value, &h.root)"
     }
   },
   "error": null,
-  "notices": [],
+  "notices": [
+    {
+      "code": "SESSION_BACKEND_SELECTED",
+      "level": "info",
+      "message": "session backend set to `tmux`; change `session.backend` in $WT_HOME/config.toml to choose another",
+      "subject": null
+    }
+  ],
   "ok": true,
   "wt": {
     "schema": 1,

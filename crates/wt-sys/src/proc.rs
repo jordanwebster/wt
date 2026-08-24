@@ -190,6 +190,21 @@ pub fn pty_capture(
         .stdin(Stdio::from(slave))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    // A terminal-facing program such as tmux needs a controlling terminal,
+    // not merely terminal file descriptors. The test child owns the fresh PTY
+    // slave after stdio setup, so it can safely become that terminal's session
+    // leader without affecting the harness process.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::ioctl(libc::STDIN_FILENO, libc::c_ulong::from(libc::TIOCSCTTY), 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let mut child = command
         .spawn()
         .map_err(|error| spawn_error(request, error))?;

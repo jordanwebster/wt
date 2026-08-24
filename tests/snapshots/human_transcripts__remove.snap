@@ -4,3 +4,4 @@ expression: "normalize(h, &output.stdout)"
 ---
 Removed repo/work
   destroyed  1
+  session    closed

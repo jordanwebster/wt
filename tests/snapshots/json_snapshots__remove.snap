@@ -16,7 +16,7 @@ expression: "normalize(value, &h.root)"
     ],
     "orphans_kept": [],
     "removed": true,
-    "session_closed": false,
+    "session_closed": true,
     "target": "repo/work"
   },
   "error": null,

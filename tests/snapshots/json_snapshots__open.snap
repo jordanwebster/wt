@@ -4,17 +4,21 @@ expression: "normalize(value, &h.root)"
 ---
 {
   "command": "open",
-  "data": null,
-  "error": {
-    "class": "state",
-    "code": "CONFIG_INVALID",
-    "details": null,
-    "exit": 5,
-    "message": "no agent was selected",
-    "remedy": "pass --agent or configure default_agent"
+  "data": {
+    "sessions": [
+      {
+        "agent": null,
+        "created": true,
+        "existing": false,
+        "foreground": false,
+        "name": "wt_repo_canonical_be9ff5d9",
+        "target": "repo"
+      }
+    ]
   },
+  "error": null,
   "notices": [],
-  "ok": false,
+  "ok": true,
   "wt": {
     "schema": 1,
     "version": "<version>"
