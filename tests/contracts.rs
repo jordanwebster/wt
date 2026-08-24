@@ -1077,16 +1077,21 @@ fn cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs() {
     h.register(&repo);
     let created = h.json(&["new", "repo/work", "--no-sync"]);
     let tree_root = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
-    assert_eq!(
-        wt_sys::fsx::read_string(&tree_root.join("target/cache.bin")).unwrap(),
-        Some("warm cache\n".to_owned())
-    );
-    let fallback_reported = created["notices"]
+    let skipped = created["notices"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|notice| notice["code"] == "SEED_COPIED_NOT_CLONED");
-    assert_eq!(fallback_reported, !reflink_supported);
+        .any(|notice| notice["code"] == "SEED_SKIPPED_NO_REFLINK");
+    assert_eq!(skipped, !reflink_supported);
+    assert_eq!(
+        wt_sys::fsx::read_string(&tree_root.join("target/cache.bin")).unwrap(),
+        reflink_supported.then(|| "warm cache\n".to_owned())
+    );
+    assert!(!created["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "SEED_COPIED_NOT_CLONED"));
 
     let target = wt_core::model::Target::parse("repo/work").unwrap();
     let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
@@ -1095,9 +1100,12 @@ fn cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs() {
     )
     .unwrap()
     .unwrap();
-    assert!(state.materialized.iter().any(|entry| {
-        entry.path == "target" && entry.kind == wt_core::lifecycle::MaterializedKind::Seeded
-    }));
+    assert_eq!(
+        state.materialized.iter().any(|entry| {
+            entry.path == "target" && entry.kind == wt_core::lifecycle::MaterializedKind::Seeded
+        }),
+        reflink_supported
+    );
 
     let synced = h.json(&["sync", "repo/work"]);
     let inputs = synced["data"]["inputs"]

@@ -5,7 +5,7 @@ use wt_core::model::{AbsPath, SourceKind, Target, TreeRec, TreeSource};
 use wt_core::report::{NewData, NewVerifyReport};
 use wt_core::report::{Notice, NoticeLevel};
 use wt_core::{CoreError, ExitClass};
-use wt_sys::fsx::CopyPolicy;
+use wt_sys::fsx::{CopyPolicy, ReflinkCopy};
 use wt_sys::lock::{self, Mode};
 
 use crate::cli::New;
@@ -546,13 +546,15 @@ fn finish_under_lock(
             .root
             .copy
             .iter()
-            .map(|path| (path, MaterializedKind::Copied, CopyPolicy::Plain))
-            .chain(
-                config
-                    .seed
-                    .iter()
-                    .map(|path| (path, MaterializedKind::Seeded, CopyPolicy::PreferReflink)),
-            )
+            .map(|path| (path, MaterializedKind::Copied, CopyPolicy::Plain, false))
+            .chain(config.seed.iter().map(|path| {
+                (
+                    path,
+                    MaterializedKind::Seeded,
+                    CopyPolicy::PreferReflink,
+                    config.adapter_seed.contains(path),
+                )
+            }))
             .collect::<Vec<_>>();
         let tracked = context
             .git(Path::new(canonical.path.as_str()))?
@@ -560,10 +562,10 @@ fn finish_under_lock(
                 Path::new(canonical.path.as_str()),
                 &entries
                     .iter()
-                    .map(|(path, _, _)| PathBuf::from(path.as_str()))
+                    .map(|(path, _, _, _)| PathBuf::from(path.as_str()))
                     .collect::<Vec<_>>(),
             )?;
-        for (path, kind, policy) in entries {
+        for (path, kind, policy, adapter_seed) in entries {
             let subject = Some(format!("{}:{}", target_of(tree), path));
             if matches!(
                 wt_sys::fsx::path_kind(&Path::new(canonical.path.as_str()).join(path.as_str()))?,
@@ -598,12 +600,28 @@ fn finish_under_lock(
                 });
                 continue;
             }
-            let report = wt_sys::fsx::copy_contained(
-                Path::new(canonical.path.as_str()),
-                root,
-                path,
-                policy,
-            )?;
+            let report = if adapter_seed {
+                match wt_sys::fsx::reflink_contained(
+                    Path::new(canonical.path.as_str()),
+                    root,
+                    path,
+                )? {
+                    ReflinkCopy::Copied(report) => report,
+                    ReflinkCopy::Unavailable => {
+                        notices.push(Notice {
+                            level: NoticeLevel::Info,
+                            code: "SEED_SKIPPED_NO_REFLINK".to_owned(),
+                            subject,
+                            message: format!(
+                                "adapter seed {path} was skipped because reflink is unavailable"
+                            ),
+                        });
+                        continue;
+                    }
+                }
+            } else {
+                wt_sys::fsx::copy_contained(Path::new(canonical.path.as_str()), root, path, policy)?
+            };
             if kind == MaterializedKind::Seeded && report.files.iter().any(|file| !file.reflinked) {
                 notices.push(Notice {
                     level: NoticeLevel::Info,

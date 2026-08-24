@@ -42,6 +42,12 @@ pub struct CopyReport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReflinkCopy {
+    Copied(CopyReport),
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExcludeWrite {
     pub changed: bool,
     pub repaired: bool,
@@ -432,6 +438,44 @@ pub fn copy_contained(
         &mut report,
     )?;
     Ok(report)
+}
+
+/// Clones a contained entry without ever falling back to copying file bytes.
+///
+/// A directory may contain several files, so an unsupported clone can be
+/// discovered after earlier entries were created. `copy_contained` removes
+/// that partial destination before this function reports the unavailable
+/// outcome.
+pub fn reflink_contained(
+    source_root: &Path,
+    destination_root: &Path,
+    relative: &RelPath,
+) -> Result<ReflinkCopy> {
+    let destination = destination_root.join(relative.as_str());
+    if path_kind(&destination)? != PathKind::Missing {
+        return Err(CoreError::new(
+            ExitClass::State,
+            "PATH_OCCUPIED",
+            format!(
+                "reflink destination {} already exists",
+                destination.display()
+            ),
+            "remove the destination before retrying the reflink",
+        ));
+    }
+    match copy_contained(
+        source_root,
+        destination_root,
+        relative,
+        CopyPolicy::RequireReflink,
+    ) {
+        Ok(report) => Ok(ReflinkCopy::Copied(report)),
+        Err(error) if error.code.0 == "REFLINK_UNAVAILABLE" => {
+            remove_path(&destination)?;
+            Ok(ReflinkCopy::Unavailable)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Applies the managed exclude format while preserving all bytes outside its block.
@@ -967,6 +1011,14 @@ fn copy_entry(
                         fallback_copy_at(source, parent.as_raw_fd(), &name, mode)?;
                         false
                     }
+                    Err(error) if reflink_fallback_error(&error) => {
+                        return Err(CoreError::new(
+                            ExitClass::State,
+                            "REFLINK_UNAVAILABLE",
+                            format!("reflink is unavailable for {}: {error}", source.display()),
+                            "use a reflink-capable filesystem or omit this adapter seed",
+                        ));
+                    }
                     Err(error) => {
                         return Err(io_context("reflink contained copied file")(error));
                     }
@@ -1362,6 +1414,25 @@ mod tests {
             std::fs::read(destination.path().join("seed")).unwrap(),
             b"payload"
         );
+    }
+
+    #[test]
+    fn required_reflink_reports_unavailable_and_removes_partial_destination() {
+        let _guard = crate::failpoint::ENV_LOCK.lock().unwrap();
+        let source = tempdir().unwrap();
+        let destination = tempdir().unwrap();
+        std::fs::create_dir(source.path().join("seed")).unwrap();
+        std::fs::write(source.path().join("seed/file"), b"payload").unwrap();
+        std::env::set_var("WT_TEST_REFLINK_UNSUPPORTED", "1");
+        let outcome = reflink_contained(
+            source.path(),
+            destination.path(),
+            &RelPath::new("seed").unwrap(),
+        )
+        .unwrap();
+        std::env::remove_var("WT_TEST_REFLINK_UNSUPPORTED");
+        assert_eq!(outcome, ReflinkCopy::Unavailable);
+        assert!(!destination.path().join("seed").exists());
     }
 
     #[test]
