@@ -1,0 +1,5 @@
+---
+source: tests/human_transcripts.rs
+expression: "normalize(h, &output.stdout)"
+---
+/usr/bin/git

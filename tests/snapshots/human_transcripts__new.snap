@@ -1,0 +1,9 @@
+---
+source: tests/human_transcripts.rs
+expression: "normalize(h, &output.stdout)"
+---
+Created repo/work
+  path    <ROOT>/wt-home/trees/repo/work
+  branch  work
+  sync    skipped
+  next    run `wt build repo/work` to create <ROOT>/wt-home/trees/repo/work/bin

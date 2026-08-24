@@ -76,6 +76,14 @@ impl Harness {
     }
 
     pub fn pty_status(&self, args: &[&str], input: &[u8]) -> wt_core::resource::ChildStatus {
+        wt_sys::proc::pty_status(&self.pty_request(args), input).unwrap()
+    }
+
+    pub fn pty_output(&self, args: &[&str], input: &[u8]) -> wt_sys::proc::ProcessOutput {
+        wt_sys::proc::pty_capture(&self.pty_request(args), input, Duration::from_secs(10)).unwrap()
+    }
+
+    fn pty_request(&self, args: &[&str]) -> CommandRequest {
         let mut request = CommandRequest::new(env!("CARGO_BIN_EXE_wt"));
         request.args = proc::os_args(args);
         request.clear_env = true;
@@ -99,7 +107,7 @@ impl Harness {
         ]
         .into_iter()
         .collect();
-        wt_sys::proc::pty_status(&request, input).unwrap()
+        request
     }
 
     pub fn repo(&self, name: &str, config: &str) -> PathBuf {

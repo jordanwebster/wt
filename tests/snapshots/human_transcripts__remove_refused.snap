@@ -1,0 +1,6 @@
+---
+source: tests/human_transcripts.rs
+expression: "normalize(h, &output.stdout)"
+---
+wt: [31mUSE_UNREGISTER[0m — canonical checkouts are unregistered, not removed
+remedy: run `wt unregister <label>`

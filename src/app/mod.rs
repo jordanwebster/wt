@@ -10,6 +10,7 @@ mod door;
 mod env;
 mod exec;
 mod executor;
+mod human;
 mod list;
 mod locks;
 mod new;
@@ -77,6 +78,7 @@ impl Output {
 
 pub fn main(cli: Cli) -> i32 {
     let command = cli.command.name().to_owned();
+    let human_kind = human::HumanKind::from(&cli.command);
     let json = cli.json;
     let verbose = cli.verbose;
     let quiet = cli.quiet;
@@ -107,17 +109,20 @@ pub fn main(cli: Cli) -> i32 {
                 envelope.notices.append(&mut output.notices);
                 write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
             } else {
-                for notice in output.notices {
-                    if notice.code == "BIN_DIR_MISSING" || (!quiet && (stderr_tty || verbose)) {
+                for notice in &output.notices {
+                    if notice.code != "BIN_DIR_MISSING" && !quiet && (stderr_tty || verbose) {
                         let code = if color {
                             format!("\u{1b}[33m{}\u{1b}[0m", notice.code)
                         } else {
-                            notice.code
+                            notice.code.clone()
                         };
                         let _ = writeln!(std::io::stderr(), "wt: {} — {}", code, notice.message);
                     }
                 }
-                let text = output.text.unwrap_or_else(|| human_value(&output.data));
+                let text = output
+                    .text
+                    .map(|text| human::with_expected_next(text, &output.notices))
+                    .unwrap_or_else(|| human_kind.render(&output.data, &output.notices));
                 write_stdout(text);
             }
             0
@@ -147,7 +152,7 @@ pub fn main(cli: Cli) -> i32 {
                 write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
             } else {
                 for notice in pending_notices {
-                    if notice.code == "BIN_DIR_MISSING" || (!quiet && (stderr_tty || verbose)) {
+                    if notice.code != "BIN_DIR_MISSING" && !quiet && (stderr_tty || verbose) {
                         let _ = writeln!(
                             std::io::stderr(),
                             "wt: {} — {}",
@@ -221,8 +226,4 @@ fn write_stdout(mut text: String) {
         text.push('\n');
     }
     let _ = std::io::stdout().write_all(text.as_bytes());
-}
-
-fn human_value(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_owned())
 }

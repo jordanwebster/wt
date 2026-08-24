@@ -1,0 +1,12 @@
+---
+source: tests/human_transcripts.rs
+expression: "normalize(h, &output.stdout)"
+---
+repo/work is ready
+  path       <ROOT>/wt-home/trees/repo/work
+  branch     work
+  sync       never
+  session    no
+  changes    0 modified, 0 untracked
+  resources  1
+  tasks      8

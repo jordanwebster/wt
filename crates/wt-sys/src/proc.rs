@@ -147,6 +147,16 @@ pub fn run(
 /// Runs a child with all three standard streams attached to one pseudoterminal.
 /// Contract tests use this to exercise the real TTY consent boundary.
 pub fn pty_status(request: &CommandRequest, input: &[u8]) -> Result<ChildStatus> {
+    Ok(pty_capture(request, input, Duration::from_secs(30))?.child)
+}
+
+/// Runs a child on a pseudoterminal and captures the byte-exact combined stream.
+pub fn pty_capture(
+    request: &CommandRequest,
+    input: &[u8],
+    timeout: Duration,
+) -> Result<ProcessOutput> {
+    trace_spawn(request)?;
     let mut master_fd = 0;
     let mut slave_fd = 0;
     // SAFETY: openpty initialises two owned descriptors on success. Each is
@@ -183,16 +193,101 @@ pub fn pty_status(request: &CommandRequest, input: &[u8]) -> Result<ChildStatus>
     let mut child = command
         .spawn()
         .map_err(|error| spawn_error(request, error))?;
-    master
-        .write_all(input)
-        .map_err(io_error("write pseudoterminal input"))?;
-    let status = child
-        .wait()
-        .map_err(io_error("wait for pseudoterminal child"))?;
-    Ok(ChildStatus {
-        code: status.code(),
-        signal: status.signal(),
+    if !input.is_empty() {
+        master
+            .write_all(input)
+            .map_err(io_error("write pseudoterminal input"))?;
+    }
+    set_nonblocking(master.as_raw_fd())?;
+    let started = Instant::now();
+    let mut bytes = Vec::new();
+    let mut status = None;
+    let mut ended = false;
+    let timed_out = loop {
+        if status.is_none() {
+            status = child
+                .try_wait()
+                .map_err(io_error("wait for pseudoterminal child"))?;
+        }
+        drain_pty(&mut master, &mut bytes, &mut ended)?;
+        if status.is_some() && ended {
+            break false;
+        }
+        if status.is_some() {
+            let before = bytes.len();
+            poll_fd(master.as_raw_fd(), Duration::from_millis(5))?;
+            drain_pty(&mut master, &mut bytes, &mut ended)?;
+            if ended || bytes.len() == before {
+                break false;
+            }
+        }
+        if started.elapsed() >= timeout {
+            if status.is_none() {
+                terminate(&mut child, false)?;
+                status = Some(
+                    child
+                        .wait()
+                        .map_err(io_error("reap timed-out pseudoterminal child"))?,
+                );
+            }
+            drain_pty(&mut master, &mut bytes, &mut ended)?;
+            break true;
+        }
+        poll_fd(master.as_raw_fd(), Duration::from_millis(5))?;
+    };
+    let status = match status {
+        Some(status) => status,
+        None => child
+            .wait()
+            .map_err(io_error("wait for pseudoterminal child"))?,
+    };
+    Ok(ProcessOutput {
+        child: ChildStatus {
+            code: status.code(),
+            signal: status.signal(),
+        },
+        stdout: bytes,
+        stderr: Vec::new(),
+        timed_out,
     })
+}
+
+fn drain_pty(master: &mut File, bytes: &mut Vec<u8>, ended: &mut bool) -> Result<()> {
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        match master.read(&mut buffer) {
+            Ok(0) => {
+                *ended = true;
+                return Ok(());
+            }
+            Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            // Linux reports EIO when the final slave descriptor closes.
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => {
+                *ended = true;
+                return Ok(());
+            }
+            Err(error) => return Err(io_error("read pseudoterminal output")(error)),
+        }
+    }
+}
+
+fn poll_fd(fd: RawFd, timeout: Duration) -> Result<()> {
+    let mut descriptor = libc::pollfd {
+        fd,
+        events: libc::POLLIN | libc::POLLHUP,
+        revents: 0,
+    };
+    let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
+    // SAFETY: descriptor points to one initialised pollfd for the duration of the call.
+    let result = unsafe { libc::poll(&mut descriptor, 1, millis) };
+    if result < 0 {
+        Err(io_error("poll pseudoterminal")(
+            std::io::Error::last_os_error(),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 /// Maps the probe contract's 0/1/≥2 outcomes, including timeout and spawn failure.

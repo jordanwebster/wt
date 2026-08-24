@@ -54,9 +54,18 @@ impl Door {
 
     pub fn emit_notices(&self, context: &Context) {
         for notice in &self.notices {
-            if notice.code == "BIN_DIR_MISSING"
-                || (!context.quiet && (context.tty.stderr || context.verbose))
-            {
+            if notice.code == "BIN_DIR_MISSING" {
+                let path = notice
+                    .message
+                    .strip_prefix("declared bin directory ")
+                    .and_then(|message| message.strip_suffix(" is missing"))
+                    .unwrap_or("the declared binary directory");
+                let target = notice
+                    .subject
+                    .clone()
+                    .unwrap_or_else(|| self.target.to_string());
+                eprintln!("  next  run `wt build {target}` to create {path}");
+            } else if !context.quiet && (context.tty.stderr || context.verbose) {
                 eprintln!("wt: {} — {}", notice.code, notice.message);
             }
         }

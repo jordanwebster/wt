@@ -60,12 +60,7 @@ pub(crate) fn run(context: &mut Context, args: List) -> Result<Output, CoreError
             right.holder.pid,
         ))
     });
-    let text = trees
-        .iter()
-        .map(|tree| format!("{:<24} {:<20} {}", tree.target, tree.phase, tree.path))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Output::text(ListData { trees, locks }, text)
+    Output::data(ListData { trees, locks })
 }
 
 pub(crate) fn tree_report(

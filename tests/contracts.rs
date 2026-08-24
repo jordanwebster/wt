@@ -1139,7 +1139,7 @@ fn truth_surfaces_report_descriptions_config_errors_and_live_locks() {
 }
 
 #[test]
-fn door_notices_are_always_in_json_and_missing_bins_are_always_on_stderr() {
+fn door_notices_stay_in_json_and_missing_bins_render_as_next_steps() {
     let h = Harness::new();
     let repo = h.repo("repo", "bin=['missing-bin']\n[task.fail]\nrun='exit 2'\n");
     h.register(&repo);
@@ -1147,7 +1147,9 @@ fn door_notices_are_always_in_json_and_missing_bins_are_always_on_stderr() {
         .args(["exec", "repo", "--", "true"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("BIN_DIR_MISSING"));
+        .stderr(predicate::str::contains("next"))
+        .stderr(predicate::str::contains("wt build repo"))
+        .stderr(predicate::str::contains("BIN_DIR_MISSING").not());
     assert!(h.json(&["env", "repo"])["notices"]
         .as_array()
         .unwrap()
