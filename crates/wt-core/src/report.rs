@@ -91,6 +91,25 @@ impl<D> Envelope<D> {
             error: Some(error.into()),
         }
     }
+
+    pub fn partial_failure(
+        command: impl Into<String>,
+        version: impl Into<String>,
+        data: D,
+        error: CoreError,
+    ) -> Self {
+        Self {
+            wt: WtMeta {
+                schema: 1,
+                version: version.into(),
+            },
+            ok: false,
+            command: command.into(),
+            data: Some(data),
+            notices: Vec::new(),
+            error: Some(error.into()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -371,6 +390,7 @@ pub struct SessionsData {
 pub enum SessionReport {
     Open(OpenSessionReport),
     Closed(ClosedSessionReport),
+    Failed(FailedSessionReport),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -381,6 +401,16 @@ pub struct OpenSessionReport {
     pub existing: bool,
     pub agent: Option<String>,
     pub foreground: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FailedSessionReport {
+    pub target: String,
+    pub name: String,
+    pub failed: bool,
+    pub code: String,
+    pub message: String,
+    pub remedy: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

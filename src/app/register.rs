@@ -270,7 +270,7 @@ fn perform_with_backend(
     finish_with_door(context, tree, true, cloned, Some(prepared), false)
 }
 
-fn resolve_session_backend(
+pub(crate) fn resolve_session_backend(
     context: &mut Context,
 ) -> Result<Option<wt_core::report::Notice>, CoreError> {
     let path = context.home.join("config.toml");
@@ -281,10 +281,10 @@ fn resolve_session_backend(
     let timeout = wt_core::model::duration_millis(&context.settings.session.tmux_timeout)
         .map(std::time::Duration::from_millis)
         .unwrap_or(std::time::Duration::from_secs(10));
-    let backend = if wt_sys::tmux::Tmux::new("tmux", timeout)
+    let version = wt_sys::tmux::Tmux::new("tmux", timeout)
         .check_version()
-        .is_ok()
-    {
+        .ok();
+    let backend = if version.is_some() {
         SessionBackend::Tmux
     } else {
         SessionBackend::None
@@ -292,15 +292,19 @@ fn resolve_session_backend(
     let updated = wt_core::settings::declare_backend(&source, backend)?;
     wt_sys::fsx::write_store(&path, updated.as_bytes())?;
     context.settings = wt_core::settings::parse(&updated)?;
-    Ok(Some(wt_core::report::Notice {
+    let selection = version.map_or_else(
+        || "none".to_owned(),
+        |(major, minor)| format!("tmux {major}.{minor}"),
+    );
+    eprintln!("sessions: {selection} (set session.backend to change)");
+    let notice = wt_core::report::Notice {
         level: wt_core::report::NoticeLevel::Info,
         code: "SESSION_BACKEND_SELECTED".to_owned(),
         subject: None,
-        message: format!(
-            "session backend set to `{}`; change `session.backend` in $WT_HOME/config.toml to choose another",
-            backend.as_str()
-        ),
-    }))
+        message: format!("sessions: {selection} (set session.backend to change)"),
+    };
+    context.pending_notices.push(notice.clone());
+    Ok(Some(notice))
 }
 
 fn repair_canonical(context: &mut Context, tree: TreeRec) -> Result<Output, CoreError> {

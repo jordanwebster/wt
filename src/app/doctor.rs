@@ -12,7 +12,16 @@ use crate::cli::Doctor;
 use super::{list, remove, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Doctor) -> Result<Output, CoreError> {
-    let mut findings = Vec::new();
+    let mut findings = vec![finding(
+        Severity::Info,
+        "SESSION_BACKEND",
+        "sessions",
+        format!(
+            "session backend is {}",
+            context.settings.session.backend.as_str()
+        ),
+        "set `session.backend` in `$WT_HOME/config.toml` to change it",
+    )];
     tooling_findings(context, &mut findings);
     if wt_core::deactivate(&context.parent_env)?
         .report

@@ -37,6 +37,7 @@ pub const CODES: &[&str] = &[
     "NO_ADAPTER",
     "NO_VERIFY",
     "NO_COORDINATION",
+    "SESSION_BACKEND",
     "BIN_DIR_MISSING",
     "PATH_NOT_SHADOWED",
     "PORT_BOUND",

@@ -45,6 +45,7 @@ pub(crate) struct Output {
     pub text: Option<String>,
     pub notices: Vec<Notice>,
     after_render: Option<AfterRender>,
+    failure: Option<CoreError>,
 }
 
 pub(crate) enum AfterRender {
@@ -60,6 +61,7 @@ impl Output {
             text: None,
             notices: Vec::new(),
             after_render: None,
+            failure: None,
         })
     }
 
@@ -79,6 +81,13 @@ impl Output {
                 &right.message,
             ))
         });
+        self.notices
+            .dedup_by(|left, right| left.code == right.code && left.subject == right.subject);
+        self
+    }
+
+    pub fn with_failure(mut self, error: CoreError) -> Self {
+        self.failure = Some(error);
         self
     }
 
@@ -118,14 +127,31 @@ pub fn main(cli: Cli) -> i32 {
     };
     match result {
         Ok(mut output) => {
+            let output_exit = output
+                .failure
+                .as_ref()
+                .map_or(0, |error| i32::from(error.exit()));
             if json {
-                let mut envelope =
-                    Envelope::success(command.clone(), env!("CARGO_PKG_VERSION"), output.data);
+                let mut envelope = if let Some(error) = output.failure.clone() {
+                    Envelope::partial_failure(
+                        command.clone(),
+                        env!("CARGO_PKG_VERSION"),
+                        output.data,
+                        error,
+                    )
+                } else {
+                    Envelope::success(command.clone(), env!("CARGO_PKG_VERSION"), output.data)
+                };
                 envelope.notices.append(&mut output.notices);
                 write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
             } else {
                 for notice in &output.notices {
-                    if notice.code != "BIN_DIR_MISSING" && !quiet && (stderr_tty || verbose) {
+                    if !matches!(
+                        notice.code.as_str(),
+                        "BIN_DIR_MISSING" | "SESSION_BACKEND_SELECTED"
+                    ) && !quiet
+                        && (stderr_tty || verbose)
+                    {
                         let code = if color {
                             format!("\u{1b}[33m{}\u{1b}[0m", notice.code)
                         } else {
@@ -142,17 +168,23 @@ pub fn main(cli: Cli) -> i32 {
             }
             let _ = std::io::stdout().flush();
             if let Some(action) = output.after_render {
-                let result = run_after_render(
-                    opened_context
-                        .as_mut()
-                        .expect("deferred actions require an open context"),
-                    action,
-                );
-                if let Err(error) = result {
-                    return render_error(&command, json, color, error, Vec::new());
+                let context = opened_context
+                    .as_mut()
+                    .expect("deferred actions require an open context");
+                match action {
+                    AfterRender::NewSession { target } => {
+                        if let Err(error) = open::open_new_after_summary(context, &target) {
+                            emit_session_warning(&target, &error);
+                        }
+                    }
+                    AfterRender::Attach { session } => {
+                        if let Err(error) = open::attach(context, &session) {
+                            return render_error(&command, json, color, error, Vec::new());
+                        }
+                    }
                 }
             }
-            0
+            output_exit
         }
         Err(error) => render_error_with_visibility(
             &command,
@@ -167,11 +199,12 @@ pub fn main(cli: Cli) -> i32 {
     }
 }
 
-fn run_after_render(context: &mut Context, action: AfterRender) -> Result<(), CoreError> {
-    match action {
-        AfterRender::Attach { session } => open::attach(context, &session),
-        AfterRender::NewSession { target } => open::open_new_after_summary(context, &target),
-    }
+fn emit_session_warning(target: &str, error: &CoreError) {
+    let _ = writeln!(
+        std::io::stderr(),
+        "wt: SESSION_CREATE_FAILED — session for {target} was not created: {}; run `wt open {target}` to retry",
+        error.message
+    );
 }
 
 fn render_error(
@@ -219,7 +252,12 @@ fn render_error_with_visibility(
         write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
     } else {
         for notice in pending_notices {
-            if notice.code != "BIN_DIR_MISSING" && !quiet && (stderr_tty || verbose) {
+            if !matches!(
+                notice.code.as_str(),
+                "BIN_DIR_MISSING" | "SESSION_BACKEND_SELECTED"
+            ) && !quiet
+                && (stderr_tty || verbose)
+            {
                 let _ = writeln!(
                     std::io::stderr(),
                     "wt: {} — {}",

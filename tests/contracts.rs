@@ -312,13 +312,20 @@ fn register_declares_the_session_backend_once_and_legacy_agent_setting_is_reject
         .iter()
         .any(|notice| {
             notice["code"] == "SESSION_BACKEND_SELECTED"
-                && notice["message"].as_str().unwrap().contains("`tmux`")
+                && notice["message"] == "sessions: tmux 3.4 (set session.backend to change)"
         }));
     let config = wt_sys::fsx::read_string(&h.home.join("config.toml"))
         .unwrap()
         .unwrap();
     assert!(config.contains("backend = \"tmux\""));
     assert!(!config.contains("agent ="));
+    let doctor = h.json(&["doctor"]);
+    assert!(doctor["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "SESSION_BACKEND"
+            && finding["message"] == "session backend is tmux"));
 
     let record = h.shim_state.join("backend-resolution.log");
     common::write_executable(
@@ -345,7 +352,7 @@ fn register_declares_the_session_backend_once_and_legacy_agent_setting_is_reject
         .as_array()
         .unwrap()
         .iter()
-        .any(|notice| { notice["message"].as_str().unwrap().contains("`none`") }));
+        .any(|notice| { notice["message"] == "sessions: none (set session.backend to change)" }));
     let config = wt_sys::fsx::read_string(&unavailable.home.join("config.toml"))
         .unwrap()
         .unwrap();
@@ -360,6 +367,117 @@ fn register_declares_the_session_backend_once_and_legacy_agent_setting_is_reject
         .code(5)
         .stderr(predicate::str::contains("SETTINGS_INVALID"))
         .stderr(predicate::str::contains("session.agent"));
+}
+
+#[test]
+fn session_verbs_resolve_a_backend_for_preexisting_homes_once() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+    wt_sys::fsx::remove_path(&h.home.join("config.toml")).unwrap();
+
+    let first = h
+        .wt()
+        .args(["new", "repo/work", "--no-sync", "--no-open", "--json"])
+        .output()
+        .unwrap();
+    assert!(first.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&first.stderr),
+        "sessions: tmux 3.4 (set session.backend to change)\n"
+    );
+    let config = wt_sys::fsx::read_string(&h.home.join("config.toml"))
+        .unwrap()
+        .unwrap();
+    assert!(config.contains("backend = \"tmux\""));
+
+    let second = h
+        .wt()
+        .args(["new", "repo/work", "--no-sync", "--no-open", "--json"])
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    assert!(second.stderr.is_empty());
+}
+
+#[test]
+fn new_keeps_its_payload_when_session_creation_fails() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+    common::write_executable(
+        &h.shims.join("tmux"),
+        "#!/bin/sh\ncase \"$1\" in has-session) exit 1;; new-session) echo unavailable >&2; exit 9;; esac\n",
+    );
+
+    let output = h
+        .wt()
+        .args(["new", "repo/work", "--no-sync", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["tree"]["target"], "repo/work");
+    assert_eq!(envelope["data"]["tree"]["phase"], "ready");
+    assert!(envelope["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| {
+            notice["code"] == "SESSION_CREATE_FAILED"
+                && notice["subject"] == "repo/work"
+                && notice["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("wt open repo/work")
+        }));
+    assert_eq!(h.json(&["status", "repo/work"])["data"]["phase"], "ready");
+
+    let terminal = Harness::new();
+    let repo = terminal.repo("repo", BASIC);
+    terminal.register(&repo);
+    common::write_executable(
+        &terminal.shims.join("tmux"),
+        "#!/bin/sh\ncase \"$1\" in has-session) exit 1;; new-session) echo unavailable >&2; exit 9;; esac\n",
+    );
+    let output = terminal.pty_output(&["new", "repo/work", "--no-sync"], b"");
+    assert_eq!(output.child.code, Some(0));
+    let transcript = String::from_utf8_lossy(&output.stdout);
+    assert!(transcript.contains("Created repo/work"));
+    assert!(transcript.contains("SESSION_CREATE_FAILED"));
+    assert!(transcript.contains("wt open repo/work"));
+}
+
+#[test]
+fn open_all_reports_each_tree_and_continues_after_a_failure() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+    h.json(&["new", "repo/one", "--no-sync", "--no-open"]);
+    h.json(&["new", "repo/two", "--no-sync", "--no-open"]);
+    wt_sys::fsx::remove_path(&h.home.join("trees/repo/one")).unwrap();
+
+    let output = h.wt().args(["open", "--all", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["exit"], 5);
+    let sessions = envelope["data"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 3);
+    assert!(
+        sessions.iter().any(|session| {
+            session["target"] == "repo/one"
+                && session["failed"] == true
+                && session["code"] == "TREE_REPLACED"
+        }),
+        "{envelope}"
+    );
+    for target in ["repo", "repo/two"] {
+        assert!(sessions
+            .iter()
+            .any(|session| { session["target"] == target && session["created"] == true }));
+    }
 }
 
 #[test]

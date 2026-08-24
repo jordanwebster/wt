@@ -20,17 +20,27 @@ struct NewFinish {
 }
 
 pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError> {
+    let backend_notice = register::resolve_session_backend(context)?;
     let target = args.target.clone();
     let no_open = args.no_open;
     let no_attach = args.no_attach;
     let mut output = create_tree(context, args)?;
+    if let Some(notice) = backend_notice {
+        output = output.with_notices([notice]);
+    }
     if no_open {
         return Ok(output);
     }
     if open::should_attach(context, no_attach) {
         return Ok(output.after_render(AfterRender::NewSession { target }));
     }
-    output = output.with_notices(open::provision_new(context, &target)?);
+    match open::provision_new(context, &target) {
+        Ok(notices) => output = output.with_notices(notices),
+        Err(error) => {
+            output = output.with_notices([open::session_failure_notice(&target, &error)]);
+            return Ok(output);
+        }
+    }
     if context.settings.session.backend == wt_core::settings::SessionBackend::Tmux {
         let resolved = context.resolve(Some(&target))?;
         let tree = context.tree(&resolved)?;

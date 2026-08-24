@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use wt_core::config::Command;
 use wt_core::model::TreeRec;
-use wt_core::report::{Notice, OpenSessionReport, SessionReport, SessionsData};
+use wt_core::report::{
+    FailedSessionReport, Notice, NoticeLevel, OpenSessionReport, SessionReport, SessionsData,
+};
 use wt_core::settings::SessionBackend;
 use wt_core::{CoreError, ExitClass};
 
@@ -13,6 +15,7 @@ use crate::cli::Open;
 use super::{door, shell, AfterRender, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Open) -> Result<Output, CoreError> {
+    let backend_notice = super::register::resolve_session_backend(context)?;
     require_tmux_backend(context)?;
     let trees = if args.all {
         context.registry.trees.clone()
@@ -20,14 +23,22 @@ pub(crate) fn run(context: &mut Context, args: Open) -> Result<Output, CoreError
         let target = context.resolve(args.target.as_deref())?;
         vec![context.tree(&target)?]
     };
-    let (sessions, notices) = open_trees(context, trees, args.agent.as_deref())?;
+    let (sessions, notices, failure) = open_trees(context, trees, args.agent.as_deref(), args.all)?;
     let attach = (!args.all && should_attach(context, args.no_attach))
-        .then(|| sessions.first().map(|session| session.name.clone()))
+        .then(|| {
+            sessions.first().and_then(|session| match session {
+                SessionReport::Open(session) => Some(session.name.clone()),
+                SessionReport::Closed(_) | SessionReport::Failed(_) => None,
+            })
+        })
         .flatten();
-    let mut output = Output::data(SessionsData {
-        sessions: sessions.into_iter().map(SessionReport::Open).collect(),
-    })?
-    .with_notices(notices);
+    let mut output = Output::data(SessionsData { sessions })?.with_notices(notices);
+    if let Some(notice) = backend_notice {
+        output = output.with_notices([notice]);
+    }
+    if let Some(error) = failure {
+        output = output.with_failure(error);
+    }
     if let Some(session) = attach {
         output = output.after_render(AfterRender::Attach { session });
     }
@@ -40,26 +51,49 @@ pub(crate) fn provision_new(context: &mut Context, target: &str) -> Result<Vec<N
     }
     let target = context.resolve(Some(target))?;
     let tree = context.tree(&target)?;
-    let (_, notices) = open_trees(context, vec![tree], None)?;
+    let (_, notices, _) = open_trees(context, vec![tree], None, false)?;
     Ok(notices)
 }
 
 pub(crate) fn open_new_after_summary(context: &mut Context, target: &str) -> Result<(), CoreError> {
     let target = context.resolve(Some(target))?;
     let tree = context.tree(&target)?;
-    let (sessions, _) = open_trees(context, vec![tree], None)?;
+    let (sessions, _, _) = open_trees(context, vec![tree], None, false)?;
     let session = sessions
         .first()
+        .and_then(|session| match session {
+            SessionReport::Open(session) => Some(session),
+            SessionReport::Closed(_) | SessionReport::Failed(_) => None,
+        })
         .expect("opening one tree produces one session");
     attach(context, &session.name)
 }
 
 pub(crate) fn should_attach(context: &Context, no_attach: bool) -> bool {
-    context.settings.session.backend == SessionBackend::Tmux
-        && context.settings.session.attach
-        && context.tty.stdout
-        && !context.json
-        && !context.parent_env.contains_key("WT_ACTIVATION")
+    attachment_allowed(
+        context.settings.session.backend,
+        context.settings.session.attach,
+        context.tty,
+        context.json,
+        context.parent_env.contains_key("WT_ACTIVATION"),
+        no_attach,
+    )
+}
+
+fn attachment_allowed(
+    backend: SessionBackend,
+    attach: bool,
+    tty: wt_sys::snapshot::Tty,
+    json: bool,
+    inside_door: bool,
+    no_attach: bool,
+) -> bool {
+    backend == SessionBackend::Tmux
+        && attach
+        && tty.stdin
+        && tty.stdout
+        && !json
+        && !inside_door
         && !no_attach
 }
 
@@ -88,73 +122,130 @@ fn open_trees(
     context: &mut Context,
     trees: Vec<TreeRec>,
     agent_override: Option<&str>,
-) -> Result<(Vec<OpenSessionReport>, Vec<Notice>), CoreError> {
+    contain_failures: bool,
+) -> Result<(Vec<SessionReport>, Vec<Notice>, Option<CoreError>), CoreError> {
     let tmux = tmux(context);
     let mut sessions = Vec::new();
     let mut notices = Vec::new();
+    let mut worst = None;
     for tree in trees {
         let target = super::context::target_of(&tree);
-        let mut gate = door::enter(context, Some(&target.to_string()), "open", false)?;
-        notices.extend(gate.notices.clone());
-        let mut existing = tmux.has_session(&tree.session_name)?;
-        let mut created = false;
-        let mut reported_agent = tree.agent.clone();
-        if !existing {
-            let launch = launch_command(context, &tree, agent_override)?;
-            let running_binary = std::env::current_exe().map_err(|error| {
-                CoreError::new(
-                    ExitClass::Internal,
-                    "CURRENT_EXE_FAILED",
-                    format!("could not resolve the running wt binary: {error}"),
-                    "retry and report this wt bug if it repeats",
-                )
-            })?;
-            let mut inner = vec![
-                running_binary.into_os_string(),
-                OsString::from("exec"),
-                OsString::from("--no-gate"),
-                OsString::from(target.to_string()),
-                OsString::from("--"),
-            ];
-            inner.extend(launch.argv);
-            if let Err(error) =
-                tmux.new_session(&tree.session_name, Path::new(tree.path.as_str()), &inner)
-            {
-                if !tmux.has_session(&tree.session_name)? {
-                    return Err(error);
+        let result = open_tree(context, &tmux, tree.clone(), agent_override);
+        let (session, tree_notices) = match result {
+            Ok(result) => result,
+            Err(error) if contain_failures => {
+                let notice = Notice {
+                    level: NoticeLevel::Warn,
+                    code: error.code.0.clone(),
+                    subject: Some(target.to_string()),
+                    message: format!("{}; remedy: {}", error.message, error.remedy),
+                };
+                notices.push(notice);
+                if worst
+                    .as_ref()
+                    .map_or(true, |current: &CoreError| error.exit() > current.exit())
+                {
+                    worst = Some(error.clone());
                 }
-                existing = true;
-            } else {
-                created = true;
-                reported_agent.clone_from(&launch.agent);
-                if let Some(agent) = launch.record_agent {
-                    context.mutate_registry(
-                        &context.holder(target.to_string(), "open")?,
-                        |registry| {
-                            if let Some(record) = registry
-                                .trees
-                                .iter_mut()
-                                .find(|record| record.tree_id == tree.tree_id)
-                            {
-                                record.agent = Some(agent.clone());
-                            }
-                            Ok(())
-                        },
-                    )?;
-                }
+                sessions.push(SessionReport::Failed(FailedSessionReport {
+                    target: target.to_string(),
+                    name: tree.session_name,
+                    failed: true,
+                    code: error.code.0,
+                    message: error.message,
+                    remedy: error.remedy,
+                }));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        notices.extend(tree_notices);
+        sessions.push(SessionReport::Open(session));
+    }
+    Ok((sessions, notices, worst))
+}
+
+fn open_tree(
+    context: &mut Context,
+    tmux: &wt_sys::tmux::Tmux,
+    tree: TreeRec,
+    agent_override: Option<&str>,
+) -> Result<(OpenSessionReport, Vec<Notice>), CoreError> {
+    let target = super::context::target_of(&tree);
+    let mut gate = door::enter(context, Some(&target.to_string()), "open", false)?;
+    let notices = gate.notices.clone();
+    let mut existing = tmux.has_session(&tree.session_name)?;
+    let mut created = false;
+    let mut reported_agent = tree.agent.clone();
+    if !existing {
+        let launch = launch_command(context, &tree, agent_override)?;
+        let running_binary = std::env::current_exe().map_err(|error| {
+            CoreError::new(
+                ExitClass::Internal,
+                "CURRENT_EXE_FAILED",
+                format!("could not resolve the running wt binary: {error}"),
+                "retry and report this wt bug if it repeats",
+            )
+        })?;
+        let mut inner = vec![
+            running_binary.into_os_string(),
+            OsString::from("exec"),
+            OsString::from("--no-gate"),
+            OsString::from(target.to_string()),
+            OsString::from("--"),
+        ];
+        inner.extend(launch.argv);
+        if let Err(error) =
+            tmux.new_session(&tree.session_name, Path::new(tree.path.as_str()), &inner)
+        {
+            if !tmux.has_session(&tree.session_name)? {
+                return Err(error);
+            }
+            existing = true;
+        } else {
+            created = true;
+            reported_agent.clone_from(&launch.agent);
+            if let Some(agent) = launch.record_agent {
+                context.mutate_registry(
+                    &context.holder(target.to_string(), "open")?,
+                    |registry| {
+                        if let Some(record) = registry
+                            .trees
+                            .iter_mut()
+                            .find(|record| record.tree_id == tree.tree_id)
+                        {
+                            record.agent = Some(agent.clone());
+                        }
+                        Ok(())
+                    },
+                )?;
             }
         }
-        gate.release_gate();
-        sessions.push(OpenSessionReport {
+    }
+    gate.release_gate();
+    Ok((
+        OpenSessionReport {
             target: target.to_string(),
             name: tree.session_name,
             created,
             existing,
             agent: reported_agent,
             foreground: false,
-        });
+        },
+        notices,
+    ))
+}
+
+pub(crate) fn session_failure_notice(target: &str, error: &CoreError) -> Notice {
+    Notice {
+        level: NoticeLevel::Warn,
+        code: "SESSION_CREATE_FAILED".to_owned(),
+        subject: Some(target.to_owned()),
+        message: format!(
+            "session for {target} was not created: {}; run `wt open {target}` to retry",
+            error.message
+        ),
     }
-    Ok((sessions, notices))
 }
 
 struct Launch {
@@ -226,4 +317,48 @@ fn tmux(context: &Context) -> wt_sys::tmux::Tmux {
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(10));
     wt_sys::tmux::Tmux::new("tmux", timeout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_requires_a_terminal_on_input_and_output() {
+        let terminal = wt_sys::snapshot::Tty {
+            stdin: true,
+            stdout: true,
+            stderr: true,
+        };
+        assert!(attachment_allowed(
+            SessionBackend::Tmux,
+            true,
+            terminal,
+            false,
+            false,
+            false
+        ));
+        assert!(!attachment_allowed(
+            SessionBackend::Tmux,
+            true,
+            wt_sys::snapshot::Tty {
+                stdin: false,
+                ..terminal
+            },
+            false,
+            false,
+            false
+        ));
+        assert!(!attachment_allowed(
+            SessionBackend::Tmux,
+            true,
+            wt_sys::snapshot::Tty {
+                stdout: false,
+                ..terminal
+            },
+            false,
+            false,
+            false
+        ));
+    }
 }

@@ -8,6 +8,7 @@ use crate::cli::Close;
 use super::{Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Close) -> Result<Output, CoreError> {
+    let backend_notice = super::register::resolve_session_backend(context)?;
     super::open::require_tmux_backend(context)?;
     let trees = if args.all {
         context.registry.trees.clone()
@@ -24,7 +25,11 @@ pub(crate) fn run(context: &mut Context, args: Close) -> Result<Output, CoreErro
             closed,
         }));
     }
-    Output::data(SessionsData { sessions })
+    let mut output = Output::data(SessionsData { sessions })?;
+    if let Some(notice) = backend_notice {
+        output = output.with_notices([notice]);
+    }
+    Ok(output)
 }
 
 pub(crate) fn close_tree(

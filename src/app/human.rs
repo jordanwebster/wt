@@ -343,6 +343,9 @@ fn render_sessions(data: SessionsData, notices: &[Notice]) -> String {
                     "already closed".to_owned()
                 },
             )),
+            wt_core::report::SessionReport::Failed(failed) => {
+                rows.push((failed.target, format!("failed ({})", failed.code)))
+            }
         }
     }
     let headline = if rows.len() == 1 {
