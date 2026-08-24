@@ -309,6 +309,9 @@ fn resource_reports(
 }
 
 fn session_state(context: &Context, tree: &wt_core::model::TreeRec) -> String {
+    if context.settings.session.backend == wt_core::settings::SessionBackend::None {
+        return "no".to_owned();
+    }
     let timeout = wt_core::model::duration_millis(&context.settings.session.tmux_timeout)
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(10));

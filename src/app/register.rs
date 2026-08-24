@@ -7,6 +7,7 @@ use wt_core::model::{
     gitdir_id, AbsPath, Label, LabelRec, SourceKind, Target, TreeRec, TreeSource,
 };
 use wt_core::report::{DeclaredReport, DeclaredResourceReport, RegisterData};
+use wt_core::settings::SessionBackend;
 use wt_core::{CoreError, ExitClass};
 use wt_sys::lock::{self, Mode};
 
@@ -26,6 +27,23 @@ pub(crate) fn run(context: &mut Context, args: Register) -> Result<Output, CoreE
 }
 
 pub(crate) fn perform(
+    context: &mut Context,
+    path: PathBuf,
+    label_arg: Option<String>,
+    move_to: Option<PathBuf>,
+    repair: bool,
+    cloned: bool,
+) -> Result<Output, CoreError> {
+    let backend_notice = resolve_session_backend(context)?;
+    let output = perform_with_backend(context, path, label_arg, move_to, repair, cloned)?;
+    Ok(if let Some(notice) = backend_notice {
+        output.with_notices([notice])
+    } else {
+        output
+    })
+}
+
+fn perform_with_backend(
     context: &mut Context,
     path: PathBuf,
     label_arg: Option<String>,
@@ -250,6 +268,39 @@ pub(crate) fn perform(
     })?;
     drop(token);
     finish_with_door(context, tree, true, cloned, Some(prepared), false)
+}
+
+fn resolve_session_backend(
+    context: &mut Context,
+) -> Result<Option<wt_core::report::Notice>, CoreError> {
+    let path = context.home.join("config.toml");
+    let source = wt_sys::fsx::read_string(&path)?.unwrap_or_default();
+    if wt_core::settings::backend_is_declared(&source)? {
+        return Ok(None);
+    }
+    let timeout = wt_core::model::duration_millis(&context.settings.session.tmux_timeout)
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(10));
+    let backend = if wt_sys::tmux::Tmux::new("tmux", timeout)
+        .check_version()
+        .is_ok()
+    {
+        SessionBackend::Tmux
+    } else {
+        SessionBackend::None
+    };
+    let updated = wt_core::settings::declare_backend(&source, backend)?;
+    wt_sys::fsx::write_store(&path, updated.as_bytes())?;
+    context.settings = wt_core::settings::parse(&updated)?;
+    Ok(Some(wt_core::report::Notice {
+        level: wt_core::report::NoticeLevel::Info,
+        code: "SESSION_BACKEND_SELECTED".to_owned(),
+        subject: None,
+        message: format!(
+            "session backend set to `{}`; change `session.backend` in $WT_HOME/config.toml to choose another",
+            backend.as_str()
+        ),
+    }))
 }
 
 fn repair_canonical(context: &mut Context, tree: TreeRec) -> Result<Output, CoreError> {

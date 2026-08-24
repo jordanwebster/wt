@@ -8,14 +8,9 @@ use crate::cli::Close;
 use super::{Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Close) -> Result<Output, CoreError> {
+    super::open::require_tmux_backend(context)?;
     let trees = if args.all {
-        context
-            .registry
-            .trees
-            .iter()
-            .filter(|tree| tree.agent.is_some())
-            .cloned()
-            .collect::<Vec<_>>()
+        context.registry.trees.clone()
     } else {
         let target = context.resolve(args.target.as_deref())?;
         vec![context.tree(&target)?]
@@ -40,7 +35,6 @@ pub(crate) fn close_tree(
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(10));
     let tmux = wt_sys::tmux::Tmux::new("tmux", timeout);
-    tmux.check_version()?;
     let exists = tmux.has_session(&tree.session_name)?;
     if exists {
         tmux.kill_session(&tree.session_name)?;

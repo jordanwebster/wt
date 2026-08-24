@@ -46,7 +46,6 @@ pub const CODES: &[&str] = &[
     "IDENTIFIER_LONG",
     "TREE_IN_USE",
     "GIT_TOO_OLD",
-    "TMUX_OLD",
 ];
 
 pub fn is_code(code: &str) -> bool {

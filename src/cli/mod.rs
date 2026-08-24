@@ -215,7 +215,9 @@ pub struct New {
     #[arg(long)]
     pub no_fetch: bool,
     #[arg(long)]
-    pub agent: Option<String>,
+    pub no_open: bool,
+    #[arg(long)]
+    pub no_attach: bool,
 }
 
 #[derive(Debug, Args)]

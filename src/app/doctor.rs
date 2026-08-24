@@ -549,7 +549,7 @@ fn state_orphan_findings(
     Ok(())
 }
 
-fn tooling_findings(context: &Context, findings: &mut Vec<Finding>) {
+fn tooling_findings(_context: &Context, findings: &mut Vec<Finding>) {
     match wt_sys::git::Git::version("git", Duration::from_secs(5)) {
         Ok(version) if version < (2, 31, 0) => findings.push(finding(
             Severity::Warn,
@@ -562,20 +562,6 @@ fn tooling_findings(context: &Context, findings: &mut Vec<Finding>) {
             "upgrade git to 2.31 or newer",
         )),
         _ => {}
-    }
-    let timeout = wt_core::model::duration_millis(&context.settings.session.tmux_timeout)
-        .map(Duration::from_millis)
-        .unwrap_or(Duration::from_secs(10));
-    if let Err(error) = wt_sys::tmux::Tmux::new("tmux", timeout).check_version() {
-        if error.code.0 == "TMUX_OLD" {
-            findings.push(finding(
-                Severity::Warn,
-                "TMUX_OLD",
-                "tmux",
-                error.message,
-                error.remedy,
-            ));
-        }
     }
 }
 

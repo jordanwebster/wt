@@ -11,7 +11,7 @@ use wt_sys::lock::{self, Mode};
 use crate::cli::New;
 
 use super::context::target_of;
-use super::{door, executor, list, register, Context, Output};
+use super::{door, executor, list, open, register, AfterRender, Context, Output};
 
 struct NewFinish {
     sync: Option<Vec<wt_core::report::StepReport>>,
@@ -20,6 +20,29 @@ struct NewFinish {
 }
 
 pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError> {
+    let target = args.target.clone();
+    let no_open = args.no_open;
+    let no_attach = args.no_attach;
+    let mut output = create_tree(context, args)?;
+    if no_open {
+        return Ok(output);
+    }
+    if open::should_attach(context, no_attach) {
+        return Ok(output.after_render(AfterRender::NewSession { target }));
+    }
+    output = output.with_notices(open::provision_new(context, &target)?);
+    if context.settings.session.backend == wt_core::settings::SessionBackend::Tmux {
+        let resolved = context.resolve(Some(&target))?;
+        let tree = context.tree(&resolved)?;
+        output.data["tree"]["session"] = serde_json::Value::String("yes".to_owned());
+        output.data["tree"]["agent"] = tree
+            .agent
+            .map_or(serde_json::Value::Null, serde_json::Value::String);
+    }
+    Ok(output)
+}
+
+fn create_tree(context: &mut Context, args: New) -> Result<Output, CoreError> {
     let target = Target::parse(&args.target)?;
     if target.name == "canonical" {
         return Err(CoreError::new(
@@ -180,7 +203,7 @@ fn create(
         name_short: coordinates.name_short,
         session_name: coordinates.session_name,
         created_at: now,
-        agent: args.agent.clone(),
+        agent: None,
         source: TreeSource {
             kind: if pr.is_some() {
                 SourceKind::Pr
@@ -662,18 +685,6 @@ fn finish_under_lock(
         state.last_error = None;
         Ok(())
     })?;
-    if let Some(agent) = &args.agent {
-        context.mutate_registry(holder, |registry| {
-            if let Some(record) = registry
-                .trees
-                .iter_mut()
-                .find(|record| record.tree_id == tree.tree_id)
-            {
-                record.agent = Some(agent.clone());
-            }
-            Ok(())
-        })?;
-    }
     let verify = if args.verify {
         Some(run_verify(context, &door, holder, &mut notices)?)
     } else {

@@ -44,6 +44,12 @@ pub(crate) struct Output {
     pub data: Value,
     pub text: Option<String>,
     pub notices: Vec<Notice>,
+    after_render: Option<AfterRender>,
+}
+
+pub(crate) enum AfterRender {
+    Attach { session: String },
+    NewSession { target: String },
 }
 
 impl Output {
@@ -53,6 +59,7 @@ impl Output {
             data,
             text: None,
             notices: Vec::new(),
+            after_render: None,
         })
     }
 
@@ -74,6 +81,11 @@ impl Output {
         });
         self
     }
+
+    pub fn after_render(mut self, action: AfterRender) -> Self {
+        self.after_render = Some(action);
+        self
+    }
 }
 
 pub fn main(cli: Cli) -> i32 {
@@ -90,13 +102,16 @@ pub fn main(cli: Cli) -> i32 {
         Command::Completions(args) => Some(completions::generate(args.shell)),
         _ => None,
     };
+    let mut opened_context = None;
     let (result, pending_notices) = if let Some(result) = standalone {
         (result, Vec::new())
     } else {
         match Context::open(&cli) {
             Ok(mut context) => {
                 let result = dispatch(&mut context, cli);
-                (result, context.pending_notices)
+                let notices = std::mem::take(&mut context.pending_notices);
+                opened_context = Some(context);
+                (result, notices)
             }
             Err(error) => (Err(error), Vec::new()),
         }
@@ -105,7 +120,7 @@ pub fn main(cli: Cli) -> i32 {
         Ok(mut output) => {
             if json {
                 let mut envelope =
-                    Envelope::success(command, env!("CARGO_PKG_VERSION"), output.data);
+                    Envelope::success(command.clone(), env!("CARGO_PKG_VERSION"), output.data);
                 envelope.notices.append(&mut output.notices);
                 write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
             } else {
@@ -125,53 +140,103 @@ pub fn main(cli: Cli) -> i32 {
                     .unwrap_or_else(|| human_kind.render(&output.data, &output.notices));
                 write_stdout(text);
             }
+            let _ = std::io::stdout().flush();
+            if let Some(action) = output.after_render {
+                let result = run_after_render(
+                    opened_context
+                        .as_mut()
+                        .expect("deferred actions require an open context"),
+                    action,
+                );
+                if let Err(error) = result {
+                    return render_error(&command, json, color, error, Vec::new());
+                }
+            }
             0
         }
-        Err(error) => {
-            let exit = if !json
-                && matches!(command.as_str(), "run" | "test" | "lint" | "fmt" | "build")
-                && error.code.0 == "TASK_FAILED"
-            {
-                error.details["child"]["code"]
-                    .as_i64()
-                    .and_then(|code| i32::try_from(code).ok())
-                    .or_else(|| {
-                        error.details["child"]["signal"]
-                            .as_i64()
-                            .and_then(|signal| i32::try_from(signal).ok())
-                            .map(|signal| 128 + signal)
-                    })
-                    .unwrap_or_else(|| i32::from(error.exit()))
-            } else {
-                i32::from(error.exit())
-            };
-            if json {
-                let mut envelope =
-                    Envelope::<Value>::failure(command, env!("CARGO_PKG_VERSION"), error);
-                envelope.notices = pending_notices;
-                write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
-            } else {
-                for notice in pending_notices {
-                    if notice.code != "BIN_DIR_MISSING" && !quiet && (stderr_tty || verbose) {
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "wt: {} — {}",
-                            notice.code,
-                            notice.message
-                        );
-                    }
-                }
-                let code = if color {
-                    format!("\u{1b}[31m{}\u{1b}[0m", error.code.0)
-                } else {
-                    error.code.0.clone()
-                };
-                let _ = writeln!(std::io::stderr(), "wt: {} — {}", code, error.message);
-                let _ = writeln!(std::io::stderr(), "remedy: {}", error.remedy);
-            }
-            exit
-        }
+        Err(error) => render_error_with_visibility(
+            &command,
+            json,
+            color,
+            error,
+            pending_notices,
+            quiet,
+            stderr_tty,
+            verbose,
+        ),
     }
+}
+
+fn run_after_render(context: &mut Context, action: AfterRender) -> Result<(), CoreError> {
+    match action {
+        AfterRender::Attach { session } => open::attach(context, &session),
+        AfterRender::NewSession { target } => open::open_new_after_summary(context, &target),
+    }
+}
+
+fn render_error(
+    command: &str,
+    json: bool,
+    color: bool,
+    error: CoreError,
+    notices: Vec<Notice>,
+) -> i32 {
+    render_error_with_visibility(command, json, color, error, notices, false, true, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_error_with_visibility(
+    command: &str,
+    json: bool,
+    color: bool,
+    error: CoreError,
+    pending_notices: Vec<Notice>,
+    quiet: bool,
+    stderr_tty: bool,
+    verbose: bool,
+) -> i32 {
+    let exit = if !json
+        && matches!(command, "run" | "test" | "lint" | "fmt" | "build")
+        && error.code.0 == "TASK_FAILED"
+    {
+        error.details["child"]["code"]
+            .as_i64()
+            .and_then(|code| i32::try_from(code).ok())
+            .or_else(|| {
+                error.details["child"]["signal"]
+                    .as_i64()
+                    .and_then(|signal| i32::try_from(signal).ok())
+                    .map(|signal| 128 + signal)
+            })
+            .unwrap_or_else(|| i32::from(error.exit()))
+    } else {
+        i32::from(error.exit())
+    };
+    if json {
+        let mut envelope =
+            Envelope::<Value>::failure(command.to_owned(), env!("CARGO_PKG_VERSION"), error);
+        envelope.notices = pending_notices;
+        write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
+    } else {
+        for notice in pending_notices {
+            if notice.code != "BIN_DIR_MISSING" && !quiet && (stderr_tty || verbose) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "wt: {} — {}",
+                    notice.code,
+                    notice.message
+                );
+            }
+        }
+        let code = if color {
+            format!("\u{1b}[31m{}\u{1b}[0m", error.code.0)
+        } else {
+            error.code.0.clone()
+        };
+        let _ = writeln!(std::io::stderr(), "wt: {} — {}", code, error.message);
+        let _ = writeln!(std::io::stderr(), "remedy: {}", error.remedy);
+    }
+    exit
 }
 
 fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
