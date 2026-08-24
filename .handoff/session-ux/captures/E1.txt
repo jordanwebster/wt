@@ -1,0 +1,572 @@
+$ cargo fmt --all -- --check
+$ cargo clippy --workspace --all-targets -- -D warnings
+    Checking wt v0.1.0 (/Users/jlw/source/wt)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.50s
+$ cargo test --workspace
+   Compiling wt v0.1.0 (/Users/jlw/source/wt)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.79s
+     Running unittests src/main.rs (target/debug/deps/wt-d58d240dec3f4c2c)
+
+running 1 test
+test app::open::tests::attachment_requires_a_terminal_on_input_and_output ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/acceptance.rs (target/debug/deps/acceptance-57bea841b9dd7c93)
+
+running 4 tests
+test version_matches_workspace_package_metadata ... ok
+test orbitapp_acceptance_walk_covers_port_alias_sibling_link_and_path_occupied ... ok
+test orbit_acceptance_walk_covers_rendered_config_daemon_and_safe_missing_tree_teardown ... ok
+test orbitcloud_acceptance_walk_covers_composition_copy_no_run_resource_and_probe_barrier ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.25s
+
+     Running tests/contracts.rs (target/debug/deps/contracts-ae941a30672ede1b)
+
+running 55 tests
+test doctor_condition_contracts_cover_every_documented_code ... ok
+test aliases_use_the_run_task_set ... ok
+test clone_registers_the_new_checkout ... ok
+test door_notices_stay_in_json_and_missing_bins_render_as_next_steps ... ok
+test doctor_reports_and_prune_deletes_state_orphans ... ok
+test adopt_registers_an_existing_linked_worktree ... ok
+test env_and_exec_transport_the_same_coordinates ... ok
+test acceptance_shaped_fixture_walks_register_new_run_open_remove ... ok
+test env_sh_unsets_keys_restored_to_absence ... ok
+test copy_reporting_distinguishes_absent_and_tracked_sources ... ok
+test cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs ... ok
+test old_format_is_rejected_before_current_state_is_written ... ok
+test new_run_and_remove_form_an_idempotent_lifecycle ... ok
+test from_resolution_fetches_prs_and_names_branch_holders ... ok
+test missing_tree_teardown_reports_exe_missing_and_the_actual_remaining_count ... ok
+test new_sync_failure_is_failed_and_resumes_from_sync ... ok
+test non_tty_destruction_requires_confirmation ... ok
+test passthrough_doors_refuse_json_with_usage_exit ... ok
+test present_resource_environment_is_identical_across_env_exec_and_run ... ok
+test open_all_reports_each_tree_and_continues_after_a_failure ... ok
+test doctor_manufactures_lifecycle_and_resource_conditions ... ok
+test new_keeps_its_payload_when_session_creation_fails ... ok
+test ready_exec_stays_inside_the_door_subprocess_budget ... ok
+test doctor_manufactures_repository_capacity_lock_and_tooling_conditions ... ok
+test refresh_recreates_a_present_resource ... ok
+test forge_pr_urls_use_the_matching_origin_and_refspec ... ok
+test prune_without_yes_is_report_only ... ok
+test prune_collects_tombstones_and_missing_trees ... ok
+test doctor_manufactures_git_environment_port_and_adapter_conditions ... ok
+test register_explains_how_to_rewrite_an_inline_session_table ... ok
+test register_and_idempotence_have_envelopes ... ok
+test prune_records_then_new_creates_a_fresh_incarnation ... ok
+test shell_init_and_completions_are_script_envelopes ... ok
+test shell_scripts_do_not_depend_on_a_healthy_home ... ok
+test register_move_to_repairs_and_rechecks_the_checkout ... ok
+test run_json_keeps_one_envelope_on_stdout ... ok
+test resource_run_and_destroy_follow_probe_truth ... ok
+test session_transport_uses_inner_no_gate_door_without_tmux_e ... ok
+test register_repair_restores_only_a_replaced_canonical_checkout ... ok
+test shell_refuses_json_while_open_provisions_without_attaching ... ok
+test remove_is_idempotent_and_text_run_preserves_child_status ... ok
+test remove_keep_orphans_leaves_a_missing_live_entry ... ok
+test session_verbs_resolve_a_backend_for_preexisting_homes_once ... ok
+test prune_merged_and_gone_remove_only_clean_classified_trees ... ok
+test sync_and_which_have_stable_data_shapes ... ok
+test sync_rechecks_tracked_render_paths_even_when_they_have_records ... ok
+test sync_without_a_sync_task_never_bricks_the_canonical_tree ... ok
+test text_run_keeps_wt_guidance_off_the_child_stdout ... ok
+test register_declares_the_session_backend_once_and_legacy_agent_setting_is_rejected ... ok
+test unregister_leaves_the_checkout ... ok
+test truth_and_inspection_verbs_match_the_registered_tree ... ok
+test truth_surfaces_report_descriptions_config_errors_and_live_locks ... ok
+test verify_failure_is_distinct_and_can_be_resumed ... ok
+test truth_reports_upstream_default_drift_staleness_probe_and_disk ... ok
+test tty_consent_accepts_and_declines_through_a_pseudoterminal ... ok
+
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.60s
+
+     Running tests/human_transcripts.rs (target/debug/deps/human_transcripts-9ebc1018c2c9d03d)
+
+running 7 tests
+test harness_never_uses_operator_state ... ok
+test canonical_repair_transcript ... ok
+test new_calls_skipped_sync_nodes_skipped ... ok
+test bin_directory_guidance_is_a_summary_fact_even_when_quiet ... ok
+test human_command_transcripts ... ok
+test redirected_output_matches_the_terminal_text ... ok
+test every_successful_verb_uses_intentional_human_text ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.82s
+
+     Running tests/json_snapshots.rs (target/debug/deps/json_snapshots-4384eb5db1b90a67)
+
+running 1 test
+test every_verb_has_a_normalized_json_contract_snapshot ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.77s
+
+     Running tests/session_flow.rs (target/debug/deps/session_flow-a0ed5ad85a7f55cf)
+
+running 6 tests
+test backend_none_never_invokes_tmux_for_truth_or_teardown ... ok
+test new_rejects_agent_while_open_agent_starts_the_requested_recipe ... ok
+test new_attaches_and_the_live_pane_has_the_tree_environment ... ok
+test remove_closes_the_private_tmux_session ... ok
+test agents_start_only_for_new_sessions_and_open_all_resumes_recorded_agents ... ok
+test session_creation_and_attachment_matrix ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.93s
+
+     Running unittests src/lib.rs (target/debug/deps/wt_core-dc0d9075c6d83e66)
+
+running 80 tests
+test address::tests::cwd_uses_longest_prefix ... ok
+test address::tests::absolute_paths_use_longest_prefix_and_not_found_lists_candidates ... ok
+test address::tests::bare_name_prefers_current_label_then_label ... ok
+test config::tests::detect_fields_merge_even_when_the_override_equals_the_default ... ok
+test config::tests::rejects_unknown_keys_with_location ... ok
+test config::tests::nested_scope_deletions_survive_layer_merge_until_scope_resolution ... ok
+test config::tests::only_false_is_a_deletion_value ... ok
+test config::tests::merge_deletes_entries_and_scopes_accumulate ... ok
+test config::tests::validation_rejects_resource_without_probe_or_scope ... ok
+test config::tests::validation_covers_port_mode_duration_and_readiness_rows ... ok
+test config::tests::resolved_validation_rejects_alias_chains_and_repo_tree_variables ... ok
+test coords::tests::non_matching_tombstone_does_not_supply_coordinates ... ok
+test config::tests::resolved_validation_applies_every_scope_sensitive_row ... ok
+test coords::tests::persisted_and_squatted_ranges_are_both_avoided ... ok
+test coords::tests::smallest_free_slot_and_identity_collisions_are_reported ... ok
+test coords::tests::slot_independent_refusals_win_even_when_all_slots_are_taken ... ok
+test coords::tests::tombstone_inherits_the_complete_coordinate_record ... ok
+test declarations::tests::reconcile_replaces_only_declarations_and_marks_missing_tasks ... ok
+test declarations::tests::refresh_skipped_preserves_the_previous_declaration_and_declared_status ... ok
+test declarations::tests::repo_declaration_is_stripped_without_agreement_or_provenance ... ok
+test doctor::tests::pure_doctor_findings_cover_resource_names_and_adapter_metadata ... ok
+test drift::tests::reports_only_changed_sync_inputs_in_lexical_order ... ok
+test adapters::tests::nightly_rustfmt_sniff_selects_nightly_tool ... ok
+test adapters::tests::npm_test_is_unconditional_but_other_node_scripts_are_detected ... ok
+test adapters::tests::composite_needs_keep_submodule_root_and_scope_order ... ok
+test env::tests::corrupt_marker_is_ignored_and_the_door_proceeds ... ok
+test env::tests::activation_json_is_compact_with_recursively_sorted_keys ... ok
+test env::tests::corrupt_recorded_port_geometry_is_rejected ... ok
+test config::tests::parses_all_acceptance_files_unchanged ... ok
+test env::tests::contributed_path_cannot_shadow_declared_bins ... ok
+test exclude::tests::block_is_sorted_deduplicated_and_removable ... ok
+test exclude::tests::preserves_outside_bytes_and_repairs_unclosed_block ... ok
+test from_ref::tests::decision_table_covers_equal_refs_forcing_fallbacks_and_errors ... ok
+test env::tests::user_edits_to_tool_owned_keys_are_replaced_by_the_next_door ... ok
+test from_ref::tests::local_remote_revision_and_pr_precedence_match_new ... ok
+test lifecycle::tests::derives_every_cell_of_the_reduced_phase_table ... ok
+test lifecycle::tests::init_resumes_only_an_unlocked_initialisation ... ok
+test model::tests::identifier_grammars_and_derivations_match_the_spec ... ok
+test model::tests::registry_allows_canonical_path_alias_but_rejects_other_duplicates ... ok
+test model::tests::registry_schema_round_trips_every_persisted_record ... ok
+test new::tests::decision_table_covers_verify_conflicts_and_every_resume_point ... ok
+test new::tests::revised_conflicts_include_path_occupied ... ok
+test new::tests::revised_decision_table_covers_ready_missing_and_resume ... ok
+test ports::tests::append_is_reorder_proof_and_never_reuses_removed_names ... ok
+test model::tests::tombstone_paths_do_not_participate_in_live_path_uniqueness ... ok
+test adapters::tests::orbitcloud_composition_is_overridden_at_root ... ok
+test adapters::tests::composition_supports_private_tasks_dynamic_composites_and_no_verify ... ok
+test remove::tests::classification_follows_every_upstream_rule ... ok
+test ports::tests::exhaustion_and_corrupt_recorded_indices_are_distinct ... ok
+test remove::tests::replaced_at_observation_is_plannable_but_replacement_after_consent_stops ... ok
+test remove::tests::unregister_uses_the_same_plan_without_the_canonical_redirect ... ok
+test render::tests::numbered_table_is_exhaustive_and_ordered ... ok
+test resource::tests::default_names_distinguish_tree_and_repo_resources ... ok
+test resource::tests::instance_is_frozen_before_run_and_a_failed_probe_never_causes_an_effect ... ok
+test resource::tests::no_run_resource_stays_declared_with_the_external_notice ... ok
+test report::tests::stable_ordering_rules_are_applied ... ok
+test report::tests::every_declared_array_order_and_nested_map_canonicalisation_is_covered ... ok
+test session::tests::sanitises_and_uses_the_fixed_hash_width ... ok
+test settings::tests::backend_declaration_explains_how_to_rewrite_an_inline_session_table ... ok
+test settings::tests::rejects_low_base_zero_stride_and_incomplete_geometry ... ok
+test settings::tests::backend_declaration_preserves_existing_settings ... ok
+test settings::tests::settings_parser_applies_defaults_and_rejects_unknown_keys ... ok
+test resource::tests::table_driven_test_covers_every_three_state_event_cell ... ok
+test snapshot::tests::env_minimisation_is_exact_and_repo_tied_values_are_stripped ... ok
+test task::tests::lock_plan_obeys_levels_and_held_tokens ... ok
+test snapshot::tests::missing_tree_word_test_uses_only_the_recipe_about_to_run ... ok
+test task::tests::plan_is_topological_with_stable_ties ... ok
+test template::tests::expands_names_braces_dollars_and_literal_dollar ... ok
+test task::tests::plan_rejects_cycles_and_unresolved_dependencies ... ok
+test template::tests::rejects_unclosed_or_invalid_braces ... ok
+test template::tests::shell_scanner_keeps_valid_references_and_ignores_shell_expansions ... ok
+test adapters::tests::lockfiles_choose_tools_and_override_wins ... ok
+test adapters::tests::disabled_adapter_is_skipped_and_tool_metadata_is_contributed ... ok
+test coords::tests::geometry_validation_uses_bounded_u32_arithmetic ... ok
+test coords::tests::valid_geometry_slots_stay_inside_the_port_space ... ok
+test coords::tests::chosen_ranges_do_not_overlap ... ok
+test report::tests::snapshots_every_success_data_schema ... ok
+test env::tests::deactivation_effect_is_bounded_to_applied_keys ... ok
+test env::tests::l1_deactivation_restores_marker_free_parent ... ok
+test env::tests::l2_nested_activation_equals_direct ... ok
+
+test result: ok. 80 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/manifest_allowlist.rs (target/debug/deps/manifest_allowlist-fdcfc597698fa2c8)
+
+running 1 test
+test manifest_dependencies_stay_within_the_pure_core_allowlist ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/purity_guard.rs (target/debug/deps/purity_guard-43c2ae7002b40148)
+
+running 1 test
+test purity_barrier_covers_demonstrated_bypasses_and_source_is_clean ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/wt_sys-eb12ce805a7e6fcf)
+
+running 37 tests
+test failpoint::tests::only_the_named_point_trips ... ok
+test git::tests::default_branch_and_url_helpers_keep_borrowed_behavior ... ok
+test fsx::tests::timestamps_use_one_rfc3339_utc_shape ... ok
+test fsx::tests::adapter_snapshot_captures_only_requested_contents ... ok
+test git::tests::parses_worktree_and_status_porcelain ... ok
+test fsx::tests::nofollow_rejects_a_symlinked_parent_component ... ok
+test fsx::tests::required_reflink_reports_unavailable_and_removes_partial_destination ... ok
+test fsx::tests::executable_probe_judges_what_exec_would_run ... ok
+test fsx::tests::nofollow_observation_and_removal_preserve_symlink_boundaries ... ok
+test lock::tests::deadline_returns_the_class_for_the_requested_level ... ok
+test lock::tests::holder_record_and_try_flock_are_liveness_truth ... ok
+test fsx::tests::recursive_copy_refuses_a_symlinked_destination_directory ... ok
+test fsx::tests::unsupported_reflink_falls_back_per_file ... ok
+test net::tests::detects_a_bound_v4_port_and_a_free_one ... ok
+test fsx::tests::recursive_copy_recreates_symlinks_and_copies_each_file ... ok
+test lock::tests::torn_advisory_holder_record_is_reported_as_unknown ... ok
+test proc::tests::capture_preserves_binary_output_and_maps_signal_exit ... ok
+test lock::tests::shared_tree_and_door_record_are_one_level_and_can_coexist ... ok
+test proc::tests::run_tees_both_streams_to_a_mode_0600_log ... ok
+test fsx::tests::exclude_splice_and_log_retention_preserve_their_formats ... ok
+test snapshot::tests::executable_capture_is_sorted_and_ignores_non_executables ... ok
+test snapshot::tests::executable_capture_follows_symlinks_to_binaries ... ok
+test proc::tests::probe_maps_absent_infrastructure_failure_timeout_and_spawn ... ok
+test snapshot::tests::missing_tree_blocks_only_the_recipe_that_names_a_recorded_executable ... ok
+test snapshot::tests::tokenizer_scans_only_the_selected_recipe ... ok
+test snapshot::tests::snapshot_environment_overlays_the_invoker ... ok
+test snapshot::tests::repo_tied_execution_uses_current_canonical_root_and_tees_to_log ... ok
+test lock::tests::six_levels_acquire_in_order_and_out_of_order_panics ... ok
+test fsx::tests::store_is_private_and_never_exposes_a_partial_document ... ok
+test git::tests::open_is_query_free_and_core_controls_branch_tracking ... ok
+test git::tests::temp_repo_worktree_mutations_round_trip ... ok
+test git::tests::temp_repo_queries_cover_hash_tracked_status_and_history ... ok
+test git::tests::fetch_class_uses_its_own_bounded_deadline ... ok
+test tmux::tests::new_session_records_cwd_env_and_child_argv ... ok
+test tmux::tests::version_gate_finds_a_numeric_version_after_a_vendor_prefix ... ok
+test tmux::tests::version_gate_accepts_32_and_rejects_old ... ok
+test proc::tests::deadline_bounds_pipe_drain_after_the_direct_child_exits ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s
+
+     Running tests/effects.rs (target/debug/deps/effects-c27c971c78b7df8d)
+
+running 5 tests
+test execvp_fd_helper ... ok
+
+running 1 test
+test execvp_fd_helper ... test docker_like_path_stub_obeys_exit_two_probe_state ... ok
+test spawn_tracer_records_argv_cwd_and_exit_state ... ok
+test committed_tmux_stub_records_argv_and_obeys_state ... ok
+test execvp_inherits_only_selected_lock_fds_and_preserves_flock ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+
+   Doc-tests wt_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests wt_sys
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+$ cargo test --workspace --features failpoints
+   Compiling wt v0.1.0 (/Users/jlw/source/wt)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.76s
+     Running unittests src/main.rs (target/debug/deps/wt-1158594d285bda62)
+
+running 1 test
+test app::open::tests::attachment_requires_a_terminal_on_input_and_output ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/acceptance.rs (target/debug/deps/acceptance-f428fb0cdf352edd)
+
+running 4 tests
+test version_matches_workspace_package_metadata ... ok
+test orbitapp_acceptance_walk_covers_port_alias_sibling_link_and_path_occupied ... ok
+test orbit_acceptance_walk_covers_rendered_config_daemon_and_safe_missing_tree_teardown ... ok
+test orbitcloud_acceptance_walk_covers_composition_copy_no_run_resource_and_probe_barrier ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.86s
+
+     Running tests/contracts.rs (target/debug/deps/contracts-27b57280c69ab4ba)
+
+running 61 tests
+test doctor_condition_contracts_cover_every_documented_code ... ok
+test aliases_use_the_run_task_set ... ok
+test adopt_registers_an_existing_linked_worktree ... ok
+test doctor_reports_and_prune_deletes_state_orphans ... ok
+test clone_registers_the_new_checkout ... ok
+test door_notices_stay_in_json_and_missing_bins_render_as_next_steps ... ok
+test env_and_exec_transport_the_same_coordinates ... ok
+test env_sh_unsets_keys_restored_to_absence ... ok
+test acceptance_shaped_fixture_walks_register_new_run_open_remove ... ok
+test copy_reporting_distinguishes_absent_and_tracked_sources ... ok
+test cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs ... ok
+test old_format_is_rejected_before_current_state_is_written ... ok
+test new_g_failpoint_resumes ... ok
+test missing_tree_teardown_reports_exe_missing_and_the_actual_remaining_count ... ok
+test from_resolution_fetches_prs_and_names_branch_holders ... ok
+test new_run_and_remove_form_an_idempotent_lifecycle ... ok
+test new_sync_failure_is_failed_and_resumes_from_sync ... ok
+test passthrough_doors_refuse_json_with_usage_exit ... ok
+test doctor_manufactures_lifecycle_and_resource_conditions ... ok
+test non_tty_destruction_requires_confirmation ... ok
+test present_resource_environment_is_identical_across_env_exec_and_run ... ok
+test open_all_reports_each_tree_and_continues_after_a_failure ... ok
+test new_keeps_its_payload_when_session_creation_fails ... ok
+test ready_exec_stays_inside_the_door_subprocess_budget ... ok
+test register_explains_how_to_rewrite_an_inline_session_table ... ok
+test doctor_manufactures_repository_capacity_lock_and_tooling_conditions ... ok
+test forge_pr_urls_use_the_matching_origin_and_refspec ... ok
+test refresh_recreates_a_present_resource ... ok
+test register_and_idempotence_have_envelopes ... ok
+test prune_records_then_new_creates_a_fresh_incarnation ... ok
+test doctor_manufactures_git_environment_port_and_adapter_conditions ... ok
+test prune_without_yes_is_report_only ... ok
+test prune_collects_tombstones_and_missing_trees ... ok
+test register_move_to_repairs_and_rechecks_the_checkout ... ok
+test render_write_failpoint_preserves_user_file_refusal ... ok
+test register_repair_restores_only_a_replaced_canonical_checkout ... ok
+test shell_init_and_completions_are_script_envelopes ... ok
+test resource_frozen_failpoint_reruns_from_probe_truth ... ok
+test prune_merged_and_gone_remove_only_clean_classified_trees ... ok
+test remove_is_idempotent_and_text_run_preserves_child_status ... ok
+test resource_destroyed_failpoint_reruns_from_probe_truth ... ok
+test shell_scripts_do_not_depend_on_a_healthy_home ... ok
+test remove_8_failpoint_reruns_to_tombstone ... ok
+test run_json_keeps_one_envelope_on_stdout ... ok
+test resource_run_and_destroy_follow_probe_truth ... ok
+test session_transport_uses_inner_no_gate_door_without_tmux_e ... ok
+test remove_keep_orphans_leaves_a_missing_live_entry ... ok
+test shell_refuses_json_while_open_provisions_without_attaching ... ok
+test session_verbs_resolve_a_backend_for_preexisting_homes_once ... ok
+test sync_and_which_have_stable_data_shapes ... ok
+test sync_mid_failpoint_reruns_to_ready ... ok
+test register_declares_the_session_backend_once_and_legacy_agent_setting_is_rejected ... ok
+test text_run_keeps_wt_guidance_off_the_child_stdout ... ok
+test sync_rechecks_tracked_render_paths_even_when_they_have_records ... ok
+test sync_without_a_sync_task_never_bricks_the_canonical_tree ... ok
+test truth_and_inspection_verbs_match_the_registered_tree ... ok
+test unregister_leaves_the_checkout ... ok
+test truth_surfaces_report_descriptions_config_errors_and_live_locks ... ok
+test verify_failure_is_distinct_and_can_be_resumed ... ok
+test tty_consent_accepts_and_declines_through_a_pseudoterminal ... ok
+test truth_reports_upstream_default_drift_staleness_probe_and_disk ... ok
+
+test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.18s
+
+     Running tests/human_transcripts.rs (target/debug/deps/human_transcripts-b4c4e7fe8a43f445)
+
+running 7 tests
+test harness_never_uses_operator_state ... ok
+test bin_directory_guidance_is_a_summary_fact_even_when_quiet ... ok
+test new_calls_skipped_sync_nodes_skipped ... ok
+test canonical_repair_transcript ... ok
+test human_command_transcripts ... ok
+test redirected_output_matches_the_terminal_text ... ok
+test every_successful_verb_uses_intentional_human_text ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.80s
+
+     Running tests/json_snapshots.rs (target/debug/deps/json_snapshots-292148b381490d7c)
+
+running 1 test
+test every_verb_has_a_normalized_json_contract_snapshot ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.99s
+
+     Running tests/session_flow.rs (target/debug/deps/session_flow-a248c8fb0b47246a)
+
+running 6 tests
+test new_rejects_agent_while_open_agent_starts_the_requested_recipe ... ok
+test backend_none_never_invokes_tmux_for_truth_or_teardown ... ok
+test remove_closes_the_private_tmux_session ... ok
+test new_attaches_and_the_live_pane_has_the_tree_environment ... ok
+test agents_start_only_for_new_sessions_and_open_all_resumes_recorded_agents ... ok
+test session_creation_and_attachment_matrix ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.19s
+
+     Running unittests src/lib.rs (target/debug/deps/wt_core-dc0d9075c6d83e66)
+
+running 80 tests
+test address::tests::bare_name_prefers_current_label_then_label ... ok
+test address::tests::cwd_uses_longest_prefix ... ok
+test address::tests::absolute_paths_use_longest_prefix_and_not_found_lists_candidates ... ok
+test config::tests::detect_fields_merge_even_when_the_override_equals_the_default ... ok
+test config::tests::rejects_unknown_keys_with_location ... ok
+test config::tests::only_false_is_a_deletion_value ... ok
+test config::tests::merge_deletes_entries_and_scopes_accumulate ... ok
+test config::tests::validation_covers_port_mode_duration_and_readiness_rows ... ok
+test config::tests::resolved_validation_applies_every_scope_sensitive_row ... ok
+test config::tests::nested_scope_deletions_survive_layer_merge_until_scope_resolution ... ok
+test config::tests::validation_rejects_resource_without_probe_or_scope ... ok
+test config::tests::resolved_validation_rejects_alias_chains_and_repo_tree_variables ... ok
+test coords::tests::non_matching_tombstone_does_not_supply_coordinates ... ok
+test coords::tests::persisted_and_squatted_ranges_are_both_avoided ... ok
+test config::tests::parses_all_acceptance_files_unchanged ... ok
+test coords::tests::smallest_free_slot_and_identity_collisions_are_reported ... ok
+test coords::tests::slot_independent_refusals_win_even_when_all_slots_are_taken ... ok
+test coords::tests::tombstone_inherits_the_complete_coordinate_record ... ok
+test declarations::tests::reconcile_replaces_only_declarations_and_marks_missing_tasks ... ok
+test declarations::tests::refresh_skipped_preserves_the_previous_declaration_and_declared_status ... ok
+test declarations::tests::repo_declaration_is_stripped_without_agreement_or_provenance ... ok
+test doctor::tests::pure_doctor_findings_cover_resource_names_and_adapter_metadata ... ok
+test drift::tests::reports_only_changed_sync_inputs_in_lexical_order ... ok
+test env::tests::activation_json_is_compact_with_recursively_sorted_keys ... ok
+test env::tests::contributed_path_cannot_shadow_declared_bins ... ok
+test env::tests::corrupt_marker_is_ignored_and_the_door_proceeds ... ok
+test env::tests::corrupt_recorded_port_geometry_is_rejected ... ok
+test adapters::tests::nightly_rustfmt_sniff_selects_nightly_tool ... ok
+test adapters::tests::composite_needs_keep_submodule_root_and_scope_order ... ok
+test env::tests::user_edits_to_tool_owned_keys_are_replaced_by_the_next_door ... ok
+test exclude::tests::block_is_sorted_deduplicated_and_removable ... ok
+test exclude::tests::preserves_outside_bytes_and_repairs_unclosed_block ... ok
+test from_ref::tests::decision_table_covers_equal_refs_forcing_fallbacks_and_errors ... ok
+test adapters::tests::npm_test_is_unconditional_but_other_node_scripts_are_detected ... ok
+test from_ref::tests::local_remote_revision_and_pr_precedence_match_new ... ok
+test lifecycle::tests::derives_every_cell_of_the_reduced_phase_table ... ok
+test lifecycle::tests::init_resumes_only_an_unlocked_initialisation ... ok
+test model::tests::identifier_grammars_and_derivations_match_the_spec ... ok
+test model::tests::registry_allows_canonical_path_alias_but_rejects_other_duplicates ... ok
+test model::tests::tombstone_paths_do_not_participate_in_live_path_uniqueness ... ok
+test new::tests::decision_table_covers_verify_conflicts_and_every_resume_point ... ok
+test new::tests::revised_conflicts_include_path_occupied ... ok
+test new::tests::revised_decision_table_covers_ready_missing_and_resume ... ok
+test model::tests::registry_schema_round_trips_every_persisted_record ... ok
+test ports::tests::append_is_reorder_proof_and_never_reuses_removed_names ... ok
+test ports::tests::exhaustion_and_corrupt_recorded_indices_are_distinct ... ok
+test remove::tests::classification_follows_every_upstream_rule ... ok
+test remove::tests::replaced_at_observation_is_plannable_but_replacement_after_consent_stops ... ok
+test remove::tests::unregister_uses_the_same_plan_without_the_canonical_redirect ... ok
+test render::tests::numbered_table_is_exhaustive_and_ordered ... ok
+test report::tests::every_declared_array_order_and_nested_map_canonicalisation_is_covered ... ok
+test adapters::tests::composition_supports_private_tasks_dynamic_composites_and_no_verify ... ok
+test resource::tests::default_names_distinguish_tree_and_repo_resources ... ok
+test report::tests::stable_ordering_rules_are_applied ... ok
+test resource::tests::no_run_resource_stays_declared_with_the_external_notice ... ok
+test resource::tests::instance_is_frozen_before_run_and_a_failed_probe_never_causes_an_effect ... ok
+test session::tests::sanitises_and_uses_the_fixed_hash_width ... ok
+test settings::tests::backend_declaration_explains_how_to_rewrite_an_inline_session_table ... ok
+test adapters::tests::orbitcloud_composition_is_overridden_at_root ... ok
+test settings::tests::rejects_low_base_zero_stride_and_incomplete_geometry ... ok
+test resource::tests::table_driven_test_covers_every_three_state_event_cell ... ok
+test snapshot::tests::env_minimisation_is_exact_and_repo_tied_values_are_stripped ... ok
+test settings::tests::backend_declaration_preserves_existing_settings ... ok
+test snapshot::tests::missing_tree_word_test_uses_only_the_recipe_about_to_run ... ok
+test task::tests::lock_plan_obeys_levels_and_held_tokens ... ok
+test task::tests::plan_is_topological_with_stable_ties ... ok
+test settings::tests::settings_parser_applies_defaults_and_rejects_unknown_keys ... ok
+test template::tests::expands_names_braces_dollars_and_literal_dollar ... ok
+test task::tests::plan_rejects_cycles_and_unresolved_dependencies ... ok
+test template::tests::rejects_unclosed_or_invalid_braces ... ok
+test template::tests::shell_scanner_keeps_valid_references_and_ignores_shell_expansions ... ok
+test adapters::tests::lockfiles_choose_tools_and_override_wins ... ok
+test coords::tests::geometry_validation_uses_bounded_u32_arithmetic ... ok
+test adapters::tests::disabled_adapter_is_skipped_and_tool_metadata_is_contributed ... ok
+test coords::tests::valid_geometry_slots_stay_inside_the_port_space ... ok
+test coords::tests::chosen_ranges_do_not_overlap ... ok
+test report::tests::snapshots_every_success_data_schema ... ok
+test env::tests::deactivation_effect_is_bounded_to_applied_keys ... ok
+test env::tests::l1_deactivation_restores_marker_free_parent ... ok
+test env::tests::l2_nested_activation_equals_direct ... ok
+
+test result: ok. 80 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/manifest_allowlist.rs (target/debug/deps/manifest_allowlist-fdcfc597698fa2c8)
+
+running 1 test
+test manifest_dependencies_stay_within_the_pure_core_allowlist ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/purity_guard.rs (target/debug/deps/purity_guard-43c2ae7002b40148)
+
+running 1 test
+test purity_barrier_covers_demonstrated_bypasses_and_source_is_clean ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/wt_sys-dc4f46d9036c464f)
+
+running 37 tests
+test failpoint::tests::only_the_named_point_trips ... ok
+test git::tests::default_branch_and_url_helpers_keep_borrowed_behavior ... ok
+test fsx::tests::timestamps_use_one_rfc3339_utc_shape ... ok
+test fsx::tests::nofollow_rejects_a_symlinked_parent_component ... ok
+test git::tests::parses_worktree_and_status_porcelain ... ok
+test fsx::tests::adapter_snapshot_captures_only_requested_contents ... ok
+test fsx::tests::required_reflink_reports_unavailable_and_removes_partial_destination ... ok
+test fsx::tests::executable_probe_judges_what_exec_would_run ... ok
+test fsx::tests::nofollow_observation_and_removal_preserve_symlink_boundaries ... ok
+test fsx::tests::recursive_copy_refuses_a_symlinked_destination_directory ... ok
+test fsx::tests::recursive_copy_recreates_symlinks_and_copies_each_file ... ok
+test lock::tests::deadline_returns_the_class_for_the_requested_level ... ok
+test net::tests::detects_a_bound_v4_port_and_a_free_one ... ok
+test lock::tests::holder_record_and_try_flock_are_liveness_truth ... ok
+test lock::tests::shared_tree_and_door_record_are_one_level_and_can_coexist ... ok
+test fsx::tests::unsupported_reflink_falls_back_per_file ... ok
+test proc::tests::capture_preserves_binary_output_and_maps_signal_exit ... ok
+test lock::tests::torn_advisory_holder_record_is_reported_as_unknown ... ok
+test fsx::tests::exclude_splice_and_log_retention_preserve_their_formats ... ok
+test proc::tests::run_tees_both_streams_to_a_mode_0600_log ... ok
+test snapshot::tests::executable_capture_is_sorted_and_ignores_non_executables ... ok
+test proc::tests::probe_maps_absent_infrastructure_failure_timeout_and_spawn ... ok
+test snapshot::tests::executable_capture_follows_symlinks_to_binaries ... ok
+test lock::tests::six_levels_acquire_in_order_and_out_of_order_panics ... ok
+test snapshot::tests::missing_tree_blocks_only_the_recipe_that_names_a_recorded_executable ... ok
+test snapshot::tests::snapshot_environment_overlays_the_invoker ... ok
+test snapshot::tests::tokenizer_scans_only_the_selected_recipe ... ok
+test snapshot::tests::repo_tied_execution_uses_current_canonical_root_and_tees_to_log ... ok
+test fsx::tests::store_is_private_and_never_exposes_a_partial_document ... ok
+test git::tests::open_is_query_free_and_core_controls_branch_tracking ... ok
+test git::tests::temp_repo_worktree_mutations_round_trip ... ok
+test git::tests::temp_repo_queries_cover_hash_tracked_status_and_history ... ok
+test git::tests::fetch_class_uses_its_own_bounded_deadline ... ok
+test tmux::tests::new_session_records_cwd_env_and_child_argv ... ok
+test tmux::tests::version_gate_finds_a_numeric_version_after_a_vendor_prefix ... ok
+test tmux::tests::version_gate_accepts_32_and_rejects_old ... ok
+test proc::tests::deadline_bounds_pipe_drain_after_the_direct_child_exits ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.60s
+
+     Running tests/effects.rs (target/debug/deps/effects-bd8ffe52c729c656)
+
+running 5 tests
+test execvp_fd_helper ... ok
+
+running 1 test
+test execvp_fd_helper ... test docker_like_path_stub_obeys_exit_two_probe_state ... ok
+test spawn_tracer_records_argv_cwd_and_exit_state ... ok
+test committed_tmux_stub_records_argv_and_obeys_state ... ok
+test execvp_inherits_only_selected_lock_fds_and_preserves_flock ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+
+   Doc-tests wt_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests wt_sys
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

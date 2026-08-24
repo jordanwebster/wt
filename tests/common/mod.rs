@@ -229,6 +229,13 @@ pub fn write(path: &Path, body: &str) {
     wt_sys::fsx::write_store(path, body.as_bytes()).unwrap();
 }
 
+pub fn proof_capture(claim: &str, text: impl AsRef<str>) {
+    let requested = std::env::var("WT_PROOF_CAPTURE").unwrap_or_default();
+    if requested == "1" || requested.split(',').any(|value| value == claim) {
+        println!("--- {claim} ---\n{}", text.as_ref().replace("\r\n", "\n"));
+    }
+}
+
 pub fn git(path: &Path, args: &[&str]) {
     let mut request = CommandRequest::new("git");
     request.cwd = Some(path.to_path_buf());

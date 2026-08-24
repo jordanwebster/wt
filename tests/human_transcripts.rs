@@ -84,6 +84,10 @@ fn redirected_output_matches_the_terminal_text() {
         terminal_text(normalize(&terminal_h, &terminal.stdout).as_bytes()),
         normalize(&redirected_h, &redirected.stdout).into_bytes()
     );
+    common::proof_capture(
+        "C3",
+        normalize(&terminal_h, &terminal.stdout).replace("\r\n", "\n"),
+    );
 }
 
 #[test]
@@ -97,6 +101,10 @@ fn bin_directory_guidance_is_a_summary_fact_even_when_quiet() {
     assert!(!text.contains("wt: BIN_DIR_MISSING"));
     assert!(text.contains("  next"));
     assert!(text.contains("wt build repo/work"));
+    common::proof_capture(
+        "A3",
+        text.replace(&h.root.to_string_lossy().to_string(), "<ROOT>"),
+    );
 }
 
 #[test]
@@ -236,7 +244,11 @@ fn transcript(h: &Harness, name: &str, args: &[&str]) {
         "{name}: {}",
         display(&output.stdout)
     );
-    insta::assert_snapshot!(name, normalize(h, &output.stdout));
+    let normalized = normalize(h, &output.stdout);
+    if name == "doctor_repair" {
+        common::proof_capture("A4", &normalized);
+    }
+    insta::assert_snapshot!(name, normalized);
 }
 
 fn transcript_failure(h: &Harness, name: &str, args: &[&str], code: i32) {
@@ -259,6 +271,17 @@ fn human(h: &Harness, args: &[&str], input: &[u8]) {
         !text.trim_start().starts_with('{'),
         "{} emitted a JSON object: {text}",
         args.join(" ")
+    );
+    common::proof_capture(
+        "C1",
+        format!(
+            "$ wt {} => {}",
+            args.join(" "),
+            normalize(h, &output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("<empty child output>")
+        ),
     );
 }
 

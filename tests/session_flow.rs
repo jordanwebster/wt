@@ -166,11 +166,8 @@ fn new_attaches_and_the_live_pane_has_the_tree_environment() {
     private.wait_for_session(&session);
     assert!(!child.is_finished(), "new exited before attaching to tmux");
     private.wait_for_client(&session);
-    assert_eq!(
-        private.clients(&session),
-        1,
-        "new did not attach its client"
-    );
+    let attached_clients = private.clients(&session);
+    assert_eq!(attached_clients, 1, "new did not attach its client");
     assert!(private
         .tmux(&["resize-window", "-t", &session, "-x", "240", "-y", "60"])
         .success());
@@ -206,6 +203,29 @@ fn new_attaches_and_the_live_pane_has_the_tree_environment() {
     let output = child.join().unwrap();
     assert_eq!(output.child.code, Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("Created repo/work"));
+    common::proof_capture(
+        "B1",
+        format!(
+            "attached clients: {attached_clients}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+                .split('\u{1b}')
+                .next()
+                .unwrap_or_default()
+                .replace(
+                    &private.harness.root.to_string_lossy().to_string(),
+                    "<ROOT>"
+                )
+                .trim_end()
+        ),
+    );
+    common::proof_capture(
+        "B2",
+        pane.replace(
+            &private.harness.root.to_string_lossy().to_string(),
+            "<ROOT>",
+        )
+        .trim_end(),
+    );
 
     let canonical = wt_core::session::name("repo", "canonical");
     let request = private.harness.pty_request(&["open", "repo"]);
@@ -214,12 +234,21 @@ fn new_attaches_and_the_live_pane_has_the_tree_environment() {
     });
     private.wait_for_session(&canonical);
     private.wait_for_client(&canonical);
-    private.send_line(&canonical, "printf '__OPENED_SHELL__\\n'");
-    private.wait_for_pane(&canonical, "__OPENED_SHELL__");
+    private.send_line(&canonical, "printf '__OPENED_%s__\\n' SHELL");
+    let opened_pane = private.wait_for_pane(&canonical, "__OPENED_SHELL__");
     private.send_line(&canonical, "exit");
     let output = child.join().unwrap();
     assert_eq!(output.child.code, Some(0));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("no agent was selected"));
+    common::proof_capture(
+        "A2",
+        opened_pane
+            .replace(
+                &private.harness.root.to_string_lossy().to_string(),
+                "<ROOT>",
+            )
+            .trim_end(),
+    );
 }
 
 #[test]
@@ -261,6 +290,24 @@ fn agents_start_only_for_new_sessions_and_open_all_resumes_recorded_agents() {
     let events = private.agent_events();
     assert_eq!(events.iter().filter(|event| *event == "resume").count(), 1);
     assert_eq!(events.iter().filter(|event| *event == "start").count(), 3);
+    common::proof_capture("B3", format!("agent events: {}", events.join(", ")));
+
+    let non_json = private
+        .harness
+        .wt()
+        .args(["open", "--all"])
+        .output()
+        .unwrap();
+    assert!(non_json.status.success());
+    let client_count = private.clients(one_session);
+    assert_eq!(client_count, 0, "open --all attached a tmux client");
+    common::proof_capture(
+        "B6",
+        format!(
+            "{}\nattached clients: {client_count}",
+            String::from_utf8_lossy(&non_json.stdout)
+        ),
+    );
 
     let Some(shells) = PrivateTmux::new(false, true) else {
         unreachable!("tmux availability cannot change within the test")
@@ -397,6 +444,7 @@ fn session_creation_and_attachment_matrix() {
         },
     ];
 
+    let mut observed = Vec::new();
     for row in rows {
         let Some(private) = PrivateTmux::new(true, row.setting_attach) else {
             eprintln!("skipping private-tmux matrix: tmux is not installed");
@@ -446,35 +494,28 @@ fn session_creation_and_attachment_matrix() {
             assert!(output.status.success(), "matrix row {}", row.name);
         }
 
-        assert_eq!(
-            private.has_session(&session),
-            row.created,
-            "matrix row {}",
-            row.name
-        );
+        let created = private.has_session(&session);
+        assert_eq!(created, row.created, "matrix row {}", row.name);
         if row.agent_started {
             private.wait_for_pane(&session, "__AGENT_start__");
         }
         if row.attached {
             private.wait_for_client(&session);
         }
-        assert_eq!(
-            private.clients(&session) > 0,
-            row.attached,
-            "matrix row {}",
-            row.name
-        );
-        assert_eq!(
-            !private.agent_events().is_empty(),
-            row.agent_started,
-            "matrix row {}",
-            row.name
-        );
+        let attached = private.clients(&session) > 0;
+        assert_eq!(attached, row.attached, "matrix row {}", row.name);
+        let agent_started = !private.agent_events().is_empty();
+        assert_eq!(agent_started, row.agent_started, "matrix row {}", row.name);
         if let Some(child) = attached_child {
             private.send_line(&session, "exit");
             assert_eq!(child.join().unwrap().child.code, Some(0));
         }
+        observed.push(format!(
+            "{:<20} created={} attached={} agent_started={}",
+            row.name, created, attached, agent_started
+        ));
     }
+    common::proof_capture("B4", observed.join("\n"));
 }
 
 #[test]
@@ -494,6 +535,10 @@ fn remove_closes_the_private_tmux_session() {
         .harness
         .json(&["remove", "repo/work", "--yes", "--force"]);
     assert!(!private.has_session(session));
+    common::proof_capture(
+        "B9",
+        format!("session {session}\nbefore remove: present\nafter remove: absent"),
+    );
 }
 
 #[test]
@@ -529,6 +574,7 @@ fn backend_none_never_invokes_tmux_for_truth_or_teardown() {
             .stderr(predicates::str::contains("backend = \"tmux\""));
     }
     assert_eq!(wt_sys::fsx::read_string(&record).unwrap(), None);
+    common::proof_capture("B7", "list/remove/prune/open/close tmux invocations: 0");
 }
 
 #[test]
@@ -539,21 +585,34 @@ fn new_rejects_agent_while_open_agent_starts_the_requested_recipe() {
     };
     let repo = private.harness.repo("repo", "");
     private.harness.register(&repo);
-    private
+    let rejected = private
         .harness
         .wt()
         .args(["new", "repo/work", "--agent", "probe"])
-        .assert()
-        .code(2)
-        .stderr(predicates::str::contains("unexpected argument '--agent'"));
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("unexpected argument '--agent'"));
     assert!(!private.has_session(&wt_core::session::name("repo", "work")));
 
     let opened = private
         .harness
         .json(&["open", "repo", "--agent", "probe", "--no-attach"]);
     let session = opened["data"]["sessions"][0]["name"].as_str().unwrap();
-    private.wait_for_pane(session, "__AGENT_start__");
+    let pane = private.wait_for_pane(session, "__AGENT_start__");
     assert_eq!(private.agent_events(), ["start"]);
+    common::proof_capture(
+        "B5",
+        format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&rejected.stderr),
+            pane.replace(
+                &private.harness.root.to_string_lossy().to_string(),
+                "<ROOT>"
+            )
+            .trim_end()
+        ),
+    );
 }
 
 fn find_tmux() -> Option<PathBuf> {

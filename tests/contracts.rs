@@ -357,6 +357,13 @@ fn register_declares_the_session_backend_once_and_legacy_agent_setting_is_reject
         .unwrap()
         .unwrap();
     assert!(config.contains("backend = \"none\""));
+    common::proof_capture(
+        "B8",
+        format!(
+            "selected: tmux 3.4\nconfig: backend = \"tmux\"\nsecond -V probes: {}\nunavailable selection: none\nsession.agent present by default: false",
+            calls.lines().filter(|line| *line == "-V").count()
+        ),
+    );
 
     let legacy = Harness::new();
     common::write(&legacy.home.join("config.toml"), "default_agent='codex'\n");
@@ -499,6 +506,12 @@ fn open_all_reports_each_tree_and_continues_after_a_failure() {
             .iter()
             .any(|session| { session["target"] == target && session["created"] == true }));
     }
+    common::proof_capture(
+        "B6-partial",
+        serde_json::to_string_pretty(&envelope)
+            .unwrap()
+            .replace(&h.root.to_string_lossy().to_string(), "<ROOT>"),
+    );
 }
 
 #[test]
@@ -1254,6 +1267,14 @@ fn cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs() {
         .filter_map(|input| input["path"].as_str())
         .collect::<BTreeSet<_>>();
     assert_eq!(inputs, BTreeSet::from(["Cargo.lock", "Cargo.toml"]));
+    common::proof_capture(
+        "A1",
+        format!(
+            "reflink supported: {reflink_supported}\nadapter seed present: {}\nSEED_SKIPPED_NO_REFLINK: {skipped}\nsync inputs: {}",
+            tree_root.join("target/cache.bin").exists(),
+            inputs.iter().copied().collect::<Vec<_>>().join(", ")
+        ),
+    );
 
     common::write(
         &repo.join("Cargo.toml"),
