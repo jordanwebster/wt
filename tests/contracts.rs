@@ -719,6 +719,15 @@ fn register_repair_restores_only_a_replaced_canonical_checkout() {
     assert!(replaced["remedy"].as_str().unwrap().contains("wt register"));
     assert!(replaced["remedy"].as_str().unwrap().contains("--repair"));
 
+    // Reaching the same condition through an ordinary command must point at
+    // the same escape. `remove` and `adopt` both refuse a canonical tree, so
+    // naming them here would send the reader to two dead ends.
+    let refused = h.wt().args(["env", "repo"]).output().unwrap();
+    assert_eq!(refused.status.code(), Some(5));
+    let remedy = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(remedy.contains("--repair"), "door remedy was: {remedy}");
+    assert!(!remedy.contains("wt adopt"), "door remedy was: {remedy}");
+
     let other = h.repo("other", "");
     h.wt()
         .args([
