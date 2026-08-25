@@ -502,9 +502,21 @@ fn legacy_template_spelling_is_rejected_at_its_source_location() {
 #[test]
 fn shim_fast_path_has_no_door_effects_and_is_well_below_the_door_budget() {
     let harness = Harness::new();
+    let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    write(
+        &harness.home.join("config.toml"),
+        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
+    );
     let repo = owned_fixture(&harness);
     harness.json(&["build", "repo"]);
+    let created = harness.json(&["new", "repo/work", "--no-sync"]);
+    let work = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
     let mut env = assembled(&harness, "repo");
+    let mut refusal_env = assembled(&harness, "repo/work");
     write(&repo.join(".wt.toml"), "invalid = [\n");
     let budget_trace = harness.shim_state.join("fast-budget.jsonl");
     let spawn_trace = harness.shim_state.join("fast-spawn.jsonl");
@@ -530,6 +542,37 @@ fn shim_fast_path_has_no_door_effects_and_is_well_below_the_door_budget() {
     let elapsed = started.elapsed();
     let mean_ms = elapsed.as_secs_f64() * 1000.0 / f64::from(iterations);
     assert!(mean_ms < 20.0, "mean fast-path cost was {mean_ms:.3} ms");
+
+    wt_sys::fsx::remove_path(&work.join("target/debug/orbit")).unwrap();
+    write(&work.join(".wt/build.status"), "running\n");
+    refusal_env.insert(
+        "WT_BUDGET_TRACE".to_owned(),
+        budget_trace.to_string_lossy().into_owned(),
+    );
+    refusal_env.insert(
+        "WT_SPAWN_TRACE".to_owned(),
+        spawn_trace.to_string_lossy().into_owned(),
+    );
+    refusal_env.insert(
+        "WT_LOCK_TRACE_FILE".to_owned(),
+        lock_trace.to_string_lossy().into_owned(),
+    );
+    write(&work.join(".wt.toml"), "invalid = [\n");
+    let refusal_started = Instant::now();
+    for _ in 0..iterations {
+        let output = capture_program("orbit", &[], refusal_env.clone());
+        assert_eq!(output.child.code, Some(5));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("COMMAND_NOT_BUILT"));
+        assert!(stderr.contains("build is in progress"));
+        assert!(stderr.contains("wt build repo/work"));
+    }
+    let refusal_elapsed = refusal_started.elapsed();
+    let refusal_mean_ms = refusal_elapsed.as_secs_f64() * 1000.0 / f64::from(iterations);
+    assert!(
+        refusal_mean_ms < 20.0,
+        "mean refusal-path cost was {refusal_mean_ms:.3} ms"
+    );
     assert!(
         !budget_trace.exists(),
         "fast path performed a traced door read"
@@ -542,8 +585,9 @@ fn shim_fast_path_has_no_door_effects_and_is_well_below_the_door_budget() {
     proof_capture(
         "H3",
         format!(
-            "iterations={iterations}\nelapsed_ms={:.3}\nmean_ms={mean_ms:.3}\ninvalid_config=ignored\ndoor_effect_trace=absent\nlock_trace=absent\nspawn_trace=absent",
-            elapsed.as_secs_f64() * 1000.0
+            "success iterations={iterations}\nsuccess elapsed_ms={:.3}\nsuccess mean_ms={mean_ms:.3}\nrefusal iterations={iterations}\nrefusal elapsed_ms={:.3}\nrefusal mean_ms={refusal_mean_ms:.3}\nrecorded build and status read=true\ninvalid_config=ignored\ndoor_effect_trace=absent\nlock_trace=absent\nspawn_trace=absent",
+            elapsed.as_secs_f64() * 1000.0,
+            refusal_elapsed.as_secs_f64() * 1000.0
         ),
     );
 }
