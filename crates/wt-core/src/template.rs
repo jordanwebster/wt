@@ -84,7 +84,7 @@ fn parse_parts(input: &str) -> Result<Vec<Part>, CoreError> {
                     end += 1;
                 }
                 let name = chars[index + 1..end].iter().collect::<String>();
-                return Err(legacy_spelling(&format!("${name}"), &name));
+                return Err(not_template_syntax(&format!("${name}")));
             }
             literal.push('$');
             index += 1;
@@ -111,7 +111,7 @@ fn parse_parts(input: &str) -> Result<Vec<Part>, CoreError> {
 fn parse_expression(input: &str) -> Result<Expression, CoreError> {
     let input = input.trim();
     if input.starts_with("WT_") && valid_identifier(input) {
-        return Err(legacy_spelling(&format!("${{{input}}}"), input));
+        return Err(not_template_syntax(&format!("${{{input}}}")));
     }
     if let Some(name) = input.strip_prefix("ports.") {
         if valid_port_name(name) {
@@ -139,33 +139,13 @@ fn parse_expression(input: &str) -> Result<Expression, CoreError> {
     Ok(Expression::Call(Call::Simple(name.to_owned())))
 }
 
-fn legacy_spelling(spelling: &str, name: &str) -> CoreError {
-    let replacement = match name {
-        "WT_ROOT" => "`${root()}`".to_owned(),
-        "WT_REPO" => "`${repo()}`".to_owned(),
-        "WT_BRANCH" => "`${branch()}`".to_owned(),
-        "WT_LABEL" => "`${label()}`".to_owned(),
-        "WT_NAME" => "`${name()}`".to_owned(),
-        "WT_NAME_SNAKE" => "`${name_snake()}`".to_owned(),
-        "WT_NAME_SHORT" => "`${name_short()}`".to_owned(),
-        "WT_TARGET" => "`${target()}`".to_owned(),
-        "WT_PORT_BASE" => {
-            "a specific declared port reference such as `${ports.http}`".to_owned()
-        }
-        _ if name.starts_with("WT_PORT_") => format!(
-            "`${{ports.{}}}`",
-            name.trim_start_matches("WT_PORT_").to_ascii_lowercase()
-        ),
-        _ if name.starts_with("WT_") => format!(
-            "the corresponding runtime environment variable in a shell-form task; `{name}` has no template-language replacement"
-        ),
-        _ => format!(
-            "a declared vars reference such as `${{{}}}`",
-            name.to_ascii_lowercase()
-        ),
-    };
+/// A bare `$name` is not template syntax. wt deliberately refuses rather than
+/// treating it as literal text: a value that silently renders as its own name
+/// produces a wrong environment with nothing on screen to say so, which is the
+/// failure the template language exists to prevent (SPEC §5.2).
+fn not_template_syntax(spelling: &str) -> CoreError {
     invalid(&format!(
-        "legacy template spelling `{spelling}` is no longer valid; replace it with {replacement}"
+        "`{spelling}` is not template syntax; write `${{...}}` to evaluate a value, or `$$` for a literal dollar"
     ))
 }
 
@@ -442,22 +422,23 @@ mod tests {
     }
 
     #[test]
-    fn legacy_template_spellings_fail_with_migration_guidance() {
-        for (old, replacement) in [
-            ("$WT_PORT_HTTP", "${ports.http}"),
-            ("${WT_ROOT}", "${root()}"),
-            ("$WT_REPO", "${repo()}"),
-            ("$WT_BRANCH", "${branch()}"),
-            ("$WT_LABEL", "${label()}"),
-            ("$WT_NAME", "${name()}"),
-            ("$WT_NAME_SNAKE", "${name_snake()}"),
-            ("$WT_NAME_SHORT", "${name_short()}"),
-            ("$WT_TARGET", "${target()}"),
+    fn a_bare_dollar_name_is_refused_rather_than_rendered_literally() {
+        // Every one of these once rendered as its own name, producing a wrong
+        // environment silently. The refusal is uniform: no spelling is special
+        // and none is guessed at on the caller's behalf.
+        for spelling in [
+            "$WT_PORT_HTTP",
+            "${WT_ROOT}",
+            "$WT_REPO",
+            "$HOME",
+            "$DATABASE_URL",
+            "$_private",
         ] {
-            let error = validate(old).unwrap_err();
+            let error = validate(spelling).unwrap_err();
             assert_eq!(error.code.0, "CONFIG_INVALID");
-            assert!(error.message.contains(old), "{}", error.message);
-            assert!(error.message.contains(replacement), "{}", error.message);
+            assert!(error.message.contains(spelling), "{}", error.message);
+            assert!(error.message.contains("$$"), "{}", error.message);
+            assert!(error.message.contains("${...}"), "{}", error.message);
         }
         assert_eq!(
             expand(

@@ -529,7 +529,8 @@ fn legacy_template_spelling_is_rejected_at_its_source_location() {
     assert_eq!(error.code.0, "CONFIG_INVALID");
     assert!(error.message.contains("legacy.wt.toml:3:13"));
     assert!(error.message.contains("$WT_PORT_HTTP"));
-    assert!(error.message.contains("${ports.http}"));
+    assert!(error.message.contains("$$"));
+    assert!(error.message.contains("${...}"));
     proof_capture("C3", format!("legacy: {error}"));
 }
 

@@ -587,9 +587,11 @@ otherwise inherit whatever home the server captured when it started, resolve
 the wrong state, exit, and have its session destroyed — while wt reported
 success, because `new-session` had itself succeeded. Two homes are legitimate
 and distinct: the bootstrap home says where the tree is defined, and a
-tree-local home set by repository configuration says what commands *inside*
-the tree address. The reserved `WT_*` namespace admits this one exception so
-that wt can develop itself.
+tree-local home would say what commands *inside* the tree address. **Not yet
+implemented:** the `WT_*` env namespace is still closed to repositories, so a
+tree cannot declare its own home and wt cannot yet give an agent working on wt
+a registry of its own. Carving that one exception is the remaining step; the
+bootstrap half above stands on its own and is what fixes the reported defect.
 
 ## A50. Expected states leave the door entirely
 

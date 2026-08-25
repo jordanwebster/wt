@@ -261,8 +261,10 @@ adapters supply useful defaults; your configuration overrides or extends them.
 Top-level keys:
 
 - `commands`: the command names this worktree owns. Typing one always runs
-  this worktree's build or explains why it can't. Adapters infer this for
-  common project types, so most repositories never write it.
+  this worktree's build or explains why it can't. Declare it yourself: no
+  built-in adapter contributes command names yet, though the configuration
+  layer for them exists. The name `wt` cannot be claimed — a name that refuses
+  until it is built would make `wt build` unrunnable.
 - `bin`: relative directories prepended to `PATH`. Where the binaries are;
   `commands` is which names they provide.
 - `ports`: named ports, reachable as `${ports.<name>}`.
