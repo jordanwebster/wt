@@ -2244,6 +2244,53 @@ fn doctor_reports_a_broken_path_prefix_once() {
         .all(|finding| finding["code"] != "PATH_NOT_SHADOWED"));
 }
 
+#[test]
+fn doctor_accepts_a_registered_worktree_path_alias() {
+    let h = Harness::new();
+    let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    common::write(
+        &h.home.join("config.toml"),
+        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
+    );
+    let repo = h.repo("repo", "");
+    h.register(&repo);
+    let alias_parent = h.root.join("aliased-repos");
+    wt_sys::fsx::replace_symlink(&alias_parent, &h.repos).unwrap();
+    let alias = alias_parent.join("repo");
+    let registry_path = h.home.join("registry.json");
+    let mut registry =
+        wt_sys::fsx::read_json::<wt_core::model::Registry>(&registry_path, "REGISTRY_CORRUPT")
+            .unwrap()
+            .unwrap();
+    let alias = wt_core::model::AbsPath::new(alias.to_str().unwrap()).unwrap();
+    registry.trees[0].path = alias.clone();
+    registry
+        .labels
+        .get_mut(&wt_core::model::Label::new("repo").unwrap())
+        .unwrap()
+        .path = alias;
+    wt_sys::fsx::write_json(&registry_path, &registry).unwrap();
+
+    let report = h.json(&["doctor", "repo"]);
+    let unmanaged = report["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "UNMANAGED_WORKTREE");
+    assert!(!unmanaged);
+    common::proof_capture(
+        "G4",
+        format!(
+            "registered path uses alias: {}\nUNMANAGED_WORKTREE present: {unmanaged}",
+            registry.trees[0].path.as_str() != repo.to_string_lossy()
+        ),
+    );
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn new_g_failpoint_resumes() {
