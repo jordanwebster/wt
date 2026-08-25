@@ -16,7 +16,6 @@ hint = "uv reads pyproject.toml directly and installs much faster than poetry"
 lockfile = ["uv.lock"]
 requires = "uv"
 sync_inputs = ["uv.lock", "pyproject.toml"]
-seed = [".venv"]
 
 [tools.uv.task.sync]
 run = "uv sync --frozen"
@@ -48,7 +47,6 @@ run = "poetry build"
 [tools.pip]
 requires = "python3"
 sync_inputs = ["requirements.txt", "pyproject.toml"]
-seed = [".venv"]
 
 [tools.pip.task.sync]
 run = '''test -d .venv || python3 -m venv .venv; if [ -f requirements.txt ]; then .venv/bin/pip install -r requirements.txt; else .venv/bin/pip install -e . 2>/dev/null || true; fi'''

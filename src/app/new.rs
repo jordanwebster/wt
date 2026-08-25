@@ -5,7 +5,6 @@ use wt_core::model::{AbsPath, SourceKind, Target, TreeRec, TreeSource};
 use wt_core::report::{NewData, NewVerifyReport};
 use wt_core::report::{Notice, NoticeLevel};
 use wt_core::{CoreError, ExitClass};
-use wt_sys::fsx::{CopyPolicy, ReflinkCopy};
 use wt_sys::lock::{self, Mode};
 
 use crate::cli::New;
@@ -566,28 +565,17 @@ fn finish_under_lock(
     let mut notices = Vec::new();
     let mut copied = Vec::new();
     if start != wt_core::new::StartAt::Bootstrap {
-        let entries = config
-            .root
-            .copy
-            .iter()
-            .map(|path| (path, MaterializedKind::Copied))
-            .chain(
-                config
-                    .seed
-                    .iter()
-                    .map(|path| (path, MaterializedKind::Seeded)),
-            )
-            .collect::<Vec<_>>();
+        let entries = config.root.copy.iter().collect::<Vec<_>>();
         let tracked = context
             .git(Path::new(canonical.path.as_str()))?
             .tracked_paths(
                 Path::new(canonical.path.as_str()),
                 &entries
                     .iter()
-                    .map(|(path, _)| PathBuf::from(path.as_str()))
+                    .map(|path| PathBuf::from(path.as_str()))
                     .collect::<Vec<_>>(),
             )?;
-        for (path, kind) in entries {
+        for path in entries {
             let subject = Some(format!("{}:{}", target_of(tree), path));
             if matches!(
                 wt_sys::fsx::path_kind(&Path::new(canonical.path.as_str()).join(path.as_str()))?,
@@ -607,7 +595,7 @@ fn finish_under_lock(
                     ExitClass::State,
                     "COPY_TRACKED",
                     format!("copy source `{path}` is tracked by git"),
-                    "remove it from copy/seed or stop tracking it before retrying",
+                    "remove it from copy or stop tracking it before retrying",
                 ));
             }
             if !matches!(
@@ -622,36 +610,10 @@ fn finish_under_lock(
                 });
                 continue;
             }
-            if kind == MaterializedKind::Seeded {
-                match wt_sys::fsx::reflink_contained(
-                    Path::new(canonical.path.as_str()),
-                    root,
-                    path,
-                )? {
-                    ReflinkCopy::Copied(_) => {}
-                    ReflinkCopy::Unavailable => {
-                        notices.push(Notice {
-                            level: NoticeLevel::Info,
-                            code: "SEED_SKIPPED_NO_REFLINK".to_owned(),
-                            subject,
-                            message: format!(
-                                "seed {path} was skipped because reflink is unavailable"
-                            ),
-                        });
-                        continue;
-                    }
-                }
-            } else {
-                wt_sys::fsx::copy_contained(
-                    Path::new(canonical.path.as_str()),
-                    root,
-                    path,
-                    CopyPolicy::PreferReflink,
-                )?;
-            }
+            wt_sys::fsx::copy_contained(Path::new(canonical.path.as_str()), root, path)?;
             copied.push(Materialized {
                 path: path.to_string(),
-                kind,
+                kind: MaterializedKind::Copied,
                 hash: None,
                 tracked_checked_at: wt_sys::fsx::timestamp()?,
             });

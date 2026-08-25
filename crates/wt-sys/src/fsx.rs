@@ -22,30 +22,11 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static STORE_FAIL_AFTER: AtomicU64 = AtomicU64::new(u64::MAX);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CopyPolicy {
-    PreferReflink,
-    RequireReflink,
-    Plain,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CopiedFile {
-    pub path: PathBuf,
-    pub reflinked: bool,
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CopyReport {
-    pub files: Vec<CopiedFile>,
+    pub files: Vec<PathBuf>,
     pub symlinks: Vec<PathBuf>,
     pub directories: Vec<PathBuf>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ReflinkCopy {
-    Copied(CopyReport),
-    Unavailable,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -455,13 +436,11 @@ pub fn remove_dir_all_nofollow(root: &Path, relative: &RelPath) -> Result<bool> 
     Ok(true)
 }
 
-/// Copies a contained file tree, recreating symlinks and applying the requested
-/// per-file reflink policy.
+/// Copies a contained file tree byte-for-byte while recreating symlinks.
 pub fn copy_contained(
     source_root: &Path,
     destination_root: &Path,
     relative: &RelPath,
-    policy: CopyPolicy,
 ) -> Result<CopyReport> {
     reject_symlink_components(
         source_root,
@@ -481,48 +460,9 @@ pub fn copy_contained(
         &source,
         destination_root,
         Path::new(relative.as_str()),
-        policy,
         &mut report,
     )?;
     Ok(report)
-}
-
-/// Clones a contained entry without ever falling back to copying file bytes.
-///
-/// A directory may contain several files, so an unsupported clone can be
-/// discovered after earlier entries were created. `copy_contained` removes
-/// that partial destination before this function reports the unavailable
-/// outcome.
-pub fn reflink_contained(
-    source_root: &Path,
-    destination_root: &Path,
-    relative: &RelPath,
-) -> Result<ReflinkCopy> {
-    let destination = destination_root.join(relative.as_str());
-    if path_kind(&destination)? != PathKind::Missing {
-        return Err(CoreError::new(
-            ExitClass::State,
-            "PATH_OCCUPIED",
-            format!(
-                "reflink destination {} already exists",
-                destination.display()
-            ),
-            "remove the destination before retrying the reflink",
-        ));
-    }
-    match copy_contained(
-        source_root,
-        destination_root,
-        relative,
-        CopyPolicy::RequireReflink,
-    ) {
-        Ok(report) => Ok(ReflinkCopy::Copied(report)),
-        Err(error) if error.code.0 == "REFLINK_UNAVAILABLE" => {
-            remove_path(&destination)?;
-            Ok(ReflinkCopy::Unavailable)
-        }
-        Err(error) => Err(error),
-    }
 }
 
 /// Applies the managed exclude format while preserving all bytes outside its block.
@@ -1000,7 +940,6 @@ fn copy_entry(
     source: &Path,
     destination_root: &Path,
     relative: &Path,
-    policy: CopyPolicy,
     report: &mut CopyReport,
 ) -> Result<()> {
     let metadata =
@@ -1036,47 +975,15 @@ fn copy_entry(
                 &entry.path(),
                 destination_root,
                 &relative.join(name),
-                policy,
                 report,
             )?;
         }
     } else if metadata.is_file() {
         let (parent, name) = open_parent_path(destination_root, relative, true)?;
         let mode = metadata.permissions().mode() & 0o777;
-        let reflinked = match policy {
-            CopyPolicy::Plain => {
-                fallback_copy_at(source, parent.as_raw_fd(), &name, mode)?;
-                false
-            }
-            CopyPolicy::PreferReflink | CopyPolicy::RequireReflink => {
-                match reflink_at(source, parent.as_raw_fd(), &name, mode) {
-                    Ok(()) => true,
-                    Err(error)
-                        if reflink_fallback_error(&error)
-                            && policy == CopyPolicy::PreferReflink =>
-                    {
-                        fallback_copy_at(source, parent.as_raw_fd(), &name, mode)?;
-                        false
-                    }
-                    Err(error) if reflink_fallback_error(&error) => {
-                        return Err(CoreError::new(
-                            ExitClass::State,
-                            "REFLINK_UNAVAILABLE",
-                            format!("reflink is unavailable for {}: {error}", source.display()),
-                            "use a reflink-capable filesystem or omit this seed",
-                        ));
-                    }
-                    Err(error) => {
-                        return Err(io_context("reflink contained copied file")(error));
-                    }
-                }
-            }
-        };
+        copy_file_at(source, parent.as_raw_fd(), &name, mode)?;
         sync_dir_fd(parent.as_raw_fd())?;
-        report.files.push(CopiedFile {
-            path: relative.to_path_buf(),
-            reflinked,
-        });
+        report.files.push(relative.to_path_buf());
     }
     Ok(())
 }
@@ -1110,7 +1017,7 @@ fn create_directory_at(destination_root: &Path, relative: &Path, mode: u32) -> R
     sync_dir_fd(parent.as_raw_fd())
 }
 
-fn fallback_copy_at(source: &Path, destination_dir: i32, name: &CString, mode: u32) -> Result<()> {
+fn copy_file_at(source: &Path, destination_dir: i32, name: &CString, mode: u32) -> Result<()> {
     let mut input = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -1130,107 +1037,6 @@ fn fallback_copy_at(source: &Path, destination_dir: i32, name: &CString, mode: u
     output
         .sync_all()
         .map_err(io_context("fsync contained copied file"))
-}
-
-#[cfg(any(test, feature = "failpoints"))]
-fn forced_reflink_failure() -> bool {
-    std::env::var_os("WT_TEST_REFLINK_UNSUPPORTED").is_some()
-}
-
-#[cfg(not(any(test, feature = "failpoints")))]
-fn forced_reflink_failure() -> bool {
-    false
-}
-
-#[cfg(target_os = "macos")]
-fn reflink_at(
-    source: &Path,
-    destination_dir: i32,
-    name: &CString,
-    _mode: u32,
-) -> std::io::Result<()> {
-    if forced_reflink_failure() {
-        return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
-    }
-    let source = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(source)?;
-    // SAFETY: source is a valid regular-file fd, name is a valid C string,
-    // and destination_dir is open for the duration of this call.
-    let result =
-        unsafe { libc::fclonefileat(source.as_raw_fd(), destination_dir, name.as_ptr(), 0) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn reflink_at(
-    source: &Path,
-    destination_dir: i32,
-    name: &CString,
-    mode: u32,
-) -> std::io::Result<()> {
-    if forced_reflink_failure() {
-        return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
-    }
-    const FICLONE: libc::c_ulong = 0x4004_9409;
-    let input = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(source)?;
-    // SAFETY: destination_dir is an open directory fd and name is one valid
-    // NUL-terminated component; success returns a fresh owned descriptor.
-    let output_fd = unsafe {
-        libc::openat(
-            destination_dir,
-            name.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            mode,
-        )
-    };
-    if output_fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: openat returned a fresh owned descriptor.
-    let output = unsafe { OwnedFd::from_raw_fd(output_fd) };
-    // SAFETY: output is a valid owned descriptor; fchmod changes only its mode.
-    if unsafe { libc::fchmod(output.as_raw_fd(), mode) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: both descriptors are valid regular-file descriptors and FICLONE
-    // copies filesystem extents without changing their ownership.
-    let result = unsafe { libc::ioctl(output.as_raw_fd(), FICLONE, input.as_raw_fd()) };
-    if result == 0 {
-        Ok(())
-    } else {
-        let error = std::io::Error::last_os_error();
-        drop(output);
-        // SAFETY: cleanup removes only the final entry we exclusively created.
-        unsafe {
-            libc::unlinkat(destination_dir, name.as_ptr(), 0);
-        }
-        Err(error)
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn reflink_at(
-    _source: &Path,
-    _destination_dir: i32,
-    _name: &CString,
-    _mode: u32,
-) -> std::io::Result<()> {
-    Err(std::io::Error::from_raw_os_error(libc::ENOTSUP))
-}
-
-fn reflink_fallback_error(error: &std::io::Error) -> bool {
-    error.raw_os_error().is_some_and(|code| {
-        code == libc::EXDEV || code == libc::ENOTSUP || code == libc::EOPNOTSUPP
-    })
 }
 
 fn reject_symlink_components(root: &Path, relative: &Path) -> Result<()> {
@@ -1396,26 +1202,25 @@ mod tests {
     fn recursive_copy_recreates_symlinks_and_copies_each_file() {
         let source = tempdir().unwrap();
         let destination = tempdir().unwrap();
-        std::fs::create_dir(source.path().join("seed")).unwrap();
-        std::fs::write(source.path().join("seed/file"), b"payload").unwrap();
-        symlink("file", source.path().join("seed/link")).unwrap();
+        std::fs::create_dir(source.path().join("local")).unwrap();
+        std::fs::write(source.path().join("local/file"), b"payload").unwrap();
+        symlink("file", source.path().join("local/link")).unwrap();
         let report = copy_contained(
             source.path(),
             destination.path(),
-            &RelPath::new("seed").unwrap(),
-            CopyPolicy::PreferReflink,
+            &RelPath::new("local").unwrap(),
         )
         .unwrap();
         assert_eq!(
-            std::fs::read(destination.path().join("seed/file")).unwrap(),
+            std::fs::read(destination.path().join("local/file")).unwrap(),
             b"payload"
         );
         assert_eq!(
-            std::fs::read_link(destination.path().join("seed/link")).unwrap(),
+            std::fs::read_link(destination.path().join("local/link")).unwrap(),
             Path::new("file")
         );
-        assert_eq!(report.files.len(), 1);
-        assert_eq!(report.symlinks, [PathBuf::from("seed/link")]);
+        assert_eq!(report.files, [PathBuf::from("local/file")]);
+        assert_eq!(report.symlinks, [PathBuf::from("local/link")]);
     }
 
     #[test]
@@ -1432,54 +1237,11 @@ mod tests {
             source.path(),
             destination.path(),
             &RelPath::new("cfg").unwrap(),
-            CopyPolicy::Plain,
         )
         .unwrap_err();
 
         assert_eq!(error.code.0, "SYMLINK_REFUSED");
         assert!(!outside.path().join("secret.json").exists());
-    }
-
-    #[test]
-    fn unsupported_reflink_falls_back_per_file() {
-        let _guard = crate::failpoint::ENV_LOCK.lock().unwrap();
-        let source = tempdir().unwrap();
-        let destination = tempdir().unwrap();
-        std::fs::write(source.path().join("seed"), b"payload").unwrap();
-        std::env::set_var("WT_TEST_REFLINK_UNSUPPORTED", "1");
-        let report = copy_contained(
-            source.path(),
-            destination.path(),
-            &RelPath::new("seed").unwrap(),
-            CopyPolicy::PreferReflink,
-        )
-        .unwrap();
-        std::env::remove_var("WT_TEST_REFLINK_UNSUPPORTED");
-        assert_eq!(report.files.len(), 1);
-        assert!(!report.files[0].reflinked);
-        assert_eq!(
-            std::fs::read(destination.path().join("seed")).unwrap(),
-            b"payload"
-        );
-    }
-
-    #[test]
-    fn required_reflink_reports_unavailable_and_removes_partial_destination() {
-        let _guard = crate::failpoint::ENV_LOCK.lock().unwrap();
-        let source = tempdir().unwrap();
-        let destination = tempdir().unwrap();
-        std::fs::create_dir(source.path().join("seed")).unwrap();
-        std::fs::write(source.path().join("seed/file"), b"payload").unwrap();
-        std::env::set_var("WT_TEST_REFLINK_UNSUPPORTED", "1");
-        let outcome = reflink_contained(
-            source.path(),
-            destination.path(),
-            &RelPath::new("seed").unwrap(),
-        )
-        .unwrap();
-        std::env::remove_var("WT_TEST_REFLINK_UNSUPPORTED");
-        assert_eq!(outcome, ReflinkCopy::Unavailable);
-        assert!(!destination.path().join("seed").exists());
     }
 
     #[test]

@@ -34,7 +34,6 @@ expression: "normalize(value, &h.root)"
           "ports": [
             "http"
           ],
-          "seed": [],
           "sync_inputs": [
             "README.md"
           ],

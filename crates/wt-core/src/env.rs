@@ -300,6 +300,7 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
 
     let functions = template::FunctionValues {
         simple: BTreeMap::from([
+            ("home".to_owned(), input.home.to_owned()),
             ("root".to_owned(), input.tree.root.clone()),
             ("repo".to_owned(), input.tree.repo.clone()),
             (
@@ -694,7 +695,7 @@ mod tests {
         let mut cfg = EffectiveScope::default();
         cfg.env.insert(
             "ALL".to_owned(),
-            "${root()}|${repo()}|${branch()}|${label()}|${name()}|${name_snake()}|${name_short()}|${target()}|${ports.http}".to_owned(),
+            "${home()}|${root()}|${repo()}|${branch()}|${label()}|${name()}|${name_snake()}|${name_short()}|${target()}|${ports.http}".to_owned(),
         );
         let output = assemble(EnvInputs {
             cfg: &cfg,
@@ -709,7 +710,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             output.env["ALL"],
-            "/trees/feature-x|/repo|feature-x|repo|feature-x|feature_x|repo_feature-x_12345678|repo/feature-x|20016"
+            "/home|/trees/feature-x|/repo|feature-x|repo|feature-x|feature_x|repo_feature-x_12345678|repo/feature-x|20016"
         );
     }
 }

@@ -48,7 +48,6 @@ pub struct Tool {
     pub sniff: Vec<Sniff>,
     pub requires: Option<String>,
     pub sync_inputs: Vec<String>,
-    pub seed: Vec<String>,
     pub env: IndexMap<String, String>,
     pub commands: Vec<String>,
     pub task: IndexMap<String, Task>,
@@ -82,7 +81,6 @@ pub struct AdapterHit {
 pub struct AdapterContribution {
     pub env: IndexMap<String, String>,
     pub commands: Vec<String>,
-    pub seed: Vec<String>,
     pub sync_inputs: Vec<String>,
     pub requirements: Vec<String>,
     pub nudges: Vec<Nudge>,
@@ -196,7 +194,6 @@ pub fn contribution(hits: &[AdapterHit]) -> Result<AdapterContribution, CoreErro
             output.env.insert(key.clone(), value.clone());
         }
         append_unique(&mut output.commands, &tool.commands);
-        append_unique(&mut output.seed, &tool.seed);
         append_unique(&mut output.sync_inputs, &tool.sync_inputs);
         if let Some(requirement) = &tool.requires {
             append_unique(&mut output.requirements, std::slice::from_ref(requirement));
@@ -218,11 +215,6 @@ pub fn apply_contribution(
     }
     for command in &contribution.commands {
         config.root.commands.insert(command.clone(), true);
-    }
-    for path in &contribution.seed {
-        let path = RelPath::new(path)?;
-        append_unique(&mut config.seed, std::slice::from_ref(&path));
-        append_unique(&mut config.adapter_seed, std::slice::from_ref(&path));
     }
     for path in &contribution.sync_inputs {
         let path = RelPath::new(path)?;
@@ -542,10 +534,11 @@ mod tests {
         let hits = detect(&snapshot, &BTreeMap::new()).unwrap();
         let contribution = contribution(&hits).unwrap();
         assert!(contribution.sync_inputs.contains(&"Cargo.toml".to_owned()));
-        // cargo contributes no seed: cloning `target` costs one syscall per
-        // file, and a Rust build directory is hundreds of thousands of them.
-        // A shared compilation cache is the ecosystem's own answer (A46).
-        assert!(contribution.seed.is_empty());
+        assert_eq!(
+            contribution.env["CARGO_BUILD_BUILD_DIR"],
+            "${home()}/cache/cargo-build/${label()}"
+        );
+        assert!(!contribution.env.contains_key("CARGO_TARGET_DIR"));
         assert!(contribution
             .nudges
             .iter()
@@ -556,15 +549,17 @@ mod tests {
             .sync_inputs
             .iter()
             .any(|path| path.as_str() == "Cargo.toml"));
-        assert_eq!(config.adapter_seed, config.seed);
-
-        let repo = crate::config::parse("seed=['target']", "repo").unwrap();
+        let repo =
+            crate::config::parse("[env]\nCARGO_BUILD_BUILD_DIR='/custom/cargo-build'", "repo")
+                .unwrap();
         let merged = crate::config::merge(&[
             (crate::config::Layer::Adapter, config),
             (crate::config::Layer::Repo, repo),
         ]);
-        assert!(merged.seed.iter().any(|path| path.as_str() == "target"));
-        assert!(merged.adapter_seed.is_empty());
+        assert_eq!(
+            crate::config::effective_scope(&merged, ".").unwrap().env["CARGO_BUILD_BUILD_DIR"],
+            "/custom/cargo-build"
+        );
     }
 
     #[test]

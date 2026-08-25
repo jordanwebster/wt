@@ -11,6 +11,11 @@ hint = "install sccache and set RUSTC_WRAPPER=sccache in ~/.wt/config.toml [repo
 requires = "cargo"
 sync_inputs = ["Cargo.lock", "Cargo.toml"]
 
+# Share Cargo intermediates per repository. CARGO_TARGET_DIR must remain unset
+# so each tree's binary stays in its own target directory (SPEC §9.2a).
+[tools.cargo.env]
+CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}"
+
 [tools.cargo.task.sync]
 run = "cargo fetch"
 [tools.cargo.task.build]
@@ -33,6 +38,10 @@ sniff = [
   { file = "rustfmt.toml", toml_key = "imports_granularity" },
   { file = ".rustfmt.toml", toml_key = "imports_granularity" },
 ]
+
+# Keep output ownership identical to the regular cargo tool above.
+[tools.cargo-nightly-fmt.env]
+CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}"
 
 [tools.cargo-nightly-fmt.task.sync]
 run = "cargo fetch"

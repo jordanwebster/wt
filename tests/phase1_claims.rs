@@ -461,7 +461,7 @@ leaf='value'
 composed="${root()}/${leaf}/${ports.http}"
 [env]
 COMPOSED='${composed}'
-ALL='${repo()}|${branch()}|${label()}|${name()}|${name_snake()}|${name_short()}|${target()}'
+ALL='${home()}|${repo()}|${branch()}|${label()}|${name()}|${name_snake()}|${name_short()}|${target()}'
 [files.generated]
 marker=''
 content='${composed}'
