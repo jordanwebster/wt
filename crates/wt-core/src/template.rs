@@ -11,27 +11,23 @@ pub const FUNCTIONS: &[&str] = &[
     "name_snake",
     "name_short",
     "target",
-    "port",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Call {
     Simple(String),
-    Port(String),
 }
 
 impl Call {
     pub fn name(&self) -> &str {
         match self {
             Self::Simple(name) => name,
-            Self::Port(_) => "port",
         }
     }
 
     pub fn display(&self) -> String {
         match self {
             Self::Simple(name) => format!("{name}()"),
-            Self::Port(name) => format!("port('{name}')"),
         }
     }
 }
@@ -39,6 +35,7 @@ impl Call {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Expression {
     Var(String),
+    Port(String),
     Call(Call),
 }
 
@@ -104,6 +101,12 @@ fn parse_parts(input: &str) -> Result<Vec<Part>, CoreError> {
 
 fn parse_expression(input: &str) -> Result<Expression, CoreError> {
     let input = input.trim();
+    if let Some(name) = input.strip_prefix("ports.") {
+        if valid_port_name(name) {
+            return Ok(Expression::Port(name.to_owned()));
+        }
+        return Err(invalid("invalid port reference in `${...}`"));
+    }
     if valid_identifier(input) {
         return Ok(Expression::Var(input.to_owned()));
     }
@@ -118,18 +121,6 @@ fn parse_expression(input: &str) -> Result<Expression, CoreError> {
         return Err(invalid("invalid function name in `${...}`"));
     }
     let arguments = arguments[open + 1..].trim();
-    if name == "port" {
-        let Some(argument) = arguments
-            .strip_prefix('\'')
-            .and_then(|value| value.strip_suffix('\''))
-        else {
-            return Err(invalid("port() requires one single-quoted port name"));
-        };
-        if argument.is_empty() || argument.contains('\'') {
-            return Err(invalid("port() requires one single-quoted port name"));
-        }
-        return Ok(Expression::Call(Call::Port(argument.to_owned())));
-    }
     if !arguments.is_empty() {
         return Err(invalid("template function takes no arguments"));
     }
@@ -163,7 +154,9 @@ pub fn references(input: &str) -> Result<BTreeSet<String>, CoreError> {
         .into_iter()
         .filter_map(|part| match part {
             Part::Expression(Expression::Var(name)) => Some(name),
-            Part::Literal(_) | Part::Expression(Expression::Call(_)) => None,
+            Part::Literal(_)
+            | Part::Expression(Expression::Port(_))
+            | Part::Expression(Expression::Call(_)) => None,
         })
         .collect())
 }
@@ -173,7 +166,21 @@ pub fn calls(input: &str) -> Result<BTreeSet<Call>, CoreError> {
         .into_iter()
         .filter_map(|part| match part {
             Part::Expression(Expression::Call(call)) => Some(call),
-            Part::Literal(_) | Part::Expression(Expression::Var(_)) => None,
+            Part::Literal(_)
+            | Part::Expression(Expression::Var(_))
+            | Part::Expression(Expression::Port(_)) => None,
+        })
+        .collect())
+}
+
+pub fn port_references(input: &str) -> Result<BTreeSet<String>, CoreError> {
+    Ok(parse_parts(input)?
+        .into_iter()
+        .filter_map(|part| match part {
+            Part::Expression(Expression::Port(name)) => Some(name),
+            Part::Literal(_)
+            | Part::Expression(Expression::Var(_))
+            | Part::Expression(Expression::Call(_)) => None,
         })
         .collect())
 }
@@ -181,14 +188,7 @@ pub fn calls(input: &str) -> Result<BTreeSet<Call>, CoreError> {
 pub fn validate_calls(input: &str, declared_ports: &BTreeSet<String>) -> Result<(), CoreError> {
     for call in calls(input)? {
         match &call {
-            Call::Simple(name) if FUNCTIONS.contains(&name.as_str()) && name != "port" => {}
-            Call::Port(name) if declared_ports.contains(name) => {}
-            Call::Port(_) => {
-                return Err(invalid(&format!(
-                    "function call `{}` names an undeclared port",
-                    call.display()
-                )))
-            }
+            Call::Simple(name) if FUNCTIONS.contains(&name.as_str()) => {}
             Call::Simple(_) => {
                 return Err(invalid(&format!(
                     "unknown template function `{}`",
@@ -196,6 +196,14 @@ pub fn validate_calls(input: &str, declared_ports: &BTreeSet<String>) -> Result<
                 )))
             }
         }
+    }
+    if let Some(name) = port_references(input)?
+        .into_iter()
+        .find(|name| !declared_ports.contains(name))
+    {
+        return Err(invalid(&format!(
+            "port reference `ports.{name}` names an undeclared port"
+        )));
     }
     Ok(())
 }
@@ -209,6 +217,13 @@ pub fn expand(input: &str, context: &Context<'_>) -> Result<String, CoreError> {
                 Some(value) => output.push_str(value),
                 None => return Err(vars_unknown(format!("unknown vars name `{name}`"))),
             },
+            Part::Expression(Expression::Port(name)) => {
+                output.push_str(context.functions.ports.get(&name).ok_or_else(|| {
+                    invalid(&format!(
+                        "port reference `ports.{name}` names an undeclared port"
+                    ))
+                })?)
+            }
             Part::Expression(Expression::Call(call)) => {
                 output.push_str(&function_value(&call, context.functions)?)
             }
@@ -219,17 +234,11 @@ pub fn expand(input: &str, context: &Context<'_>) -> Result<String, CoreError> {
 
 fn function_value(call: &Call, values: &FunctionValues) -> Result<String, CoreError> {
     match call {
-        Call::Simple(name) if FUNCTIONS.contains(&name.as_str()) && name != "port" => values
+        Call::Simple(name) if FUNCTIONS.contains(&name.as_str()) => values
             .simple
             .get(name)
             .cloned()
             .ok_or_else(|| invalid(&format!("function `{}` has no value", call.display()))),
-        Call::Port(name) => values.ports.get(name).cloned().ok_or_else(|| {
-            invalid(&format!(
-                "function call `{}` names an undeclared port",
-                call.display()
-            ))
-        }),
         Call::Simple(_) => Err(invalid(&format!(
             "unknown template function `{}`",
             call.display()
@@ -298,46 +307,6 @@ pub fn resolve_vars(
     Ok(resolved)
 }
 
-/// Expands wt expressions in shell-owned text while leaving every ordinary
-/// shell parameter expansion byte-for-byte intact. Acceptance configurations
-/// use wt functions alongside `${h%??}` and `${1-}` shell syntax.
-pub fn expand_shell(input: &str, context: &Context<'_>) -> Result<String, CoreError> {
-    let chars: Vec<char> = input.chars().collect();
-    let mut output = String::new();
-    let mut index = 0;
-    while index < chars.len() {
-        if chars[index] != '$' || chars.get(index + 1) != Some(&'{') {
-            output.push(chars[index]);
-            index += 1;
-            continue;
-        }
-        let Some(relative_close) = chars[index + 2..].iter().position(|ch| *ch == '}') else {
-            output.extend(chars[index..].iter());
-            break;
-        };
-        let close = index + 2 + relative_close;
-        let body = chars[index + 2..close].iter().collect::<String>();
-        match parse_expression(&body) {
-            Ok(Expression::Var(name)) if context.vars.contains_key(&name) => {
-                output.push_str(&context.vars[&name]);
-            }
-            Ok(Expression::Var(name))
-                if name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_') =>
-            {
-                return Err(vars_unknown(format!("unknown vars name `{name}`")));
-            }
-            Ok(Expression::Call(call)) => {
-                output.push_str(&function_value(&call, context.functions)?)
-            }
-            Ok(Expression::Var(_)) | Err(_) => output.extend(chars[index..=close].iter()),
-        }
-        index = close + 1;
-    }
-    Ok(output)
-}
-
 /// Extracts shell variables used by legacy resource snapshots. Shell syntax is
 /// not template syntax, so parameter operators are deliberately ignored.
 pub fn shell_references(input: &str) -> BTreeSet<String> {
@@ -391,6 +360,17 @@ fn valid_identifier(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+fn valid_port_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,7 +394,7 @@ mod tests {
             functions: &functions,
         };
         assert_eq!(
-            expand("${prefix}/${root()}/${port('http')}/$$/$A/$-", &context).unwrap(),
+            expand("${prefix}/${root()}/${ports.http}/$$/$A/$-", &context).unwrap(),
             "one//tree/20016/$/$A/$-"
         );
     }
@@ -446,20 +426,20 @@ mod tests {
             "VARS_UNKNOWN"
         );
         assert!(validate_calls("${mystery()}", &BTreeSet::new()).is_err());
-        assert!(validate_calls("${port('missing')}", &BTreeSet::new()).is_err());
+        assert!(validate_calls("${ports.missing}", &BTreeSet::new()).is_err());
     }
 
     #[test]
-    fn shell_expansion_preserves_shell_owned_forms() {
-        let vars = BTreeMap::new();
+    fn dotted_ports_are_lookups_and_ports_is_not_a_var() {
         let functions = functions();
         let context = Context {
-            vars: &vars,
+            vars: &BTreeMap::new(),
             functions: &functions,
         };
         assert_eq!(
-            expand_shell("echo ${root()} ${h%??} ${1-} $$ $HOME", &context).unwrap(),
-            "echo /tree ${h%??} ${1-} $$ $HOME"
+            expand("${ports.http}:${ports.http}", &context).unwrap(),
+            "20016:20016"
         );
+        assert!(validate_calls("${ports.missing}", &BTreeSet::new()).is_err());
     }
 }

@@ -9,9 +9,9 @@ use std::collections::BTreeSet;
 const BASIC: &str = r#"
 ports = ["http"]
 [env]
-APP_PORT = "${port('http')}"
+APP_PORT = "${ports.http}"
 [files.".wt/generated"]
-content = "port=${port('http')}"
+content = "port=${ports.http}"
 [task.hello]
 run = "printf hello"
 "#;
@@ -109,6 +109,49 @@ fn run_json_keeps_one_envelope_on_stdout() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("hello"));
     let log = value["data"]["log"].as_str().unwrap();
     assert_eq!(std::fs::read(log).unwrap(), b"hello");
+}
+
+#[test]
+fn shell_recipes_are_opaque_but_argv_and_rendered_scripts_are_templates() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        r#"
+ports = ["http"]
+[vars]
+private = "secret"
+[files."generated.sh"]
+marker = ""
+content = "printf '%s\\n' '$${h%??}' '${private}' '${ports.http}'"
+[task.shell]
+run = '''h=abcdef; printf '%s|%s|%s|%s' '${root()}' '$HOME' '$$' "${h%??}"'''
+[task.argv]
+run = ["printf", "%s|%s", "${private}", "${ports.http}"]
+"#,
+    );
+    h.register(&repo);
+
+    h.wt()
+        .args(["run", "shell", "repo"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("${root()}|$HOME|$$|abcd"));
+    h.wt()
+        .args(["run", "argv", "repo"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("secret|20000"));
+    assert_eq!(
+        std::fs::read_to_string(repo.join("generated.sh")).unwrap(),
+        "printf '%s\\n' '${h%??}' 'secret' '20000'"
+    );
+}
+
+#[test]
+fn ports_is_a_reserved_var_key() {
+    let error = wt_core::config::parse("[vars]\nports='mine'", "repo/.wt.toml").unwrap_err();
+    assert_eq!(error.code.0, "CONFIG_INVALID");
+    assert!(error.message.contains("reserved"));
 }
 
 #[test]
@@ -977,7 +1020,7 @@ ports=['http']
 bin=['bin']
 copy=['secret.txt']
 [vars]
-app_port="${port('http')}"
+app_port="${ports.http}"
 [env]
 APP_PORT='${app_port}'
 [files.".wt/app.conf"]

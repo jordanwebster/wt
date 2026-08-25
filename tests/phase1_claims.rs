@@ -261,7 +261,7 @@ fn environment_claim_overrides_restores_and_keeps_ports_out_of_children() {
     );
     let repo = harness.repo(
         "repo",
-        "ports=['http']\n[env]\nDATABASE_URL='tree-db'\nAPP_PORT=\"${port('http')}\"\n",
+        "ports=['http']\n[env]\nDATABASE_URL='tree-db'\nAPP_PORT=\"${ports.http}\"\n",
     );
     harness.register(&repo);
     let output = harness
@@ -364,7 +364,7 @@ fn vars_and_functions_render_real_environment_and_files() {
         r#"ports=['http']
 [vars]
 leaf='value'
-composed="${root()}/${leaf}/${port('http')}"
+composed="${root()}/${leaf}/${ports.http}"
 [env]
 COMPOSED='${composed}'
 ALL='${repo()}|${branch()}|${label()}|${name()}|${name_snake()}|${name_short()}|${target()}'
@@ -407,7 +407,7 @@ fn configuration_failures_are_captured_with_names_and_locations() {
         ("function", "[env]\nA='${mystery()}'", "CONFIG_INVALID"),
         (
             "port",
-            "ports=['http']\n[env]\nA=\"${port('missing')}\"",
+            "ports=['http']\n[env]\nA=\"${ports.missing}\"",
             "CONFIG_INVALID",
         ),
     ];

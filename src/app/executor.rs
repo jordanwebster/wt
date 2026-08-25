@@ -912,7 +912,7 @@ fn expanded(command: &Command, assembled: &EnvOutput) -> Result<ExpandedCommand,
     };
     match command {
         Command::Shell(shell) => Ok(ExpandedCommand::Shell {
-            shell: wt_core::template::expand_shell(shell, &context)?,
+            shell: shell.clone(),
         }),
         Command::Argv(argv) => argv
             .iter()

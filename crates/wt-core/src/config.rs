@@ -334,7 +334,6 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
     let functions = template::FunctionValues {
         simple: template::FUNCTIONS
             .iter()
-            .filter(|name| **name != "port")
             .map(|name| ((*name).to_owned(), String::new()))
             .collect(),
         ports: ports
@@ -345,7 +344,7 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
     for dir in std::iter::once(".").chain(config.dirs.keys().map(String::as_str)) {
         let effective = effective_scope(config, dir)?;
         validate_var_graph(&effective.vars, &ports, &effective.locations)?;
-        let resolved_vars = template::resolve_vars(&effective.vars, &functions)?;
+        template::resolve_vars(&effective.vars, &functions)?;
         for (key, value) in &effective.env {
             validate_template_value(
                 value,
@@ -383,10 +382,6 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                         .get(&format!("task:{task_id}:env:{key}")),
                 )?;
             }
-            let context = template::Context {
-                vars: &resolved_vars,
-                functions: &functions,
-            };
             for command in [
                 task.run.as_ref(),
                 task.exists.as_ref(),
@@ -396,9 +391,7 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
             .flatten()
             {
                 match command {
-                    Command::Shell(shell) => {
-                        template::expand_shell(shell, &context)?;
-                    }
+                    Command::Shell(_) => {}
                     Command::Argv(argv) => {
                         for value in argv {
                             validate_template_value(value, &effective.vars, &ports, None)?;
@@ -432,7 +425,6 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                     match command {
                         Command::Shell(shell) => {
                             legacy_references.extend(template::shell_references(shell));
-                            calls.extend(shell_template_calls(shell)?);
                         }
                         Command::Argv(argv) => {
                             for value in argv {
@@ -447,14 +439,10 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                 let tree_call = calls.iter().any(|call| {
                     matches!(
                         call.name(),
-                        "root"
-                            | "branch"
-                            | "name"
-                            | "name_snake"
-                            | "name_short"
-                            | "target"
-                            | "port"
+                        "root" | "branch" | "name" | "name_snake" | "name_short" | "target"
                     )
+                }) || task.name.iter().chain(task.env.values()).any(|text| {
+                    template::port_references(text).is_ok_and(|ports| !ports.is_empty())
                 });
                 let legacy_tree_reference = legacy_references.iter().any(|name| {
                     matches!(
@@ -583,23 +571,6 @@ fn located(mut error: CoreError, location: Option<&SourceLocation>) -> CoreError
     error
 }
 
-fn shell_template_calls(shell: &str) -> Result<BTreeSet<template::Call>, CoreError> {
-    let mut calls = BTreeSet::new();
-    let mut rest = shell;
-    while let Some(start) = rest.find("${") {
-        rest = &rest[start..];
-        let Some(close) = rest.find('}') else {
-            break;
-        };
-        let candidate = &rest[..=close];
-        if let Ok(found) = template::calls(candidate) {
-            calls.extend(found);
-        }
-        rest = &rest[close + 1..];
-    }
-    Ok(calls)
-}
-
 fn validate_scope(scope: &Scope) -> Result<(), CoreError> {
     let mut commands = BTreeSet::new();
     for command in &scope.commands {
@@ -619,9 +590,9 @@ fn validate_scope(scope: &Scope) -> Result<(), CoreError> {
                 "vars key `{key}` must match [a-z_][a-z0-9_]*"
             )));
         }
-        if template::FUNCTIONS.contains(&key.as_str()) {
+        if key == "ports" || template::FUNCTIONS.contains(&key.as_str()) {
             return Err(invalid(format!(
-                "vars key `{key}` collides with a template function"
+                "vars key `{key}` is reserved by the template language"
             )));
         }
         if let Some(value) = value.value() {
@@ -1011,7 +982,7 @@ mod tests {
             "VARS_UNKNOWN"
         );
         let repo = parse(
-            "[task.db]\ntied_to='repo'\nexists='test -e ${root()}'\ndestroy='drop'",
+            "[task.db]\ntied_to='repo'\nexists='test -e $WT_ROOT'\ndestroy='drop'",
             "x",
         )
         .unwrap();
@@ -1019,6 +990,13 @@ mod tests {
             .unwrap_err()
             .message
             .contains("tree-specific"));
+
+        let opaque = parse(
+            "[task.db]\ntied_to='repo'\nexists='test -e ${root()}'\ndestroy='drop'",
+            "x",
+        )
+        .unwrap();
+        assert!(validate_resolved(&opaque, 16).is_ok());
     }
 
     #[test]
@@ -1123,10 +1101,7 @@ mod tests {
     fn unknown_functions_and_ports_name_the_call_and_location() {
         for (source, call) in [
             ("[env]\nA='${mystery()}'", "mystery()"),
-            (
-                "ports=['http']\n[env]\nA=\"${port('admin')}\"",
-                "port('admin')",
-            ),
+            ("ports=['http']\n[env]\nA=\"${ports.admin}\"", "ports.admin"),
         ] {
             let config = parse(source, "repo/.wt.toml").unwrap();
             let error = validate_resolved(&config, 16).unwrap_err();

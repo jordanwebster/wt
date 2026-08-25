@@ -460,7 +460,7 @@ mod tests {
     fn output(parent: &EnvMap, name: &str, task: Option<TaskContext>) -> EnvOutput {
         let mut cfg = EffectiveScope::default();
         cfg.env
-            .insert("PORT".to_owned(), "${port('http')}".to_owned());
+            .insert("PORT".to_owned(), "${ports.http}".to_owned());
         cfg.bin.push(RelPath::new("bin").unwrap());
         let tree = tree(name, if name == "a" { 20_016 } else { 20_032 });
         assemble(EnvInputs {
@@ -646,7 +646,7 @@ mod tests {
         let mut cfg = EffectiveScope::default();
         cfg.vars.insert(
             "composed".to_owned(),
-            "${root()}/${leaf}/${port('http')}".to_owned(),
+            "${root()}/${leaf}/${ports.http}".to_owned(),
         );
         cfg.vars.insert("leaf".to_owned(), "private".to_owned());
         cfg.env.insert("VALUE".to_owned(), "${composed}".to_owned());
@@ -688,7 +688,7 @@ mod tests {
         let mut cfg = EffectiveScope::default();
         cfg.env.insert(
             "ALL".to_owned(),
-            "${root()}|${repo()}|${branch()}|${label()}|${name()}|${name_snake()}|${name_short()}|${target()}|${port('http')}".to_owned(),
+            "${root()}|${repo()}|${branch()}|${label()}|${name()}|${name_snake()}|${name_short()}|${target()}|${ports.http}".to_owned(),
         );
         let output = assemble(EnvInputs {
             cfg: &cfg,
