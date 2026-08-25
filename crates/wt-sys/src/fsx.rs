@@ -1132,12 +1132,12 @@ fn fallback_copy_at(source: &Path, destination_dir: i32, name: &CString, mode: u
         .map_err(io_context("fsync contained copied file"))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "failpoints"))]
 fn forced_reflink_failure() -> bool {
     std::env::var_os("WT_TEST_REFLINK_UNSUPPORTED").is_some()
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "failpoints")))]
 fn forced_reflink_failure() -> bool {
     false
 }

@@ -1581,6 +1581,7 @@ fn cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs() {
         .filter_map(|input| input["path"].as_str())
         .collect::<BTreeSet<_>>();
     assert_eq!(inputs, BTreeSet::from(["Cargo.lock", "Cargo.toml"]));
+
     common::proof_capture(
         "D1",
         format!(
@@ -1605,6 +1606,57 @@ fn cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs() {
     assert_eq!(
         status["data"]["sync"]["drift"],
         serde_json::json!(["Cargo.toml"])
+    );
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn seed_skip_notice_and_record_are_observed_at_the_new_boundary() {
+    let h = Harness::new();
+    let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    common::write(
+        &h.home.join("config.toml"),
+        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
+    );
+    let repo = h.repo("repo", "seed=['cache']\n");
+    wt_sys::fsx::create_private_dir(&repo.join("cache")).unwrap();
+    common::write(&repo.join("cache/value"), "seed\n");
+    h.register(&repo);
+    let output = h
+        .wt()
+        .env("WT_TEST_REFLINK_UNSUPPORTED", "1")
+        .args(["new", "repo/work", "--no-sync", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let created: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let root = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
+    let skipped = created["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "SEED_SKIPPED_NO_REFLINK");
+    assert!(skipped);
+    assert!(!root.join("cache").exists());
+    let target = wt_core::model::Target::parse("repo/work").unwrap();
+    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
+        &h.home.join(wt_core::model::tree_state_path(&target)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    let materialized = state.materialized.iter().any(|entry| entry.path == "cache");
+    assert!(!materialized);
+    common::proof_capture(
+        "D1",
+        format!(
+            "forced unavailable notice: {skipped}\nforced seed present: {}\nforced seed materialized: {materialized}",
+            root.join("cache").exists()
+        ),
     );
 }
 
