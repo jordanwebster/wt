@@ -1516,7 +1516,18 @@ fn missing_tree_teardown_reports_exe_missing_and_the_actual_remaining_count() {
 }
 
 #[test]
-fn copy_reporting_distinguishes_absent_and_tracked_sources() {
+fn copy_populates_declared_paths_and_refuses_tracked_sources() {
+    let copied = Harness::new();
+    let repo = copied.repo("repo", "copy=['.env']\n");
+    common::write(&repo.join(".env"), "TOKEN=local-only\n");
+    copied.register(&repo);
+    let created = copied.json(&["new", "repo/work", "--no-sync", "--no-build"]);
+    let root = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
+    assert_eq!(
+        wt_sys::fsx::read_string(&root.join(".env")).unwrap(),
+        Some("TOKEN=local-only\n".to_owned())
+    );
+
     let absent = Harness::new();
     let repo = absent.repo("repo", "copy=['missing.secret']\n");
     absent.register(&repo);
@@ -1543,67 +1554,54 @@ fn copy_reporting_distinguishes_absent_and_tracked_sources() {
 }
 
 #[test]
-fn a_declared_seed_is_reflink_only_and_cargo_tracks_its_sync_inputs() {
+fn cargo_shares_intermediates_per_repository_but_keeps_tree_outputs_local() {
     let h = Harness::new();
+    configure_backend_none(&h);
     common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
-    // cargo contributes sync inputs but no seed (A46): the repository declares
-    // one here, which is the route that still has to be reflink-only.
-    let repo = h.repo("repo", "seed = [\"target\"]\n");
+    let repo = h.repo("repo", "");
     common::write(
         &repo.join("Cargo.toml"),
         "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
     );
     common::write(&repo.join("Cargo.lock"), "# generated fixture lockfile\n");
-    common::write(&repo.join(".gitignore"), "/target/\n");
-    wt_sys::fsx::create_private_dir(&repo.join("target")).unwrap();
-    common::write(&repo.join("target/cache.bin"), "warm cache\n");
-    common::git(&repo, &["add", "Cargo.toml", "Cargo.lock", ".gitignore"]);
+    common::git(&repo, &["add", "Cargo.toml", "Cargo.lock"]);
     common::git(&repo, &["commit", "-qm", "add cargo fixture"]);
     common::git(&repo, &["push", "-q", "origin", "main"]);
-
-    let probe_root = h.root.join("reflink-probe");
-    wt_sys::fsx::create_private_dir(&probe_root).unwrap();
-    let probe = wt_sys::fsx::copy_contained(
-        &repo,
-        &probe_root,
-        &wt_core::model::RelPath::new("target").unwrap(),
-        wt_sys::fsx::CopyPolicy::PreferReflink,
-    )
-    .unwrap();
-    let reflink_supported = probe.files.iter().all(|file| file.reflinked);
-
     h.register(&repo);
-    let created = h.json(&["new", "repo/work", "--no-sync"]);
-    let tree_root = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
-    let skipped = created["notices"]
+    h.json(&["new", "repo/work", "--no-sync", "--no-build"]);
+    let canonical_env = h.json(&["env", "repo"])["data"]["env"].clone();
+    let linked_env = h.json(&["env", "repo/work"])["data"]["env"].clone();
+    let shared = h.home.join("cache/cargo-build/repo");
+    assert_eq!(
+        canonical_env["CARGO_BUILD_BUILD_DIR"],
+        shared.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        linked_env["CARGO_BUILD_BUILD_DIR"],
+        shared.to_string_lossy().as_ref()
+    );
+    let overridden = h
+        .wt()
+        .env("CARGO_BUILD_BUILD_DIR", "/inherited/cargo-build")
+        .args(["env", "repo", "--json"])
+        .output()
+        .unwrap();
+    assert!(overridden.status.success());
+    let overridden: serde_json::Value = serde_json::from_slice(&overridden.stdout).unwrap();
+    assert_eq!(
+        overridden["data"]["env"]["CARGO_BUILD_BUILD_DIR"],
+        shared.to_string_lossy().as_ref()
+    );
+    assert!(overridden["data"]["overrode"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|notice| notice["code"] == "SEED_SKIPPED_NO_REFLINK");
-    assert_eq!(skipped, !reflink_supported);
-    assert_eq!(
-        wt_sys::fsx::read_string(&tree_root.join("target/cache.bin")).unwrap(),
-        reflink_supported.then(|| "warm cache\n".to_owned())
-    );
-    assert!(!created["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|notice| notice["code"] == "SEED_COPIED_NOT_CLONED"));
-
-    let target = wt_core::model::Target::parse("repo/work").unwrap();
-    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
-        &h.home.join(wt_core::model::tree_state_path(&target)),
-        "STATE_CORRUPT",
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        state.materialized.iter().any(|entry| {
-            entry.path == "target" && entry.kind == wt_core::lifecycle::MaterializedKind::Seeded
-        }),
-        reflink_supported
-    );
+        .any(|key| key == "CARGO_BUILD_BUILD_DIR"));
+    assert!(canonical_env.get("CARGO_TARGET_DIR").is_none());
+    assert!(linked_env.get("CARGO_TARGET_DIR").is_none());
+    let canonical_target = PathBuf::from(canonical_env["WT_ROOT"].as_str().unwrap()).join("target");
+    let linked_target = PathBuf::from(linked_env["WT_ROOT"].as_str().unwrap()).join("target");
+    assert_ne!(canonical_target, linked_target);
 
     let synced = h.json(&["sync", "repo/work"]);
     let inputs = synced["data"]["inputs"]
@@ -1617,12 +1615,11 @@ fn a_declared_seed_is_reflink_only_and_cargo_tracks_its_sync_inputs() {
     common::proof_capture(
         "D1",
         format!(
-            "reflink supported: {reflink_supported}\nseed present: {}\nseed materialized: {}\nSEED_SKIPPED_NO_REFLINK: {skipped}\nSEED_COPIED_NOT_CLONED: false\nsync inputs: {}",
-            tree_root.join("target/cache.bin").exists(),
-            state.materialized.iter().any(|entry| {
-                entry.path == "target"
-                    && entry.kind == wt_core::lifecycle::MaterializedKind::Seeded
-            }),
+            "canonical build dir: {}\nlinked build dir: {}\nCARGO_TARGET_DIR set: false\ncanonical target: {}\nlinked target: {}\nsync inputs: {}",
+            canonical_env["CARGO_BUILD_BUILD_DIR"],
+            linked_env["CARGO_BUILD_BUILD_DIR"],
+            canonical_target.display(),
+            linked_target.display(),
             inputs.iter().copied().collect::<Vec<_>>().join(", ")
         ),
     );
@@ -1638,49 +1635,6 @@ fn a_declared_seed_is_reflink_only_and_cargo_tracks_its_sync_inputs() {
     assert_eq!(
         status["data"]["sync"]["drift"],
         serde_json::json!(["Cargo.toml"])
-    );
-}
-
-#[cfg(feature = "failpoints")]
-#[test]
-fn seed_skip_notice_and_record_are_observed_at_the_new_boundary() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let repo = h.repo("repo", "seed=['cache']\n");
-    wt_sys::fsx::create_private_dir(&repo.join("cache")).unwrap();
-    common::write(&repo.join("cache/value"), "seed\n");
-    h.register(&repo);
-    let output = h
-        .wt()
-        .env("WT_TEST_REFLINK_UNSUPPORTED", "1")
-        .args(["new", "repo/work", "--no-sync", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let created: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let root = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
-    let skipped = created["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|notice| notice["code"] == "SEED_SKIPPED_NO_REFLINK");
-    assert!(skipped);
-    assert!(!root.join("cache").exists());
-    let target = wt_core::model::Target::parse("repo/work").unwrap();
-    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
-        &h.home.join(wt_core::model::tree_state_path(&target)),
-        "STATE_CORRUPT",
-    )
-    .unwrap()
-    .unwrap();
-    let materialized = state.materialized.iter().any(|entry| entry.path == "cache");
-    assert!(!materialized);
-    common::proof_capture(
-        "D1",
-        format!(
-            "forced unavailable notice: {skipped}\nforced seed present: {}\nforced seed materialized: {materialized}",
-            root.join("cache").exists()
-        ),
     );
 }
 

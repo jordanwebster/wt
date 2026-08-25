@@ -13,7 +13,6 @@ Effective config for repo/work
   env          .      merged  -
   files        .      merged  -
   ports        .      merged  -
-  seed         .      merged  -
   sync_inputs  .      merged  README.md
   task         .      merged  build, fmt, hello, lint, service, sync, test
   vars         .      merged  -

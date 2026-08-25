@@ -207,11 +207,6 @@ pub struct Config {
     pub root: Scope,
     pub ports: Vec<PortName>,
     pub dirs: IndexMap<String, Scope>,
-    pub seed: Vec<RelPath>,
-    /// Subset of `seed` contributed by built-in adapters. Executors use this
-    /// identity to apply the reflink-only fallback rule from SPEC §6.1.
-    #[serde(skip)]
-    pub adapter_seed: Vec<RelPath>,
     pub sync_inputs: Vec<RelPath>,
     pub detect: Detect,
 }
@@ -374,9 +369,9 @@ pub fn validate(config: &Config) -> Result<(), CoreError> {
         RelDir::new(dir)?;
         validate_scope(scope)?;
     }
-    validate_materialized_overlap(&config.root, &config.seed)?;
+    validate_materialized_overlap(&config.root)?;
     for scope in config.dirs.values() {
-        validate_materialized_overlap(scope, &[])?;
+        validate_materialized_overlap(scope)?;
     }
     Ok(())
 }
@@ -464,12 +459,9 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
         if effective
             .copy
             .iter()
-            .chain(&config.seed)
             .any(|path| effective.files.contains_key(path.as_str()))
         {
-            return Err(invalid(
-                "copy or seed entries may not also be rendered files",
-            ));
+            return Err(invalid("copy entries may not also be rendered files"));
         }
         for task in effective.tasks.values() {
             if task.tied_to == Some(TiedTo::Repo) {
@@ -772,25 +764,15 @@ fn validate_task(
     Ok(())
 }
 
-fn validate_materialized_overlap(scope: &Scope, seed: &[RelPath]) -> Result<(), CoreError> {
+fn validate_materialized_overlap(scope: &Scope) -> Result<(), CoreError> {
     let files: BTreeSet<_> = scope
         .files
         .iter()
         .filter(|(_, value)| value.value().is_some())
         .map(|(path, _)| path.as_str())
         .collect();
-    if scope
-        .copy
-        .iter()
-        .chain(seed)
-        .any(|path| files.contains(path.as_str()))
-    {
-        return Err(invalid(
-            "copy or seed entries may not also be rendered files",
-        ));
-    }
-    if scope.copy.iter().any(|copy| seed.contains(copy)) {
-        return Err(invalid("copy and seed entries must be disjoint"));
+    if scope.copy.iter().any(|path| files.contains(path.as_str())) {
+        return Err(invalid("copy entries may not also be rendered files"));
     }
     Ok(())
 }
@@ -812,20 +794,13 @@ pub fn merge(layers: &[(Layer, Config)]) -> Config {
     let mut output = Config::default();
     let mut layers: Vec<_> = layers.iter().collect();
     layers.sort_by_key(|(layer, _)| *layer);
-    for (kind, layer) in layers {
+    for (_, layer) in layers {
         merge_scope(&mut output.root, &layer.root);
         for (dir, scope) in &layer.dirs {
             merge_scope(output.dirs.entry(dir.clone()).or_default(), scope);
         }
         if !layer.ports.is_empty() {
             output.ports.clone_from(&layer.ports);
-        }
-        append_unique(&mut output.seed, &layer.seed);
-        append_unique(&mut output.adapter_seed, &layer.adapter_seed);
-        if *kind != Layer::Adapter {
-            output
-                .adapter_seed
-                .retain(|path| !layer.seed.contains(path));
         }
         append_unique(&mut output.sync_inputs, &layer.sync_inputs);
         if layer.detect.depth.is_some() {
@@ -1149,10 +1124,10 @@ mod tests {
     }
 
     #[test]
-    fn copy_and_seed_are_disjoint() {
-        let config = parse("copy=['cache']\nseed=['cache']", "repo/.wt.toml").unwrap_err();
+    fn removed_seed_key_is_refused_as_unknown() {
+        let config = parse("seed=['cache']", "repo/.wt.toml").unwrap_err();
         assert_eq!(config.code.0, "CONFIG_INVALID");
-        assert!(config.message.contains("disjoint"));
+        assert!(config.message.contains("unknown field `seed`"));
     }
 
     #[test]

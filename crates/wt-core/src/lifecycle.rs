@@ -69,7 +69,6 @@ pub struct Materialized {
 pub enum MaterializedKind {
     Rendered,
     Copied,
-    Seeded,
 }
 
 /// The persisted state is keyed by `(label, name)` in its path and repeats that

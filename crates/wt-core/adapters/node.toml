@@ -11,7 +11,6 @@ hint = "pnpm shares one content-addressed store across trees; `pnpm import` conv
 lockfile = ["package-lock.json", "npm-shrinkwrap.json"]
 requires = "npm"
 sync_inputs = ["package-lock.json", "npm-shrinkwrap.json", "package.json"]
-seed = ["node_modules"]
 
 [tools.npm.task.sync]
 run = "npm ci"
@@ -28,7 +27,6 @@ run = "npm run build"
 lockfile = ["pnpm-lock.yaml"]
 requires = "pnpm"
 sync_inputs = ["pnpm-lock.yaml", "package.json"]
-seed = ["node_modules"]
 
 [tools.pnpm.task.sync]
 run = "pnpm install --frozen-lockfile"
@@ -45,7 +43,6 @@ run = "pnpm run build"
 lockfile = ["yarn.lock"]
 requires = "yarn"
 sync_inputs = ["yarn.lock", "package.json"]
-seed = ["node_modules"]
 
 [tools.yarn.task.sync]
 run = "yarn install --immutable"
@@ -62,7 +59,6 @@ run = "yarn run build"
 lockfile = ["bun.lockb", "bun.lock"]
 requires = "bun"
 sync_inputs = ["bun.lockb", "bun.lock", "package.json"]
-seed = ["node_modules"]
 
 [tools.bun.task.sync]
 run = "bun install --frozen-lockfile"

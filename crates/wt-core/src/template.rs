@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{CoreError, ExitClass};
 
 pub const FUNCTIONS: &[&str] = &[
+    "home",
     "root",
     "repo",
     "branch",
@@ -400,6 +401,7 @@ mod tests {
     fn functions() -> FunctionValues {
         FunctionValues {
             simple: BTreeMap::from([
+                ("home".to_owned(), "/home".to_owned()),
                 ("root".to_owned(), "/tree".to_owned()),
                 ("name".to_owned(), "feature".to_owned()),
             ]),
