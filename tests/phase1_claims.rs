@@ -67,6 +67,18 @@ fn text(output: &ProcessOutput) -> String {
     )
 }
 
+fn redact_root(harness: &Harness, value: impl AsRef<str>) -> String {
+    let raw = harness.root.to_string_lossy().into_owned();
+    let canonical = std::fs::canonicalize(&harness.root)
+        .unwrap_or_else(|_| harness.root.clone())
+        .to_string_lossy()
+        .into_owned();
+    value
+        .as_ref()
+        .replace(&canonical, "<ROOT>")
+        .replace(&raw, "<ROOT>")
+}
+
 #[test]
 fn owned_command_refuses_then_executes_and_unclaimed_names_resolve_normally() {
     let harness = Harness::new();
@@ -124,7 +136,7 @@ fn owned_command_refuses_then_executes_and_unclaimed_names_resolve_normally() {
     assert!(built_text.contains(&format!("TREE pid={}", built.pid)));
     assert!(!harness.shim_state.join("installed.log").exists());
 
-    proof_capture("A1", text(&refused));
+    proof_capture("A1", redact_root(&harness, text(&refused)));
     proof_capture("A2", text(&built));
     proof_capture("A4", text(&unclaimed));
 }
@@ -208,11 +220,14 @@ fn malformed_shim_invocations_refuse_without_guessing_a_tree() {
 
     proof_capture(
         "A6",
-        format!(
-            "wrong parent:\n{}\nsymlink chain:\n{}\nbare argv[0]:\n{}",
-            text(&wrong).trim_end(),
-            text(&chain).trim_end(),
-            text(&bare).trim_end()
+        redact_root(
+            &harness,
+            format!(
+                "wrong parent:\n{}\nsymlink chain:\n{}\nbare argv[0]:\n{}",
+                text(&wrong).trim_end(),
+                text(&chain).trim_end(),
+                text(&bare).trim_end()
+            ),
         ),
     );
 }
@@ -243,6 +258,12 @@ fn one_interactive_shell_reaches_the_build_without_rehashing() {
         request.args = proc::os_args(args);
         request.clear_env = true;
         request.env = env.clone();
+        request
+            .env
+            .insert("PS1".to_owned(), "wt-proof> ".to_owned());
+        request
+            .env
+            .insert("PROMPT".to_owned(), "wt-proof> ".to_owned());
         let input = b"printf '__FIRST__\\n'\norbit before\nprintf '__BUILD__\\n'\nwt build repo\nprintf '__SECOND__\\n'\norbit after\nprintf '__DONE__\\n'\nexit\n";
         let output = proc::pty_capture(&request, input, Duration::from_secs(20)).unwrap();
         assert_eq!(
@@ -261,7 +282,7 @@ fn one_interactive_shell_reaches_the_build_without_rehashing() {
         assert!(!transcript.contains("hash -r"));
         transcripts.push(format!("{name}:\n{transcript}"));
     }
-    proof_capture("A3", transcripts.join("\n"));
+    proof_capture("A3", redact_root(&harness, transcripts.join("\n")));
 }
 
 #[test]
@@ -309,14 +330,20 @@ fn shim_path_is_separate_from_bins_and_doctor_reports_damage_and_shadowing() {
 
     proof_capture(
         "A5",
-        format!(
-            "PATH first: {}\nWT_BIN: {}\nbin inventory entries: {}",
-            path.split(':').next().unwrap(),
-            env["data"]["env"]["WT_BIN"].as_str().unwrap(),
-            env["data"]["bins"].as_array().unwrap().len()
+        redact_root(
+            &harness,
+            format!(
+                "PATH first: {}\nWT_BIN: {}\nbin inventory entries: {}",
+                path.split(':').next().unwrap(),
+                env["data"]["env"]["WT_BIN"].as_str().unwrap(),
+                env["data"]["bins"].as_array().unwrap().len()
+            ),
         ),
     );
-    proof_capture("A6", String::from_utf8_lossy(&output.stdout));
+    proof_capture(
+        "A6",
+        redact_root(&harness, String::from_utf8_lossy(&output.stdout)),
+    );
 }
 
 #[test]
@@ -407,7 +434,7 @@ fn environment_claim_overrides_restores_and_keeps_ports_out_of_children() {
     assert!(inverse.contains("export DATABASE_URL='production-db'"));
 
     proof_capture("B1", String::from_utf8_lossy(&child.stdout));
-    proof_capture("B2", inverse);
+    proof_capture("B2", redact_root(&harness, inverse));
     proof_capture(
         "B3",
         format!(
@@ -455,14 +482,20 @@ content='${composed}'
     assert_eq!(rendered, format!("{root}/value/31000"));
     proof_capture(
         "C1",
-        format!(
-            "ALL={}\nCOMPOSED={}",
-            env["data"]["env"]["ALL"], env["data"]["env"]["COMPOSED"]
+        redact_root(
+            &harness,
+            format!(
+                "ALL={}\nCOMPOSED={}",
+                env["data"]["env"]["ALL"], env["data"]["env"]["COMPOSED"]
+            ),
         ),
     );
     proof_capture(
         "C2",
-        format!("rendered={rendered}\nleaf exported=false\ncomposed exported=false"),
+        redact_root(
+            &harness,
+            format!("rendered={rendered}\nleaf exported=false\ncomposed exported=false"),
+        ),
     );
 }
 
@@ -497,6 +530,7 @@ fn legacy_template_spelling_is_rejected_at_its_source_location() {
     assert!(error.message.contains("legacy.wt.toml:3:13"));
     assert!(error.message.contains("$WT_PORT_HTTP"));
     assert!(error.message.contains("${ports.http}"));
+    proof_capture("C3", format!("legacy: {error}"));
 }
 
 #[test]

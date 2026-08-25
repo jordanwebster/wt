@@ -114,7 +114,15 @@ fn missing_bin_guidance_is_exclusive_to_doctor() {
             "door output:\n{}\ndoctor finding:\n{}",
             text.trim_end(),
             serde_json::to_string_pretty(finding).unwrap()
-        ),
+        )
+        .replace(
+            &std::fs::canonicalize(&h.root)
+                .unwrap_or_else(|_| h.root.clone())
+                .to_string_lossy()
+                .to_string(),
+            "<ROOT>",
+        )
+        .replace(&h.root.to_string_lossy().to_string(), "<ROOT>"),
     );
 }
 

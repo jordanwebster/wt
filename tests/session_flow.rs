@@ -852,11 +852,33 @@ run = ["{}", "build", "{}", "{}"]
             std::fs::read_to_string(&events).unwrap(),
             build.window,
             build.log
+        )
+        .replace(
+            &std::fs::canonicalize(&private.harness.root)
+                .unwrap_or_else(|_| private.harness.root.clone())
+                .to_string_lossy()
+                .to_string(),
+            "<ROOT>",
+        )
+        .replace(
+            &private.harness.root.to_string_lossy().to_string(),
+            "<ROOT>",
         ),
     );
     common::proof_capture(
         "D3",
-        format!("running refusal:\n{progress_text}\nfailed refusal:\n{failed_text}"),
+        format!("running refusal:\n{progress_text}\nterminal refusal:\n{failed_text}")
+            .replace(
+                &std::fs::canonicalize(&private.harness.root)
+                    .unwrap_or_else(|_| private.harness.root.clone())
+                    .to_string_lossy()
+                    .to_string(),
+                "<ROOT>",
+            )
+            .replace(
+                &private.harness.root.to_string_lossy().to_string(),
+                "<ROOT>",
+            ),
     );
 }
 

@@ -287,6 +287,21 @@ run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status
     assert!(refusal.contains(&h.shims.join("orbit").to_string_lossy().to_string()));
     assert!(!refusal.contains("wt:setup"), "{refusal}");
     assert!(!refusal.contains("build is in progress"), "{refusal}");
+    common::proof_capture(
+        "A1",
+        format!(
+            "recorded-tree terminal refusal:\n{}",
+            refusal
+                .replace(
+                    &std::fs::canonicalize(&h.root)
+                        .unwrap_or_else(|_| h.root.clone())
+                        .to_string_lossy()
+                        .to_string(),
+                    "<ROOT>",
+                )
+                .replace(&h.root.to_string_lossy().to_string(), "<ROOT>")
+        ),
+    );
 
     common::write(
         &root.join(".wt.toml"),
@@ -305,6 +320,10 @@ run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status
     assert_eq!(
         std::fs::read_to_string(root.join(".wt/build.status")).unwrap(),
         "ok\n"
+    );
+    common::proof_capture(
+        "D3",
+        "backend none observed running inside the task\nfirst terminal status: failed\nretry observed running inside the task\nretry terminal status: ok",
     );
 }
 
