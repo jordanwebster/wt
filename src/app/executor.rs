@@ -398,7 +398,6 @@ fn step_notices(step: &wt_core::resource::StepResult, node: &Node) -> Vec<Notice
                 "RESOURCE_DECLARED_EXTERNAL" => "declared; created by the application".to_owned(),
                 _ => format!("resource transition reported {code}"),
             },
-            guidance: None,
         })
         .collect()
 }

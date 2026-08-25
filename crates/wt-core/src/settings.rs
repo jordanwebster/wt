@@ -418,6 +418,11 @@ mod tests {
         assert_eq!(settings.task.probe_timeout.as_deref(), Some("10s"));
         assert_eq!(settings.locks.rmw.as_deref(), Some("5s"));
         assert!(parse("mystery=true").is_err());
+        let removed = parse("default_agent='codex'").unwrap_err();
+        assert_eq!(removed.code.0, "SETTINGS_INVALID");
+        assert!(removed.message.contains("unknown field `default_agent`"));
+        assert!(!removed.message.contains("session.agent"));
+        assert!(!removed.remedy.contains("session.agent"));
         assert_eq!(settings.session.backend, SessionBackend::None);
         assert!(settings.session.attach);
         assert_eq!(settings.session.agent, None);

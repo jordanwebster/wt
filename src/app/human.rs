@@ -96,9 +96,7 @@ impl HumanKind {
                 .path
                 .unwrap_or_else(|| "not found".to_owned()),
             Self::Run => render_run(value, notices),
-            Self::Path | Self::Exec | Self::Shell | Self::Env | Self::Script => {
-                with_expected_next(String::new(), notices)
-            }
+            Self::Path | Self::Exec | Self::Shell | Self::Env | Self::Script => String::new(),
             Self::Locks => render_locks(decode(value), notices),
         }
     }
@@ -273,7 +271,7 @@ fn render_status(data: StatusData, notices: &[Notice]) -> String {
     )
 }
 
-fn render_list(data: ListData, notices: &[Notice]) -> String {
+fn render_list(data: ListData, _notices: &[Notice]) -> String {
     let rows = data
         .trees
         .into_iter()
@@ -287,12 +285,11 @@ fn render_list(data: ListData, notices: &[Notice]) -> String {
             ]
         })
         .collect::<Vec<_>>();
-    let text = table(
+    table(
         "Registered trees",
         ["target", "phase", "branch", "sync", "path"],
         rows,
-    );
-    with_expected_next(text, notices)
+    )
 }
 
 fn render_sync(data: SyncData, notices: &[Notice]) -> String {
@@ -451,7 +448,7 @@ fn render_doctor(data: DoctorData, notices: &[Notice]) -> String {
     block(headline, facts, notices)
 }
 
-fn render_tasks(data: TasksData, notices: &[Notice]) -> String {
+fn render_tasks(data: TasksData, _notices: &[Notice]) -> String {
     let rows = data
         .tasks
         .into_iter()
@@ -465,15 +462,14 @@ fn render_tasks(data: TasksData, notices: &[Notice]) -> String {
             ]
         })
         .collect::<Vec<_>>();
-    let text = table(
+    table(
         format!("Effective tasks for {}", data.target),
         ["task", "scope", "layer", "cwd", "needs"],
         rows,
-    );
-    with_expected_next(text, notices)
+    )
 }
 
-fn render_config(data: ConfigData, notices: &[Notice]) -> String {
+fn render_config(data: ConfigData, _notices: &[Notice]) -> String {
     let mut rows = Vec::new();
     for entry in data.entries {
         if let Some(object) = entry.value.as_object() {
@@ -494,15 +490,14 @@ fn render_config(data: ConfigData, notices: &[Notice]) -> String {
             ]);
         }
     }
-    let text = table(
+    table(
         format!("Effective config for {}", data.target),
         ["key", "scope", "layer", "value"],
         rows,
-    );
-    with_expected_next(text, notices)
+    )
 }
 
-fn render_locks(data: LocksData, notices: &[Notice]) -> String {
+fn render_locks(data: LocksData, _notices: &[Notice]) -> String {
     let rows = data
         .locks
         .into_iter()
@@ -522,12 +517,11 @@ fn render_locks(data: LocksData, notices: &[Notice]) -> String {
             ]
         })
         .collect::<Vec<_>>();
-    let text = table(
+    table(
         "Coordination locks",
         ["level", "name", "state", "holder", "path"],
         rows,
-    );
-    with_expected_next(text, notices)
+    )
 }
 
 fn render_run(value: &Value, notices: &[Notice]) -> String {
@@ -637,10 +631,9 @@ fn compact(value: &Value) -> String {
 
 fn block(
     headline: impl Into<String>,
-    mut facts: Vec<(&'static str, String)>,
-    notices: &[Notice],
+    facts: Vec<(&'static str, String)>,
+    _notices: &[Notice],
 ) -> String {
-    facts.extend(expected_next(notices));
     let mut output = headline.into();
     if facts.is_empty() {
         return output;
@@ -652,38 +645,12 @@ fn block(
     output
 }
 
-fn expected_next(notices: &[Notice]) -> Vec<(&'static str, String)> {
-    notices
-        .iter()
-        .filter(|notice| notice.code == "BIN_DIR_MISSING")
-        .filter_map(|notice| notice.next_step().map(|step| ("next", step)))
-        .collect()
-}
-
 fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
     if count == 1 {
         singular
     } else {
         plural
     }
-}
-
-pub(crate) fn with_expected_next(mut text: String, notices: &[Notice]) -> String {
-    let next = expected_next(notices);
-    if next.is_empty() {
-        return text;
-    }
-    if !text.is_empty() {
-        text.push('\n');
-    }
-    let width = next.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
-    for (index, (key, value)) in next.into_iter().enumerate() {
-        if index > 0 {
-            text.push('\n');
-        }
-        text.push_str(&format!("  {key:<width$}  {value}"));
-    }
-    text
 }
 
 fn table<const N: usize>(

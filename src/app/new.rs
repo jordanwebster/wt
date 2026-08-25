@@ -37,7 +37,9 @@ pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError>
         return Ok(output.after_render(AfterRender::NewSession { target, build }));
     }
     match open::provision_new(context, &target) {
-        Ok(notices) => output = output.with_notices(notices),
+        // Creation already carries the same door notice set. Session
+        // provisioning enters that door again only to launch tmux.
+        Ok(_) => {}
         Err(error) => {
             output = output.with_notices([open::session_failure_notice(&target, &error)]);
             return Ok(output);
@@ -596,7 +598,6 @@ fn finish_under_lock(
                     code: "COPY_ABSENT".to_owned(),
                     subject,
                     message: format!("copy source {path} is absent"),
-                    guidance: None,
                 });
                 continue;
             }
@@ -618,7 +619,6 @@ fn finish_under_lock(
                     code: "COPY_EXISTS".to_owned(),
                     subject,
                     message: format!("copy destination {path} already exists"),
-                    guidance: None,
                 });
                 continue;
             }
@@ -637,7 +637,6 @@ fn finish_under_lock(
                             message: format!(
                                 "seed {path} was skipped because reflink is unavailable"
                             ),
-                            guidance: None,
                         });
                         continue;
                     }
@@ -886,7 +885,6 @@ fn source_notices(
             code: code.to_owned(),
             subject: Some(target.to_string()),
             message: "local branch takes precedence over a different origin branch".to_owned(),
-            guidance: None,
         });
     }
     notices

@@ -238,7 +238,6 @@ fn open_trees(
                     code: error.code.0.clone(),
                     subject: Some(target.to_string()),
                     message: format!("{}; remedy: {}", error.message, error.remedy),
-                    guidance: None,
                 };
                 notices.push(notice);
                 if worst
@@ -366,7 +365,6 @@ pub(crate) fn session_failure_notice(target: &str, error: &CoreError) -> Notice 
             "session for {target} was not created: {}; run `wt open {target}` to retry",
             error.message
         ),
-        guidance: None,
     }
 }
 

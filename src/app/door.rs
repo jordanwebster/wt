@@ -127,7 +127,6 @@ pub(crate) fn enter(
             code: "TREE_NOT_READY".to_owned(),
             subject: Some(door.target.to_string()),
             message: "tree is usable but its last lifecycle operation failed".to_owned(),
-            guidance: None,
         };
         context.pending_notices.push(notice.clone());
         door.notices.push(notice);
@@ -380,7 +379,6 @@ fn env_notices(target: &Target, output: &EnvOutput) -> Vec<Notice> {
             code: "ACTIVATION_IGNORED".to_owned(),
             subject: subject.clone(),
             message: "invalid WT_ACTIVATION metadata was ignored".to_owned(),
-            guidance: None,
         });
     }
     notices.sort_by(|left, right| {

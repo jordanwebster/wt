@@ -82,8 +82,6 @@ impl Output {
                 &right.message,
             ))
         });
-        self.notices
-            .dedup_by(|left, right| left.code == right.code && left.subject == right.subject);
         self
     }
 
@@ -147,10 +145,8 @@ pub fn main(cli: Cli) -> i32 {
                 write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
             } else {
                 for notice in &output.notices {
-                    if !matches!(
-                        notice.code.as_str(),
-                        "BIN_DIR_MISSING" | "SESSION_BACKEND_SELECTED"
-                    ) && !quiet
+                    if notice.code != "SESSION_BACKEND_SELECTED"
+                        && !quiet
                         && (stderr_tty || verbose)
                     {
                         let code = if color {
@@ -161,21 +157,8 @@ pub fn main(cli: Cli) -> i32 {
                         let _ = writeln!(std::io::stderr(), "wt: {} — {}", code, notice.message);
                     }
                 }
-                if matches!(human_kind, human::HumanKind::Run) {
-                    let guidance = human::with_expected_next(String::new(), &output.notices);
-                    if !guidance.is_empty() {
-                        let _ = writeln!(std::io::stderr(), "{guidance}");
-                    }
-                }
                 let text = output
                     .text
-                    .map(|text| {
-                        if matches!(human_kind, human::HumanKind::Run) {
-                            text
-                        } else {
-                            human::with_expected_next(text, &output.notices)
-                        }
-                    })
                     .unwrap_or_else(|| human_kind.render(&output.data, &output.notices));
                 write_stdout(text);
             }
@@ -270,12 +253,7 @@ fn render_error_with_visibility(
         write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
     } else {
         for notice in pending_notices {
-            if !matches!(
-                notice.code.as_str(),
-                "BIN_DIR_MISSING" | "SESSION_BACKEND_SELECTED"
-            ) && !quiet
-                && (stderr_tty || verbose)
-            {
+            if notice.code != "SESSION_BACKEND_SELECTED" && !quiet && (stderr_tty || verbose) {
                 let _ = writeln!(
                     std::io::stderr(),
                     "wt: {} — {}",

@@ -34,7 +34,6 @@ pub(crate) fn run(context: &mut Context, args: Prune) -> Result<Output, CoreErro
             code: "CONFIRM_REQUIRED".to_owned(),
             subject: None,
             message: "prune plan was reported but not applied; re-run with --yes".to_owned(),
-            guidance: None,
         });
         return Ok(output);
     }
