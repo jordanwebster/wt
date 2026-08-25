@@ -1,4 +1,0 @@
-tests/contracts.rs:369:    common::write(&legacy.home.join("config.toml"), "default_agent='codex'\n");
-crates/wt-core/src/settings.rs:203:    if value.contains_key("default_agent") {
-crates/wt-core/src/settings.rs:207:            "`default_agent` is no longer a valid setting",
-crates/wt-core/src/settings.rs:437:        let legacy = parse("default_agent='missing'").unwrap_err();
