@@ -130,7 +130,7 @@ Teardown reads no layer (§10.3).
 ### 5.2 `.wt.toml` grammar (A15; ★ new keys)
 ```
 Config  := Scope & { ports?: [PortName], dirs?: Map<RelDir, Scope>, seed?: [RelPath] ★, sync_inputs?: [RelPath] ★, detect?: Detect ★ }
-Scope   := { bin?: [RelPath], commands?: [CommandName] ★, vars?: Map<VarKey, Template|false> ★,
+Scope   := { bin?: [RelPath], commands?: [CommandName] | Map<CommandName,bool> ★, vars?: Map<VarKey, Template|false> ★,
              env?: Map<EnvKey, Template|false>, copy?: [RelPath], files?: Map<RelPath, File|false>,
              task?: Map<TaskId, Task|false>, adapters?: Map<AdapterId, { tool?: ToolId, disabled?: bool }> }
 Detect  := { depth?: 0|1|2 (1), ignore?: [RelPath] }
@@ -139,13 +139,17 @@ Task    := { run?: Cmd, exists?: Cmd, destroy?: Cmd, needs?: [ScopedTask|Private
              tied_to?: "tree"|"repo", env?: Map<EnvKey, Template>, cwd?: RelPath, timeout?: Duration, description?: String,
              ready_within?: Duration ★, snapshot_env?: [EnvKey] ★ }
 Cmd     := String | [String]          // `sh -c`: NEVER templated, every character is the shell's | argv: each element templated
-Template:= String                      // ${name} reads a var, ${ports.n} a declared port; ${fn()} calls; $$ is a literal $; any other `$` is literal
+Template:= String                      // ${name} reads a var, ${ports.n} a declared port; ${fn()} calls; $$ is a literal $; `$` before a non-name character is literal
 ```
-`false` deletes an inherited entry. The three acceptance files (§16) are restated in this grammar; their behaviour is unchanged.
+`false` deletes an inherited map entry; in the map form of `commands`, `true`
+claims a name and `false` deletes an inherited claim. The array form remains the
+compact declaration form. The three acceptance files (§16) are restated in
+this grammar; their behaviour is unchanged.
 
 **Claims and privacy (A40, A41, A44).** `commands`, `env`, `ports` and `files`
 declare names the tree owns and are enforced per §9.2; `vars` are private and
-never exported. `CommandName` is a non-empty basename with no `/` or NUL.
+never exported. `CommandName` is a non-empty basename with no `/` or NUL;
+`wt`, `.` and `..` are reserved.
 `VarKey` matches `[a-z_][a-z0-9_]*` and may not collide with a function name.
 Template functions are exactly `root()`, `repo()`, `branch()`, `label()`,
 `name()`, `name_snake()`, `name_short()` and `target()`. A declared port is a
@@ -154,7 +158,10 @@ fixed when the name is first declared and repeats identically. `ports` is a
 reserved `VarKey`. Any other call, or `ports.<name>` for a name absent from
 `ports`, is `CONFIG_INVALID` naming the offending reference. `vars` resolve as a DAG within a scope — file order is not
 significant — and a cycle or unknown name is `CONFIG_INVALID` naming every key
-on the cycle. `env`, `files` and task `name` templates may read `vars` and call
+on the cycle. A legacy `$NAME` template spelling, including the former
+`$WT_*` names, is `CONFIG_INVALID` at its source location and names the new
+spelling where one exists (`$WT_PORT_HTTP` → `${ports.http}`, `$WT_ROOT` →
+`${root()}`). `env`, `files` and task `name` templates may read `vars` and call
 functions; `vars` may read `vars` and call functions. A shell-string recipe is never templated, so `${h%??}` and `$HOME` reach the shell untouched; a recipe needing a non-exported value (a port, a var) declares it in the task's own `env` and reads it as an ordinary shell variable. An argv-form recipe has no shell, so each element is templated. A rendered file that is itself a shell script is template text like any other: write `$$` for a literal dollar. `ALIAS_REFERENCES_ALIAS`
 is withdrawn: composition happens in `vars`.
 
@@ -166,7 +173,7 @@ Scopes are declared by `[dirs."d"]` (layers 1–3) or detected (§6). The scope 
 | `task` | nearest scope wins by `TaskId`; within a scope tree > user > repo > adapter; default `cwd` = scope dir; explicit `cwd` is root-relative |
 | `env`, `vars`, `files`, `copy` | accumulate root-first; nearer scope overrides by key/path; same layer precedence within a scope |
 | `bin` | concatenated root-first then nearer, deduplicated, nearer first on PATH |
-| `commands` | union across scopes and layers, deduplicated, sorted |
+| `commands` | union of claims across scopes, deduplicated and sorted; within one scope, higher-layer `false` deletes a lower-layer claim |
 | `adapters` | per scope, merged by id across layers |
 | `ports`, `seed`, `sync_inputs`, `detect` | root only |
 
@@ -183,7 +190,7 @@ Settings := { schema?: 1, trees_dir?, agents?: Map<String, { start: Cmd, resume:
 Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ base ≤ 65535`; `1 ≤ stride ≤ 255`; `max_slots = (65536 − base)/stride ≥ 1`; `session.agent`, when set, names a declared agent. A configuration carrying the former top-level agent key is refused by the ordinary unknown-key rule, with no bespoke check naming its replacement (A51). At `register`, or on the first `new`, `open`, or `close` in a home that predates this setting, an absent `session.backend` is resolved once: wt checks for tmux ≥ 3.2, writes `"tmux"` when found and `"none"` otherwise, and prints `sessions: tmux <version> (set session.backend to change)` or its `none` equivalent on stderr. A non-table `session` declaration that cannot be extended without rewriting is refused with a remedy to rewrite it as `[session]`. No command detects a session backend again after the key is written. `doctor` reports the effective backend as `SESSION_BACKEND` (info). Geometry is per incarnation and immutable (§7); `assemble` uses `TreeRec.geometry`; settings changes affect only future allocations; doctor `GEOMETRY_CHANGED` (info). Per tree `ports.len() ≤ geometry.stride` else `CONFIG_INVALID`. Built-in agents: `claude` (`claude` / `claude --continue`), `codex` (`codex` / `codex resume --last`).
 
 ### 5.5 Tool variables (A15; ★ new)
-`WT_LABEL`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_TARGET`, `WT_BRANCH`, `WT_ROOT`, `WT_REPO` (canonical path), `WT_HOME` (resolved home), `WT_SLOT` ★, `WT_SESSION`, `WT_BIN` ★, `WT_ACTIVATION` ★ (the marker, §8.1), `WT_TASK`, `WT_SELF`. `WT_PORT_BASE` and `WT_PORT_<NAME>` are **not** exported (A43): ports are configuration inputs reached by `${ports.<name>}` (§5.2) and reported by `status`, `list` and `env`. `WT_BRANCH` is the HEAD branch **at spawn** (empty if detached), read by one bounded `git symbolic-ref --short -q HEAD`; it is not updated while a shell or session lives (A31). All except `WT_ACTIVATION` are ordinary variables with a recorded prior (§8.1). **Tree-specific keys** (used by §10.3): `WT_ROOT`, `WT_TARGET`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_SLOT`, `WT_SESSION`, `WT_BIN`, `PATH`.
+`WT_LABEL`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_TARGET`, `WT_BRANCH`, `WT_ROOT`, `WT_REPO` (canonical path), `WT_HOME` (resolved home), `WT_SLOT` ★, `WT_SESSION`, `WT_BIN` ★, `WT_PATH_PREFIX` ★ (the exact shim-plus-bin prefix), `WT_ACTIVATION` ★ (the marker, §8.1), `WT_TASK`, `WT_SELF`. `WT_PORT_BASE` and `WT_PORT_<NAME>` are **not** exported (A43): ports are configuration inputs reached by `${ports.<name>}` (§5.2) and reported by `status`, `list` and `env`. `WT_BRANCH` is the HEAD branch **at spawn** (empty if detached), read by one bounded `git symbolic-ref --short -q HEAD`; it is not updated while a shell or session lives (A31). All except `WT_ACTIVATION` are ordinary variables with a recorded prior (§8.1). **Tree-specific keys** (used by §10.3): `WT_ROOT`, `WT_TARGET`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_SLOT`, `WT_SESSION`, `WT_BIN`, `WT_PATH_PREFIX`, `PATH`.
 
 ### 5.6 Validation: static vs late-bound
 | Check | When | Error |
@@ -191,7 +198,6 @@ Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ bas
 | grammar, unknown keys, identifiers, lexical paths (§5.7), durations, modes, template syntax; every `${…}` names a declared `vars` key or a permitted function with a declared port argument (§5.2); `destroy ⇒ exists ∧ tied_to`; `ready_within ⇒ exists`; `run ∨ destroy`; one of `content`/`source`; port names unique; `ports.len() ≤ stride`; `commands` entries unique and basenames; a `copy`/`seed` entry that is also a `files` key; `copy` and `seed` disjoint | parse/validate | `CONFIG_INVALID` (5) with `path:line:col` |
 | `vars` DAG acyclic and fully resolvable within the effective scope → `VARS_CYCLE` / `VARS_UNKNOWN` naming every key involved; `${NAME}` in a task `env` map naming another key of the same map → `TASK_ENV_SELF_REFERENCE` | resolve | `CONFIG_INVALID` |
 | `needs` resolvable/acyclic; `tied_to = repo` templates reference no tree-specific key (§5.5) | resolve | `CONFIG_INVALID` |
-| `$NAME` (non-`WT_`, not an alias) resolved from the frozen context (§8.2) | door | `ENV_UNDEFINED` (5): key, template, door |
 | `bin`/`cwd` existence, `source` readability | door (`bin`: doctor, A50) | `BIN_DIR_MISSING` (doctor finding), `CWD_MISSING` (5), `FILE_SOURCE_MISSING` (5) |
 
 ### 5.7 Path containment and no-follow I/O
@@ -262,7 +268,7 @@ EnvOutput  := { env, activation, activation_json, render: [Render], report }
 1. { clean, prior, dreport } = deactivate(parent)
 2. env = clean; applied = {}; prior_map = {};  set(k, v): prior_map[k] = clean.get(k); applied[k] = v; env[k] = v
 3. tool vars (§5.5 except WT_BIN, WT_ACTIVATION, WT_TASK, WT_SELF): set(k, v)
-4. PATH: abs = cfg.bin (scope chain) joined to root; missing → report.missing_bins; shims = root/.wt/shims when cfg.commands is non-empty (§9.2a), else absent; set(PATH, join(shims ++ abs ++ split(clean.PATH))); set(WT_BIN, join(abs))
+4. PATH: abs = cfg.bin (scope chain) joined to root; missing → report.missing_bins; shims = root/.wt/shims when cfg.commands is non-empty (§9.2a), else absent; prefix = shims ++ abs; set(PATH, join(prefix ++ split(clean.PATH))); set(WT_BIN, join(abs)); set(WT_PATH_PREFIX, join(prefix))
 5. contributed: for (k, v) sorted: alias_rule(k, v)
 6. vars: resolve cfg.vars as a DAG over the function set (§5.2); the result is **not** written to env. ctx = vars ∪ tool ∪ applied-contributed ∪ clean (frozen once); aliases: for (k, tpl) in cfg.env sorted: alias_rule(k, expand(tpl, ctx))
    alias_rule(k, v): set(k, v); report.(overrode|set) += k   // A42: a declared value always wins; the prior is recorded and restored on deactivation
@@ -319,13 +325,13 @@ cwd: caller's cwd if inside the tree, else the tree root (`run`: node cwd). A do
 ### 9.2a Owned command names (A41)
 Each name in the effective `commands` is materialised at D6 as `<root>/.wt/shims/<name>`, a symlink to the absolute path of the wt binary that rendered it. The shims directory is created only when `commands` is non-empty, is never a declared `bin` directory (so it contributes nothing to `bin_exes`, §10.4/A25), and — like the tree's `bin` directories — is absent from PATH during teardown of a missing tree. `doctor` reports and repairs a shim whose target no longer exists (`SHIM_BROKEN`) and a name shadowed by a shell alias or function (`SHIM_SHADOWED`, info), which PATH cannot displace.
 
-Invoked through a shim, wt takes a fast path that reads no configuration and acquires no lock: derive `<root>` from its own `argv[0]` directory (`<root>/.wt/shims`), take the command name from `argv[0]`'s basename, and search the tree's declared `bin` directories in order for an executable of that name.
+Invoked through a shim, wt takes a fast path that reads no configuration and acquires no lock. A bare `wt` name always remains the ordinary CLI. For another bare name, wt scans PATH in order for the first absolute `<root>/.wt/shims/<name>` that is a direct symlink to the running binary; a path-bearing `argv[0]` must itself have that shape. If no matching shim exists, wt fails closed with `SHIM_INVOCATION_INVALID` and tells the user to restore the door PATH prefix. From the trusted shim it derives `<root>`, then searches the tree's declared `bin` directories in order for an executable of that name.
 
 | Found | Action |
 |---|---|
 | yes | `execv` it with the original argv and environment; wt is replaced |
-| no, and the tree's `build` task is running (§11.2) | exit 5, `COMMAND_NOT_BUILT`, message naming the tree and that its build is in progress, with the session window that carries it |
-| no | exit 5, `COMMAND_NOT_BUILT`, message naming the tree, the declared `bin` directories searched, `wt build <target>`, and — when the name resolves elsewhere on the caller's PATH beyond the shim — that absolute path as the explicit way to run the installed copy |
+| no, and the recorded build status is `running` (§11.2) | exit 5, `COMMAND_NOT_BUILT`, with the ordinary remedy below plus the active build's window (when any) and log |
+| no | exit 5, `COMMAND_NOT_BUILT`, message naming the tree, the declared `bin` directories searched, `wt build <target>`, and either the installed copy's absolute path or that none was found; terminal build records do not replace this remedy |
 
 A shim never falls through to the rest of PATH: interposing on every invocation is required because shells cache a resolved command path and re-resolve only when it fails, so a shim ordered after the `bin` directories would keep answering after a successful build. The refusal writes to stderr and never to a `run` child's stdout (§9.3).
 
@@ -352,7 +358,7 @@ Transport (A19): `exec` and `run` children receive the assembled env; `shell` ex
 | `--all` | attempt every live tree; recorded agents use `resume`, unrecorded trees use `session.agent`'s `start` when configured and shells otherwise; never attach. A failure for one tree is recorded as `{target, name, failed:true, code, message, remedy}` and does not stop later trees. The command exits with the highest exit class observed after the batch; JSON has `ok:false`, retains `data.sessions`, and reports the worst error at top level. |
 | `session.backend = "none"` | `open` and `close` refuse with `SESSION_DISABLED` (5), naming `session.backend` and the `"tmux"` value that enables them. `list`, `remove`, and `prune` execute no tmux process. There is no foreground-agent fallback. |
 
-**Creation is confirmed, never assumed (A49).** `new-session` exiting 0 means tmux created a session, not that it survived: if the inner command exits immediately — as it does when the pane's wt resolves a different home — tmux destroys the session at once. wt therefore runs `has-session` after `new-session` and, when the session is absent, reports `SESSION_CREATE_FAILED` (7) carrying the pane's captured output as the reason instead of reporting success. The resolved home is passed with `-e` because tmux copies no arbitrary variable from client to session on an existing server; only `update-environment` names cross, so an inner wt would otherwise inherit whatever home the server captured when it started. This is the bootstrap home, distinct from a working home a repository may set for processes inside the tree (A49).
+**Creation has a startup observation window (A49).** `new-session` exiting 0 means tmux created a session, not that it remained alive. wt polls `has-session` for 250 ms after releasing the bootstrap gate; if the session disappears in that window, wt reports `SESSION_CREATE_FAILED` (7) carrying the pane's captured output. This catches immediate bootstrap failures but is not proof that the session will survive after the window. The resolved home is passed with `-e` because tmux copies no arbitrary variable from client to session on an existing server; only `update-environment` names cross, so an inner wt would otherwise inherit whatever home the server captured when it started. This is the bootstrap home, distinct from a working home a repository may set for processes inside the tree (A49).
 
 Attachment occurs only when all hold: `session.attach = true`; both stdin and stdout are terminals; output is not JSON; `$WT_ACTIVATION` is unset; neither `--no-attach` nor `--all` applies. Inside tmux wt uses `switch-client`; otherwise it uses `attach-session`. These conditions affect attachment only: except for `new --no-open`, an absent session is still created. An agent therefore starts only when wt successfully creates a session, never when it attaches to one.
 
@@ -389,7 +395,7 @@ Output is tee'd to `<tree>/.wt/logs/<ScopeEnc>-<task>-<utc>.log`; before writing
 ResourceSnapshot := { schema: 1, key, name, cwd_rel: RelDir, exists: CmdExpanded|null, destroy: CmdExpanded, run: CmdExpanded|null,
                       env: Map<String,String>,                     // minimised (below)
                       bin_dirs: [AbsPath], bin_exes: [String],     // declared bin dirs and the executable names found in them at snapshot time (A25)
-                      roots: { tree, home }, recorded_at }
+                      roots: { tree, home }, recorded_sequence, recorded_at }
 CmdExpanded := { shell: String } | { argv: [String] }
 ```
 - **Env minimisation.** `env` contains exactly: all `WT_*` keys of the recording assembly except `WT_ACTIVATION`; `PATH`; every declared alias key and the resource's task-env keys with their assembled values; keys listed in `snapshot_env`. For **repo-tied** resources the tree-specific keys of §5.5 are removed (A28). Nothing else is stored; a recipe that needs a frozen parent value names it in `snapshot_env`. `register` prints the keys each resource will persist; no report prints values (§14.4).
@@ -422,7 +428,7 @@ Invariants: a record exists for every effective tree-tied resource from its firs
 - **tree-tied** → the tree's state file (tree RMW, level 6): upsert the record: absent → **declared** with `declaration`; otherwise replace `declaration` only, never `instance`;
 - **repo-tied** → `_repo.json` (repo RMW, level 6): upsert `resources[<ScopedTask>].declaration` from the refreshing tree's **stripped** snapshot (A28, A31); `instance` and state are never touched by a refresh.
 
-**Teardown obeys the record, never the working tree (A48).** At `remove`/`unregister` step 8 the refresh may only replace a `declaration`; a resource with a frozen `instance` is destroyed through that instance, and a record whose declaration has since disappeared from the configuration is still destroyed (`undeclared = true`), newest first. A revision checked out after a resource was created therefore cannot redirect, retarget, or suppress its teardown — only the plan that created a resource can destroy it. This is why no approval gate is specified for lifecycle recipes: the case that would need one is teardown obeying an unreviewed revision, and it cannot.
+**Teardown obeys the record, never the working tree (A48).** Frozen-instance teardown predates A48: at `remove`/`unregister` step 8 the refresh may only replace a `declaration`, while a resource with a frozen `instance` is destroyed through that instance and a vanished declaration remains recorded as `undeclared = true`. A48 adds newest-first teardown, ordered by the durable `recorded_sequence` of the effective snapshots (with `recorded_at` only as a compatibility fallback for older records). It does not newly justify the absence of an approval gate.
 
 Undeclared tasks keep their records with `undeclared = true` until dropped by a confirmed-absent probe during teardown. **Repo-tied semantics:** while `instance` exists it governs; otherwise the most recent stripped declaration (the invoking tree's, since an action refreshes first) is effective. There is no cross-tree agreement check. Ordinary `remove` of a non-canonical tree tears down tree-tied records only; repo-tied instances survive while the label remains and are destroyed only by `destroy`/`refresh`/`unregister`.
 
@@ -483,10 +489,10 @@ Decision (inside the registry transaction, under the exclusive tree lock):
 | S5 | `sync` through §10.1 under the held lock (unless `--no-sync`) | 2,3,4,6 |
 | S6 | state: `sync.inputs`, phase `ready`, `op = null`, `verify_pending = --verify` | 6 |
 | V | `--verify`: run `verify` through §10.1; state `verify = {at, ok, log}`, `verify_pending = false` | 2,3,4,6 |
-| B | start the effective `build` task in the background (A47), unless `--no-build`, `--no-open`, or no `build` task exists; record `build = {started, window, log}` in the state file | 6 |
+| B | start the effective automatic `build` task (A47), unless `--no-build`, `--no-open`, or no `build` task exists; record `build = {started, window, log}` in the state file | 6 |
 | F | release | — |
 
-**Background build (A47).** Step B runs after the tree is `ready` and after the summary is printed, so `new` never waits on it. With a tmux backend it runs as a second window of the tree's session named `wt:setup`, through `wt exec --no-gate <target> -- <build argv>`, leaving the developer on window 0; with `backend = "none"` it runs in the foreground with inherited stdio, because there is nowhere to put it. It runs through §10.1 like any other invocation, so its `needs` — database creation, code generation, dependency install — run first and in order. Setup that is more than compilation is expressed by giving `build` a `needs` list; there is no separate creation-hook mechanism. §9.2a reads the recorded `build` state so an owned command can report a build in progress rather than a missing binary. A failed background build leaves the tree `ready` and the failure visible in its window and log; the next owned-command invocation still refuses, naming the log.
+**Automatic build (A47).** Step B runs after the tree is `ready`. In human mode the summary is printed before it starts. With a tmux backend it runs as a second window of the tree's session named `wt:setup`, through `wt exec --no-gate <target> -- <build argv>`, leaving the developer on window 0; with `backend = "none"` it runs synchronously with inherited stdio, because there is nowhere to put it. JSON waits for that foreground result so one invocation emits exactly one envelope; failure is a partial-failure envelope with the complete `NewData`, a `BUILD_FAILED` notice, and child-failure exit class. The status file is written `running` before each build and atomically replaced with `ok` or `failed` at completion; a later `wt build` resets it to `running` first. The task runs through §10.1, so its `needs` run first and in order. Setup that is more than compilation is expressed by giving `build` a `needs` list; there is no separate creation-hook mechanism. §9.2a consults build metadata only while the status is `running`.
 
 After F, `new` prints its phase-1 human summary, then applies §9.4: with backend `tmux`, it ensures the session and attaches when the attachment predicate holds. `--no-open` skips both creation and attachment. `--no-attach` still creates the session. Backend `none` leaves the ready tree without a session. Agent selection comes only from `session.agent`; `new` has no agent flag. Session provisioning is additional to the completed tree: if it fails, `new` emits warning notice `SESSION_CREATE_FAILED` naming `wt open <target>` as the retry, exits 0, and retains the complete `NewData` payload in JSON as well as text mode.
 
@@ -679,7 +685,7 @@ shapes — open, closed, and failed — even though `open` emits open/failed and
 | `run` | `{ target, task, child|null, log|null, steps: StepRep[] }`; `--dry-run`: `{ task, steps: [ {id, scope, origin, cwd, run, exists, lock, sys_locks, resource, tied_to} ] }` |
 | `destroy` / `refresh` | `{ target, scope, task, before, after, child|null }` |
 | `open` (non-attaching) / `close` | shared `{ sessions: [ {target, name, created, existing, agent|null, foreground} | {target, session, closed} | {target, name, failed:true, code, message, remedy} ] }`; `open` emits open/failed, `close` emits closed, and only `open --all` may return `ok:false` with this data retained |
-| `env` | `{ target, set, kept, overrode, restored, missing_bins, rendered, bins: [ {dir, exists, executables} ], env: Map, activation: Activation }` |
+| `env` | `{ target, set, overrode, restored, missing_bins, rendered, bins: [ {dir, exists, executables} ], ports: [ {name, port} ], env: Map, activation: Activation }` |
 | `list` | `{ trees: [Tree], locks: [ {name, label, holder: {pid, target, verb, since}} ] }`; `status` | `Tree & { tasks: [TaskInfo], config_errors }` |
 | `path` / `which` | `{ target, path }` / `{ target, cmd, path|null, in_bin }` |
 | `tasks` / `config` / `locks` | `{ target, tasks: [ {id, scope, origin, cwd, needs, resource, tied_to|null, lock|null, description|null} ] }` / `{ target, entries: [ {key, scope, layer, value} ] }` (env values shown as keys only) / `{ locks: [ {level, name, path, held, holder|null} ] }` |
@@ -710,17 +716,17 @@ Byte stability is claimed only after normalising the declared nondeterministic f
 # zsh/bash
 wtcd() { local p; p="$(command wt path -- "$@")" || return $?; builtin cd -- "$p"; }
 wtsh() { eval "$(command wt env --sh -- "$@")"; }
-if [ -n "$WT_BIN" ] && [ "${PATH#"$WT_BIN:"}" = "$PATH" ]; then PATH="$WT_BIN:$PATH"; echo "wt: PATH_NOT_SHADOWED — re-prepended $WT_BIN" >&2; fi
+if [ -n "$WT_PATH_PREFIX" ] && [ "${PATH#"$WT_PATH_PREFIX:"}" = "$PATH" ]; then PATH="$WT_PATH_PREFIX:$PATH"; export PATH; echo "wt: PATH_NOT_SHADOWED — re-prepended $WT_PATH_PREFIX" >&2; fi
 ```
 ```fish
 function wtcd; set -l p (command wt path -- $argv); or return $status; cd -- $p; end
 function wtsh; command wt env --sh -- $argv | source; end
-if set -q WT_BIN
-    set -l wtbin (string split : -- $WT_BIN)
-    set -l n (count $wtbin)
-    if test (count $PATH) -lt $n; or test "$(string join : -- $PATH[1..$n])" != "$(string join : -- $wtbin)"
-        set -gx PATH $wtbin $PATH
-        echo "wt: PATH_NOT_SHADOWED — re-prepended $WT_BIN" >&2
+if set -q WT_PATH_PREFIX
+    set -l wt_prefix (string split : -- $WT_PATH_PREFIX)
+    set -l n (count $wt_prefix)
+    if test (count $PATH) -lt $n; or test "$(string join : -- $PATH[1..$n])" != "$(string join : -- $wt_prefix)"
+        set -gx PATH $wt_prefix $PATH
+        echo "wt: PATH_NOT_SHADOWED — re-prepended $WT_PATH_PREFIX" >&2
     end
 end
 ```
@@ -768,7 +774,7 @@ Levels **U** (wt-core), **I** (wt-sys/app on temp repos with shims: tmux, docker
 | §7 | disjoint ranges (proptest over geometry incl. `stride 0`/overflow rejection); tombstone ranges avoided; `IDENTITY_COLLISION`; appended port seen by the allocating door's child; reordered `ports` changes nothing; removed name keeps its index; `PORTS_EXHAUSTED`; settings change leaves live `wt env` unchanged | U, I, C |
 | §4.1–4.4 | invariants incl. path uniqueness and no live/tombstone coexistence; `register` twice same label → `registered: false`; other label → `PATH_REGISTERED`; store crash at the rename boundary leaves the old file; `HOME_OLD_FORMAT` before any write; `TREE_REPLACED` on every verb for a replaced directory; `STATE_ORPHAN` collected by `prune` | U, I, C |
 | §12 | `list` reports `drift` when the default branch changed a sync input; `prune` tombstone collection; `prune --records` on `missing`/`replaced`/`remove-interrupted` never touches the directory (spawn tracer: no cwd or PATH inside it); non-TTY `prune` without `--yes` → exit 0, `applied: false`; `NO_COORDINATION` for a config without ports/env/resources; `close` idempotent JSON | I, C |
-| §14.4–14.5 | every verb's `--json` validates; ordering on raw output (a test walks the schema for unlisted arrays); bytes compared after normalisation; §14.6: `wtcd`/`wtsh` and the PATH guard in zsh, bash, fish (fish sourced twice with a two-directory `WT_BIN`: restored once, PATH does not grow) | C |
+| §14.4–14.5 | every verb's `--json` validates; ordering on raw output (a test walks the schema for unlisted arrays); bytes compared after normalisation; §14.6: `wtcd`/`wtsh` and the PATH guard in zsh, bash, fish (fish sourced twice with a shim-plus-two-bin `WT_PATH_PREFIX`: restored once, PATH does not grow) | C |
 | R1–R13, A1–A31 | R12/A2: filesystem allowlist snapshot around `new` + doors (only `<tree>`, `<tree>/.wt`, declared materialisations, `$WT_HOME`, `<commondir>/{info/exclude,worktrees/*,refs/wt/*,FETCH_HEAD,objects/*}`), `git status` clean, tracked bytes unchanged, `unregister` leaves the checkout clean or reports `ARTIFACT_KEPT`; each requirement maps to the rows above by its owning section; A9: the three inputs parse byte-for-byte; golden `tasks --json`; orbitcloud recipes run verbatim against the docker shim asserting the path hash and the exit-2 reachability guard | U, I, C |
 
 ## 18. Decisions, exclusions, implementer's choices

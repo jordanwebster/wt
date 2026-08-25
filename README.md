@@ -184,9 +184,10 @@ Created orbit/fix-scrolling
 ```
 
 You land inside the worktree, in its own session, with its environment live.
-The repository's `build` task runs **in a second window, in the background**,
-so you are never waiting on it — and until it finishes, a command this
-worktree owns tells you so instead of running the wrong one.
+With tmux, the repository's `build` task runs in a second window in the
+background; with `session.backend = "none"`, it runs synchronously. While a
+build is running, a command this worktree owns says so instead of running the
+wrong one.
 
 ```sh
 wt new orbit/review-42 --from pr:42 --no-attach   # provision, don't enter
@@ -294,8 +295,9 @@ A task accepts `run`, `exists`, `needs`, `lock`, `env`, `cwd`, `timeout`, and
 it depends on. `exists` exits 0 when present, 1 when absent, and 2 or greater
 when it cannot tell.
 
-**The task named `build` runs automatically after a worktree is created**, in
-the background. Give it `needs` to pull in whatever else setup requires:
+**The task named `build` runs automatically after a worktree is created.** It
+runs in a background tmux window, or synchronously when the session backend is
+`none`. Give it `needs` to pull in whatever else setup requires:
 
 ```toml
 [task.database]

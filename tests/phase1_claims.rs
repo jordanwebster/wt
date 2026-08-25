@@ -502,14 +502,9 @@ fn legacy_template_spelling_is_rejected_at_its_source_location() {
 #[test]
 fn shim_fast_path_has_no_door_effects_and_is_well_below_the_door_budget() {
     let harness = Harness::new();
-    let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
     write(
         &harness.home.join("config.toml"),
-        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
+        "[ports]\nbase=46100\nstride=1\n[session]\nbackend='none'\n",
     );
     let repo = owned_fixture(&harness);
     harness.json(&["build", "repo"]);

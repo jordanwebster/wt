@@ -1,6 +1,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 
 use common::Harness;
 use predicates::prelude::*;
@@ -15,6 +16,16 @@ content = "port=${ports.http}"
 [task.hello]
 run = "printf hello"
 "#;
+
+static NEXT_ISOLATED_PORT: AtomicU16 = AtomicU16::new(40_000);
+
+fn configure_backend_none(h: &Harness) {
+    let port = NEXT_ISOLATED_PORT.fetch_add(32, Ordering::Relaxed);
+    common::write(
+        &h.home.join("config.toml"),
+        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
+    );
+}
 
 const RESOURCE: &str = r#"
 [task.service]
@@ -170,7 +181,7 @@ fn new_run_and_remove_form_an_idempotent_lifecycle() {
 #[test]
 fn backend_none_runs_build_plan_after_ready_and_respects_suppression() {
     let h = Harness::new();
-    common::write(&h.home.join("config.toml"), "[session]\nbackend='none'\n");
+    configure_backend_none(&h);
     let events = h.root.join("build-events");
     let config = format!(
         r#"
@@ -228,7 +239,7 @@ EVENTS = "{}"
 #[test]
 fn backend_none_build_failure_is_one_envelope_and_a_terminal_status() {
     let h = Harness::new();
-    common::write(&h.home.join("config.toml"), "[session]\nbackend='none'\n");
+    configure_backend_none(&h);
     let repo = h.repo(
         "repo",
         r#"
@@ -1613,15 +1624,7 @@ fn cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs() {
 #[test]
 fn seed_skip_notice_and_record_are_observed_at_the_new_boundary() {
     let h = Harness::new();
-    let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    common::write(
-        &h.home.join("config.toml"),
-        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
-    );
+    configure_backend_none(&h);
     let repo = h.repo("repo", "seed=['cache']\n");
     wt_sys::fsx::create_private_dir(&repo.join("cache")).unwrap();
     common::write(&repo.join("cache/value"), "seed\n");
@@ -2247,15 +2250,7 @@ fn doctor_reports_a_broken_path_prefix_once() {
 #[test]
 fn doctor_accepts_a_registered_worktree_path_alias() {
     let h = Harness::new();
-    let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    common::write(
-        &h.home.join("config.toml"),
-        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
-    );
+    configure_backend_none(&h);
     let repo = h.repo("repo", "");
     h.register(&repo);
     let alias_parent = h.root.join("aliased-repos");

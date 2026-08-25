@@ -126,16 +126,18 @@ pub fn main(cli: Cli) -> i32 {
     };
     match result {
         Ok(mut output) => {
-            if let Some(AfterRender::Build { target }) = output.after_render.take() {
-                if let Err(error) = open::start_build(
-                    opened_context
-                        .as_mut()
-                        .expect("deferred actions require an open context"),
-                    &target,
-                ) {
-                    output = output
-                        .with_notices([open::build_failure_notice(&target, &error)])
-                        .with_failure(error);
+            if json {
+                if let Some(AfterRender::Build { target }) = output.after_render.take() {
+                    if let Err(error) = open::start_build(
+                        opened_context
+                            .as_mut()
+                            .expect("deferred actions require an open context"),
+                        &target,
+                    ) {
+                        output = output
+                            .with_notices([open::build_failure_notice(&target, &error)])
+                            .with_failure(error);
+                    }
                 }
             }
             let output_exit = output
@@ -185,7 +187,11 @@ pub fn main(cli: Cli) -> i32 {
                             emit_session_warning(&target, &error);
                         }
                     }
-                    AfterRender::Build { .. } => unreachable!("builds run before rendering"),
+                    AfterRender::Build { target } => {
+                        if let Err(error) = open::start_build(context, &target) {
+                            return render_error(&command, json, color, error, Vec::new());
+                        }
+                    }
                     AfterRender::Attach { session } => {
                         if let Err(error) = open::attach(context, &session) {
                             return render_error(&command, json, color, error, Vec::new());

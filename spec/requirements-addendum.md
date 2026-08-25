@@ -198,7 +198,8 @@ startup files may alter PATH or other keys; wt cannot prevent that
 without owning the shell. The binding promise for the shell door is:
 the environment *handed to the shell* equals every other door's, and
 `wt doctor` (and the shell banner) detect and name the case where the
-running shell's PATH no longer begins with `WT_BIN`
+running shell's PATH no longer begins with the exported shim-plus-bin
+`WT_PATH_PREFIX`
 (`PATH_NOT_SHADOWED`, remedy: the `shell-init` guard or fixing the rc
 file). A1/A4 are read with that qualification for interactive shells
 only; tasks, `exec`, and the agent command inside a session are
@@ -552,10 +553,13 @@ Rationale: cloning build output is a filesystem-level answer to a question the
 ecosystem usually answers better, and the ecosystem's answer is both cheaper
 and portable to filesystems without cloning.
 
-## A47. The task named `build` runs after creation, in the background
+## A47. The task named `build` runs automatically after creation
 
-`wt new` starts the effective `build` task once the tree is ready, in a second
-window of the tree's session, and returns immediately; `--no-build` opts out.
+`wt new` starts the effective `build` task once the tree is ready; `--no-build`
+opts out. With tmux it runs in a second session window and `new` returns
+immediately. With `session.backend = "none"` it runs synchronously because no
+background host exists; JSON waits and returns one success or partial-failure
+envelope.
 Setup that is more than compilation is expressed by giving `build` a `needs`
 list, not by a separate hook mechanism. Rationale: the task graph already
 carries dependencies, ordering, composition and a closed verb set that wt can
@@ -565,19 +569,19 @@ running, a shim can say so instead of reporting the binary as merely absent.
 
 ## A48. Teardown runs the plan that created the resources
 
-Removal destroys the resource instances recorded for the tree, newest first,
-rather than re-reading the current configuration to decide what to destroy.
-Rationale: only recorded instances describe what was actually created, so a
-partially created tree tears down correctly and a branch that has since edited
-its own recipes cannot direct teardown at something it never made. Reversing
-the declared dependency graph would achieve neither. This makes an explicit
-approval gate for lifecycle recipes unnecessary: the dangerous case was
-teardown obeying an unreviewed revision, and it no longer can.
+Removal destroys recorded resource instances newest first, using a durable
+recording sequence rather than reversing the declared dependency graph. The
+frozen-instance rule—so a branch that edits a recipe cannot redirect teardown
+at something it never made—predates this requirement. A48 adds only the
+newest-first ordering and does not newly justify the absence of an approval
+gate for lifecycle recipes.
 
-## A49. A session carries the bootstrap home and is confirmed to exist
+## A49. A session carries the bootstrap home and has a startup observation window
 
-`wt` creates a session with the resolved wt home passed explicitly, and reports
-a created session only after confirming it. Rationale: tmux copies no arbitrary
+`wt` creates a session with the resolved wt home passed explicitly, then
+observes it for a bounded 250 ms startup window. A session that exits in that
+window is reported as `SESSION_CREATE_FAILED` with captured pane output; the
+window is not proof of later survival. Rationale: tmux copies no arbitrary
 variable from client to session on an existing server, so an inner `wt` would
 otherwise inherit whatever home the server captured when it started, resolve
 the wrong state, exit, and have its session destroyed — while wt reported
