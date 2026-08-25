@@ -568,10 +568,10 @@ fn git_registry_findings(
         .trees
         .iter()
         .filter(|tree| &tree.label == label)
-        .map(|tree| PathBuf::from(tree.path.as_str()))
+        .map(|tree| canonical_observed_path(Path::new(tree.path.as_str())))
         .collect::<BTreeSet<_>>();
     for worktree in listed {
-        if registered.contains(&worktree.path) {
+        if registered.contains(&canonical_observed_path(&worktree.path)) {
             continue;
         }
         let exists = matches!(
@@ -599,6 +599,10 @@ fn git_registry_findings(
         ));
     }
     Ok(())
+}
+
+fn canonical_observed_path(path: &Path) -> PathBuf {
+    wt_sys::fsx::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn state_orphan_findings(
@@ -730,5 +734,26 @@ trait ResourceName {
 impl ResourceName for wt_core::resource::ResourceRecord {
     fn name(&self) -> &str {
         self.effective_snapshot().name.as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+
+    #[test]
+    fn observed_worktree_paths_compare_by_canonical_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("private/var/tree");
+        wt_sys::fsx::create_private_dir(&real).unwrap();
+        symlink(root.path().join("private/var"), root.path().join("var")).unwrap();
+        let alias = root.path().join("var/tree");
+        assert_ne!(alias, real);
+        assert_eq!(
+            canonical_observed_path(&alias),
+            canonical_observed_path(&real)
+        );
     }
 }

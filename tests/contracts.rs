@@ -582,6 +582,51 @@ fn open_all_reports_each_tree_and_continues_after_a_failure() {
             .unwrap()
             .replace(&h.root.to_string_lossy().to_string(), "<ROOT>"),
     );
+
+    let redirected = h.wt().args(["open", "--all"]).output().unwrap();
+    assert_eq!(redirected.status.code(), Some(5));
+    assert!(
+        redirected.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&redirected.stderr)
+    );
+    assert!(String::from_utf8_lossy(&redirected.stdout).contains("failed (TREE_REPLACED)"));
+}
+
+#[test]
+fn inline_session_tables_refuse_backend_insertion_with_a_rewrite_remedy() {
+    for verb in ["register", "new", "open", "close"] {
+        let h = Harness::new();
+        let repo = h.repo("repo", BASIC);
+        if verb != "register" {
+            h.register(&repo);
+        }
+        common::write(
+            &h.home.join("config.toml"),
+            "session = { attach = false }\n",
+        );
+        let mut command = h.wt();
+        match verb {
+            "register" => {
+                command.args(["register", repo.to_str().unwrap()]);
+            }
+            "new" => {
+                command.args(["new", "repo/work", "--no-sync"]);
+            }
+            "open" | "close" => {
+                command.args([verb, "repo"]);
+            }
+            _ => unreachable!(),
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(5), "{verb}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("rewrite `session = { ... }`"),
+            "{verb}: {stderr}"
+        );
+        assert!(stderr.contains("[session]"), "{verb}: {stderr}");
+    }
 }
 
 #[test]

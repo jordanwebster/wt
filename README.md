@@ -377,7 +377,11 @@ available but unused; it never switches tools for you.
 
 Reporting and lifecycle commands support `--json` and emit one stable envelope
 with `wt.schema`, `wt.version`, `ok`, `command`, `data`, `notices`, and
-`error`. Arrays have stable ordering. Environment values appear only in `wt
+`error`. A failure normally has `data: null`, but a batch may retain partial
+data with `ok: false`; `open --all` does this so successful and failed session
+attempts remain inspectable. Its shared session list has three record shapes:
+open (`created`/`existing`), closed (`closed`), and failed (`failed: true`),
+though each verb emits only the shapes relevant to it. Arrays have stable ordering. Environment values appear only in `wt
 env`; resource snapshots are never printed.
 
 `exec`, `shell`, and an attaching `open` pass the child's streams and status

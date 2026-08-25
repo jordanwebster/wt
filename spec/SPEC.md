@@ -663,6 +663,11 @@ Resource := { scope, task, tied_to, name, state, reason|null, external, undeclar
 StepRep  := { id, scope, status, child|null, duration_ms }
 ```
 
+`ok:false` does not imply `data:null`: batch operations may retain partial data,
+as `open --all` does. `SessionsData.sessions` is one tagged union with three
+shapes — open, closed, and failed — even though `open` emits open/failed and
+`close` emits closed.
+
 | Verb | `data` |
 |---|---|
 | `register` | `{ label, path, gitdir_id, registered, resumed, tree: Tree, declared: { tasks: [ScopedTask], resources: [ {scope, task, tied_to, snapshot_keys: [EnvKey]} ], env: [EnvKey], files: [RelPath], bin: [RelPath], ports: [PortName], copy: [RelPath] }, config_errors: [ {path, line, col, message} ] }` |
@@ -673,7 +678,7 @@ StepRep  := { id, scope, status, child|null, duration_ms }
 | `sync` | `{ target, ran, steps: StepRep[], inputs: [ {path, hash} ] }` |
 | `run` | `{ target, task, child|null, log|null, steps: StepRep[] }`; `--dry-run`: `{ task, steps: [ {id, scope, origin, cwd, run, exists, lock, sys_locks, resource, tied_to} ] }` |
 | `destroy` / `refresh` | `{ target, scope, task, before, after, child|null }` |
-| `open` (non-attaching) / `close` | `{ sessions: [ {target, name, created, existing, agent|null, foreground} | {target, name, failed:true, code, message, remedy} ] }` / `{ sessions: [ {target, session, closed} ] }`; only `open --all` contains the failure variant and may return a failure envelope with this data retained |
+| `open` (non-attaching) / `close` | shared `{ sessions: [ {target, name, created, existing, agent|null, foreground} | {target, session, closed} | {target, name, failed:true, code, message, remedy} ] }`; `open` emits open/failed, `close` emits closed, and only `open --all` may return `ok:false` with this data retained |
 | `env` | `{ target, set, kept, overrode, restored, missing_bins, rendered, bins: [ {dir, exists, executables} ], env: Map, activation: Activation }` |
 | `list` | `{ trees: [Tree], locks: [ {name, label, holder: {pid, target, verb, since}} ] }`; `status` | `Tree & { tasks: [TaskInfo], config_errors }` |
 | `path` / `which` | `{ target, path }` / `{ target, cmd, path|null, in_bin }` |
