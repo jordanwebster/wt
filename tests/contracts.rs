@@ -591,10 +591,22 @@ fn open_all_reports_each_tree_and_continues_after_a_failure() {
         String::from_utf8_lossy(&redirected.stderr)
     );
     assert!(String::from_utf8_lossy(&redirected.stdout).contains("failed (TREE_REPLACED)"));
+    common::proof_capture(
+        "G1",
+        format!(
+            "exit: {:?}\nstderr bytes: {}\nstdout:\n{}",
+            redirected.status.code(),
+            redirected.stderr.len(),
+            String::from_utf8_lossy(&redirected.stdout)
+                .replace(&h.root.to_string_lossy().to_string(), "<ROOT>")
+                .trim_end()
+        ),
+    );
 }
 
 #[test]
 fn inline_session_tables_refuse_backend_insertion_with_a_rewrite_remedy() {
+    let mut refusals = Vec::new();
     for verb in ["register", "new", "open", "close"] {
         let h = Harness::new();
         let repo = h.repo("repo", BASIC);
@@ -626,7 +638,9 @@ fn inline_session_tables_refuse_backend_insertion_with_a_rewrite_remedy() {
             "{verb}: {stderr}"
         );
         assert!(stderr.contains("[session]"), "{verb}: {stderr}");
+        refusals.push(format!("{verb}:\n{}", stderr.trim_end()));
     }
+    common::proof_capture("G3", refusals.join("\n"));
 }
 
 #[test]
@@ -1145,6 +1159,14 @@ SENTINEL = "{}"
 
     assert_eq!(std::fs::read_to_string(&order).unwrap(), "newer\nolder\n");
     assert!(!sentinel.exists());
+    common::proof_capture(
+        "D4",
+        format!(
+            "destroy order:\n{}changed recipe sentinel exists: {}",
+            std::fs::read_to_string(&order).unwrap(),
+            sentinel.exists()
+        ),
+    );
 }
 
 #[test]
@@ -1453,10 +1475,14 @@ fn cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs() {
         .collect::<BTreeSet<_>>();
     assert_eq!(inputs, BTreeSet::from(["Cargo.lock", "Cargo.toml"]));
     common::proof_capture(
-        "A1",
+        "D1",
         format!(
-            "reflink supported: {reflink_supported}\nadapter seed present: {}\nSEED_SKIPPED_NO_REFLINK: {skipped}\nsync inputs: {}",
+            "reflink supported: {reflink_supported}\nseed present: {}\nseed materialized: {}\nSEED_SKIPPED_NO_REFLINK: {skipped}\nSEED_COPIED_NOT_CLONED: false\nsync inputs: {}",
             tree_root.join("target/cache.bin").exists(),
+            state.materialized.iter().any(|entry| {
+                entry.path == "target"
+                    && entry.kind == wt_core::lifecycle::MaterializedKind::Seeded
+            }),
             inputs.iter().copied().collect::<Vec<_>>().join(", ")
         ),
     );

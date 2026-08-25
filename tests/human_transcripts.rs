@@ -102,13 +102,20 @@ fn missing_bin_guidance_is_exclusive_to_doctor() {
     assert!(!text.contains("  next"));
     assert!(!text.contains("wt build repo/work"));
     let doctor = h.json(&["doctor", "repo"]);
-    assert!(doctor["data"]["findings"]
+    let finding = doctor["data"]["findings"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|finding| {
-            finding["code"] == "BIN_DIR_MISSING" && finding["subject"] == "repo/work"
-        }));
+        .find(|finding| finding["code"] == "BIN_DIR_MISSING" && finding["subject"] == "repo/work")
+        .unwrap();
+    common::proof_capture(
+        "F1",
+        format!(
+            "door output:\n{}doctor finding:\n{}",
+            text.trim_end(),
+            serde_json::to_string_pretty(finding).unwrap()
+        ),
+    );
 }
 
 #[test]
@@ -124,6 +131,7 @@ fn new_calls_skipped_sync_nodes_skipped() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("1 passed, 1 skipped"), "{text}");
     assert!(!text.contains("1/2 passed"), "{text}");
+    common::proof_capture("G2", text.trim_end());
 }
 
 #[test]
