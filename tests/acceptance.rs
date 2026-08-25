@@ -211,7 +211,15 @@ fn orbit_acceptance_walk_covers_rendered_config_daemon_and_safe_missing_tree_tea
             canonical_env["data"]["env"]["ORBIT_LOG"],
             canonical_env["data"]["env"]["ORBIT_INVARIANT_FATAL"],
             canonical.trim_end()
-        ),
+        )
+        .replace(
+            &std::fs::canonicalize(&h.root)
+                .unwrap_or_else(|_| h.root.clone())
+                .to_string_lossy()
+                .to_string(),
+            "<ROOT>",
+        )
+        .replace(&h.root.to_string_lossy().to_string(), "<ROOT>"),
     );
     h.json(&["run", "daemon", "orbit"]);
     assert!(repo.join(".wt/orbit/state/stub.state").exists());

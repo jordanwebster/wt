@@ -139,7 +139,18 @@ fn new_calls_skipped_sync_nodes_skipped() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("1 passed, 1 skipped"), "{text}");
     assert!(!text.contains("1/2 passed"), "{text}");
-    common::proof_capture("G2", text.trim_end());
+    common::proof_capture(
+        "G2",
+        text.trim_end()
+            .replace(
+                &std::fs::canonicalize(&h.root)
+                    .unwrap_or_else(|_| h.root.clone())
+                    .to_string_lossy()
+                    .to_string(),
+                "<ROOT>",
+            )
+            .replace(&h.root.to_string_lossy().to_string(), "<ROOT>"),
+    );
 }
 
 #[test]

@@ -195,6 +195,17 @@ fn session_gets_resolved_home_even_when_server_captured_another_one() {
             "tmux server WT_HOME: {}\nsession WT_HOME: {}",
             wrong_home.display(),
             std::fs::read_to_string(&observed).unwrap().trim()
+        )
+        .replace(
+            &std::fs::canonicalize(&private.harness.root)
+                .unwrap_or_else(|_| private.harness.root.clone())
+                .to_string_lossy()
+                .to_string(),
+            "<ROOT>",
+        )
+        .replace(
+            &private.harness.root.to_string_lossy().to_string(),
+            "<ROOT>",
         ),
     );
 }
