@@ -64,7 +64,7 @@ TreeName   := /[A-Za-z0-9][A-Za-z0-9._-]{0,63}/ , not "." or ".." ; "canonical" 
 Target     := Label | Label "/" TreeName
 TaskId     := /[a-z0-9][a-z0-9._-]{0,63}/ ;  RelDir := "." | RelPath(dir)
 ScopedTask := (RelDir "/")? TaskId ; PrivateId := "@" AdapterId "/" ToolId "@" RelDir "/" TaskId
-PortName   := /[a-z][a-z0-9_]*/ → port('<name>') in templates, not exported (A43) ; EnvKey := /[A-Za-z_][A-Za-z0-9_]*/ not /^WT_/ ; VarKey := /[a-z_][a-z0-9_]*/ ; CommandName := basename, no '/' or NUL
+PortName   := /[a-z][a-z0-9_]*/ → ${ports.<name>} in templates, not exported (A43) ; EnvKey := /[A-Za-z_][A-Za-z0-9_]*/ not /^WT_/ ; VarKey := /[a-z_][a-z0-9_]*/ ; CommandName := basename, no '/' or NUL
 LockName   := /[a-z0-9][a-z0-9._-]{0,63}/ ; Duration := /[0-9]+(ms|s|m|h)/ ; TreeId := /[0-9a-f]{32}/
 ScopeEnc   := RelDir with "/" → "%2F", "." for root
 ```
@@ -138,8 +138,8 @@ File    := { content?: Template, source?: RelPath, marker?: String ("#"; "" = no
 Task    := { run?: Cmd, exists?: Cmd, destroy?: Cmd, needs?: [ScopedTask|PrivateId], lock?: LockName, name?: Template,
              tied_to?: "tree"|"repo", env?: Map<EnvKey, Template>, cwd?: RelPath, timeout?: Duration, description?: String,
              ready_within?: Duration ★, snapshot_env?: [EnvKey] ★ }
-Cmd     := String | [String]          // `sh -c` (never pre-expanded) | argv (each element expanded)
-Template:= String                      // ${name} reads a var; ${fn()} / ${fn('arg')} calls; $$ is a literal $; any other `$` is literal
+Cmd     := String | [String]          // `sh -c`: NEVER templated, every character is the shell's | argv: each element templated
+Template:= String                      // ${name} reads a var, ${ports.n} a declared port; ${fn()} calls; $$ is a literal $; any other `$` is literal
 ```
 `false` deletes an inherited entry. The three acceptance files (§16) are restated in this grammar; their behaviour is unchanged.
 
@@ -148,13 +148,14 @@ declare names the tree owns and are enforced per §9.2; `vars` are private and
 never exported. `CommandName` is a non-empty basename with no `/` or NUL.
 `VarKey` matches `[a-z_][a-z0-9_]*` and may not collide with a function name.
 Template functions are exactly `root()`, `repo()`, `branch()`, `label()`,
-`name()`, `name_snake()`, `name_short()`, `target()` and
-`port(<declared port name>)`; any other
-call, or a port name absent from `ports`, is `CONFIG_INVALID` naming the
-offending call. `vars` resolve as a DAG within a scope — file order is not
+`name()`, `name_snake()`, `name_short()` and `target()`. A declared port is a
+dotted constant, `ports.<name>` — a lookup, not an allocation: the value is
+fixed when the name is first declared and repeats identically. `ports` is a
+reserved `VarKey`. Any other call, or `ports.<name>` for a name absent from
+`ports`, is `CONFIG_INVALID` naming the offending reference. `vars` resolve as a DAG within a scope — file order is not
 significant — and a cycle or unknown name is `CONFIG_INVALID` naming every key
 on the cycle. `env`, `files` and task `name` templates may read `vars` and call
-functions; `vars` may read `vars` and call functions. `ALIAS_REFERENCES_ALIAS`
+functions; `vars` may read `vars` and call functions. A shell-string recipe is never templated, so `${h%??}` and `$HOME` reach the shell untouched; a recipe needing a non-exported value (a port, a var) declares it in the task's own `env` and reads it as an ordinary shell variable. An argv-form recipe has no shell, so each element is templated. A rendered file that is itself a shell script is template text like any other: write `$$` for a literal dollar. `ALIAS_REFERENCES_ALIAS`
 is withdrawn: composition happens in `vars`.
 
 ### 5.3 Directory scopes (A7)
@@ -182,7 +183,7 @@ Settings := { schema?: 1, trees_dir?, agents?: Map<String, { start: Cmd, resume:
 Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ base ≤ 65535`; `1 ≤ stride ≤ 255`; `max_slots = (65536 − base)/stride ≥ 1`; `session.agent`, when set, names a declared agent. A configuration carrying the former top-level agent key is refused by the ordinary unknown-key rule, with no bespoke check naming its replacement (A51). At `register`, or on the first `new`, `open`, or `close` in a home that predates this setting, an absent `session.backend` is resolved once: wt checks for tmux ≥ 3.2, writes `"tmux"` when found and `"none"` otherwise, and prints `sessions: tmux <version> (set session.backend to change)` or its `none` equivalent on stderr. A non-table `session` declaration that cannot be extended without rewriting is refused with a remedy to rewrite it as `[session]`. No command detects a session backend again after the key is written. `doctor` reports the effective backend as `SESSION_BACKEND` (info). Geometry is per incarnation and immutable (§7); `assemble` uses `TreeRec.geometry`; settings changes affect only future allocations; doctor `GEOMETRY_CHANGED` (info). Per tree `ports.len() ≤ geometry.stride` else `CONFIG_INVALID`. Built-in agents: `claude` (`claude` / `claude --continue`), `codex` (`codex` / `codex resume --last`).
 
 ### 5.5 Tool variables (A15; ★ new)
-`WT_LABEL`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_TARGET`, `WT_BRANCH`, `WT_ROOT`, `WT_REPO` (canonical path), `WT_HOME` (resolved home), `WT_SLOT` ★, `WT_SESSION`, `WT_BIN` ★, `WT_ACTIVATION` ★ (the marker, §8.1), `WT_TASK`, `WT_SELF`. `WT_PORT_BASE` and `WT_PORT_<NAME>` are **not** exported (A43): ports are configuration inputs reached by `port('name')` (§5.2) and reported by `status`, `list` and `env`. `WT_BRANCH` is the HEAD branch **at spawn** (empty if detached), read by one bounded `git symbolic-ref --short -q HEAD`; it is not updated while a shell or session lives (A31). All except `WT_ACTIVATION` are ordinary variables with a recorded prior (§8.1). **Tree-specific keys** (used by §10.3): `WT_ROOT`, `WT_TARGET`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_SLOT`, `WT_SESSION`, `WT_BIN`, `PATH`.
+`WT_LABEL`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_TARGET`, `WT_BRANCH`, `WT_ROOT`, `WT_REPO` (canonical path), `WT_HOME` (resolved home), `WT_SLOT` ★, `WT_SESSION`, `WT_BIN` ★, `WT_ACTIVATION` ★ (the marker, §8.1), `WT_TASK`, `WT_SELF`. `WT_PORT_BASE` and `WT_PORT_<NAME>` are **not** exported (A43): ports are configuration inputs reached by `${ports.<name>}` (§5.2) and reported by `status`, `list` and `env`. `WT_BRANCH` is the HEAD branch **at spawn** (empty if detached), read by one bounded `git symbolic-ref --short -q HEAD`; it is not updated while a shell or session lives (A31). All except `WT_ACTIVATION` are ordinary variables with a recorded prior (§8.1). **Tree-specific keys** (used by §10.3): `WT_ROOT`, `WT_TARGET`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_SLOT`, `WT_SESSION`, `WT_BIN`, `PATH`.
 
 ### 5.6 Validation: static vs late-bound
 | Check | When | Error |

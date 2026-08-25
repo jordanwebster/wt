@@ -516,12 +516,17 @@ exported because they are typed by hand in a shell.
 `${…}` is the sole evaluation form; `$$` is a literal dollar and a bare `$` is
 literal text. Inside it, a bare name reads a `vars` constant and a
 parenthesised name calls a wt-provided function: `root()`, `repo()`,
-`branch()`, `target()`, `name_snake()`, `name_short()`, and `port('name')`.
+`branch()`, `target()`, `name_snake()`, `name_short()`, and the dotted constant `ports.<name>`.
 Rationale: the previous spelling gave tool-provided values and user-defined
 values one syntax and one namespace, so a reader could not tell which was
-which. Function syntax marks the one member of the set that acts rather than
-reports — `port()` reserves a contended resource — and the remaining
-distinction is answered by whether the name appears in `[vars]`.
+which. Function syntax marks what wt computes about the tree; a declared port is a
+dotted constant, `ports.<name>`, because looking one up is a lookup and not an
+allocation — the value is fixed when the name is declared and repeats
+identically. The remaining distinction is answered by whether the name appears
+in `[vars]`. A shell-string recipe is never templated at all, so wt's syntax
+and the shell's never share a string; a recipe needing a non-exported value
+declares it in the task's own `env`, and the argv form, having no shell, is
+templated per element.
 
 ## A45. `copy` and `seed` express required and opportunistic population
 

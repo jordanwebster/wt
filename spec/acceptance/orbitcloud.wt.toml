@@ -8,13 +8,13 @@ ports = ["postgres", "server", "server_https", "frontend", "website", "dashboard
 copy = [".mcp.json", ".claude/settings.local.json"]
 
 [env]
-Local__Ports__Postgres = "${port('postgres')}"
-Local__Ports__Server = "${port('server')}"
-Local__Ports__ServerHttps = "${port('server_https')}"
-Local__Ports__Frontend = "${port('frontend')}"
-Local__Ports__Website = "${port('website')}"
-Local__Ports__Dashboard = "${port('dashboard')}"
-Local__Ports__DashboardOtlp = "${port('otlp')}"
+Local__Ports__Postgres = "${ports.postgres}"
+Local__Ports__Server = "${ports.server}"
+Local__Ports__ServerHttps = "${ports.server_https}"
+Local__Ports__Frontend = "${ports.frontend}"
+Local__Ports__Website = "${ports.website}"
+Local__Ports__Dashboard = "${ports.dashboard}"
+Local__Ports__DashboardOtlp = "${ports.otlp}"
 
 [task.sync]
 run = "dotnet restore orbitcloud.sln && npm --prefix frontend ci && npm --prefix website ci"
@@ -27,9 +27,9 @@ run = "dotnet restore orbitcloud.sln && npm --prefix frontend ci && npm --prefix
 [task.pgdata]
 tied_to = "tree"
 name = "aspire-${label()}-${name_snake()}"
-exists = '''docker info >/dev/null 2>&1 || exit 2; h=$(printf '%s' "${root()}/orbitcloud.AppHost/orbitcloud.AppHost.csproj" | tr A-Z a-z | shasum -a 256 | cut -c1-8); docker container inspect "postgres-$h" >/dev/null 2>&1'''
+exists = '''docker info >/dev/null 2>&1 || exit 2; h=$(printf '%s' "$WT_ROOT/orbitcloud.AppHost/orbitcloud.AppHost.csproj" | tr A-Z a-z | shasum -a 256 | cut -c1-8); docker container inspect "postgres-$h" >/dev/null 2>&1'''
 destroy = '''
-h=$(printf '%s' "${root()}/orbitcloud.AppHost/orbitcloud.AppHost.csproj" | tr A-Z a-z | shasum -a 256 | cut -c1-10)
+h=$(printf '%s' "$WT_ROOT/orbitcloud.AppHost/orbitcloud.AppHost.csproj" | tr A-Z a-z | shasum -a 256 | cut -c1-10)
 docker ps -aq --filter "name=-${h%??}$" | xargs -r docker rm -f -v
 docker volume ls -q --filter "name=orbitcloud.apphost-$h-" | xargs -r docker volume rm -f
 docker network ls -q --filter "name=aspire-persistent-network-${h%??}-" | xargs -r docker network rm

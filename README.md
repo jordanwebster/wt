@@ -62,16 +62,16 @@ ports    = ["http", "db"]         # allocated per worktree
 
 [vars]                            # private: never leaves this file
 db_name = "orbit_${name_snake()}"
-db_url  = "postgres://localhost:${port('db')}/${db_name}"
+db_url  = "postgres://localhost:${ports.db}/${db_name}"
 
 [env]                             # claimed: what your app actually sees
 DATABASE_URL = "${db_url}"
-PORT         = "${port('http')}"
+PORT         = "${ports.http}"
 
 [files."config/local.yaml"]       # rendered fresh for each worktree
 content = """
 database: ${db_url}
-port: ${port('http')}
+port: ${ports.http}
 """
 ```
 
@@ -100,14 +100,34 @@ with parentheses is a function `wt` provides.
 | `${branch()}` | the branch checked out when the process started |
 | `${root()}` | the worktree's absolute path |
 | `${repo()}` | the registered checkout's absolute path |
-| `${port('http')}` | a port allocated to this worktree |
+| `${ports.http}` | the port you named `http` |
 
-`port()` is the only function that *does* something rather than reporting
-something: it reserves a port nothing else will get. Names come from the
-`ports` list, and each keeps its allocation when the list is reordered or
-extended.
+Ports are a lookup, not an allocation: `${ports.db}` is the port you named
+`db` in the `ports` list, it returns the same number every time, and a name
+keeps its number when the list is reordered or extended.
 
-Use `$$` for a literal dollar sign. `wt config <target>` shows every value
+**Recipes are never touched.** A task's `run`, `exists` or `destroy` written as
+a shell string belongs entirely to the shell — `${h%??}` and `$HOME` mean what
+bash says they mean. When a recipe needs a port or a private value, hand it
+over by name:
+
+```toml
+[task.check.env]
+DB_PORT = "${ports.db}"
+
+[task.check]
+run = "psql -p $DB_PORT -c 'select 1'"
+```
+
+Written as a list instead of a string there is no shell to collide with, so
+each element is filled in directly:
+
+```toml
+run = ["psql", "-p", "${ports.db}", "-c", "select 1"]
+```
+
+Use `$$` for a literal dollar sign — including inside a `files` entry that
+generates a shell script, where `$${h%??}` keeps the dollar for bash. `wt config <target>` shows every value
 with the layer it came from, which is the fastest way to answer "why is it
 that?".
 
@@ -244,7 +264,7 @@ Top-level keys:
   common project types, so most repositories never write it.
 - `bin`: relative directories prepended to `PATH`. Where the binaries are;
   `commands` is which names they provide.
-- `ports`: named ports, reachable as `${port('name')}`.
+- `ports`: named ports, reachable as `${ports.<name>}`.
 - `vars`: private values, composed from functions and from each other. Never
   exported. Evaluated as a dependency graph, so order in the file does not
   matter; a cycle or an unknown name is an error naming the keys involved.

@@ -6,14 +6,14 @@ ports = ["metro"]
 # Expo's fallback bundler port wherever a bundler starts (`expo start`,
 # `expo run:ios`, `expo run:android`, the npm scripts); also passed into
 # xcodebuild so the dev client's built-in default matches.
-RCT_METRO_PORT = "${port('metro')}"
+RCT_METRO_PORT = "${ports.metro}"
 
 # modules/orbit-core/ios/rust depends on the orbit crate by relative path,
 # expecting an `orbit` checkout beside this one. Worktrees live elsewhere,
 # so recreate that sibling as a link to the checkout next to the main one.
 [task.orbit-src]
-exists = 'test -d "${root()}/../orbit/crates/orbit"'
-run = 'ln -sfn "${repo()}/../orbit" "${root()}/../orbit"'
+exists = 'test -d "$WT_ROOT/../orbit/crates/orbit"'
+run = 'ln -sfn "$WT_REPO/../orbit" "$WT_ROOT/../orbit"'
 
 [task.ios]
 needs = ["orbit-src"]
