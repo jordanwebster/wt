@@ -725,6 +725,10 @@ run = ["{}", "build", "{}", "{}"]
         release.display(),
     );
     let repo = private.harness.repo("repo", &config);
+    write_executable(
+        &private.harness.shims.join("orbit"),
+        "#!/bin/sh\nprintf 'INSTALLED\\n'\n",
+    );
     private.harness.register(&repo);
 
     let output = private
@@ -765,6 +769,21 @@ run = ["{}", "build", "{}", "{}"]
     );
     assert!(progress_text.contains("wt:setup"), "{progress_text}");
     assert!(progress_text.contains("wt-setup.log"), "{progress_text}");
+    assert!(
+        progress_text.contains("wt build repo/work"),
+        "{progress_text}"
+    );
+    assert!(
+        progress_text.contains(
+            &private
+                .harness
+                .shims
+                .join("orbit")
+                .to_string_lossy()
+                .to_string()
+        ),
+        "{progress_text}"
+    );
 
     write(&release, "go\n");
     let status = private
@@ -787,11 +806,20 @@ run = ["{}", "build", "{}", "{}"]
         .unwrap();
     assert_eq!(failed.status.code(), Some(5));
     let failed_text = String::from_utf8_lossy(&failed.stderr);
+    assert!(failed_text.contains("wt build repo/work"), "{failed_text}");
     assert!(
-        failed_text.contains("background build failed"),
+        failed_text.contains(
+            &private
+                .harness
+                .shims
+                .join("orbit")
+                .to_string_lossy()
+                .to_string()
+        ),
         "{failed_text}"
     );
-    assert!(failed_text.contains("wt-setup.log"), "{failed_text}");
+    assert!(!failed_text.contains("wt:setup"), "{failed_text}");
+    assert!(!failed_text.contains("wt-setup.log"), "{failed_text}");
 
     let target = wt_core::model::Target::parse("repo/work").unwrap();
     let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(

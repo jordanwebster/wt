@@ -126,6 +126,18 @@ pub fn main(cli: Cli) -> i32 {
     };
     match result {
         Ok(mut output) => {
+            if let Some(AfterRender::Build { target }) = output.after_render.take() {
+                if let Err(error) = open::start_build(
+                    opened_context
+                        .as_mut()
+                        .expect("deferred actions require an open context"),
+                    &target,
+                ) {
+                    output = output
+                        .with_notices([open::build_failure_notice(&target, &error)])
+                        .with_failure(error);
+                }
+            }
             let output_exit = output
                 .failure
                 .as_ref()
@@ -173,11 +185,7 @@ pub fn main(cli: Cli) -> i32 {
                             emit_session_warning(&target, &error);
                         }
                     }
-                    AfterRender::Build { target } => {
-                        if let Err(error) = open::start_build(context, &target) {
-                            return render_error(&command, json, color, error, Vec::new());
-                        }
-                    }
+                    AfterRender::Build { .. } => unreachable!("builds run before rendering"),
                     AfterRender::Attach { session } => {
                         if let Err(error) = open::attach(context, &session) {
                             return render_error(&command, json, color, error, Vec::new());
@@ -289,8 +297,16 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Lint(args) => run::run(context, args.into_run("lint")),
         Command::Fmt(args) => run::run(context, args.into_run("fmt")),
         Command::Build(args) => {
+            let dry_run = args.dry_run;
+            let target = args.target.clone();
+            let status = (!dry_run)
+                .then(|| build_status_path(context, target.as_deref()))
+                .flatten();
+            if let Some(path) = &status {
+                let _ = wt_sys::fsx::write_store(path, b"running\n");
+            }
             let result = run::run(context, args.into_run("build"));
-            record_background_build_result(&result);
+            record_build_result(status.as_deref(), &result);
             result
         }
         Command::Exec(args) => exec::run(context, args),
@@ -312,21 +328,31 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
     }
 }
 
-fn record_background_build_result(result: &Result<Output, CoreError>) {
-    let Some(path) = std::env::var_os("WT_BACKGROUND_BUILD_STATUS").map(std::path::PathBuf::from)
-    else {
-        return;
-    };
-    let valid = path.file_name().is_some_and(|name| name == "build.status")
+fn build_status_path(context: &Context, target: Option<&str>) -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("WT_BACKGROUND_BUILD_STATUS").map(std::path::PathBuf::from)
+    {
+        return valid_background_build_status(&path).then_some(path);
+    }
+    let target = context.resolve(target).ok()?;
+    context.read_state(&target).ok()??.build.as_ref()?;
+    let tree = context.tree(&target).ok()?;
+    Some(std::path::Path::new(tree.path.as_str()).join(".wt/build.status"))
+}
+
+fn valid_background_build_status(path: &std::path::Path) -> bool {
+    path.file_name().is_some_and(|name| name == "build.status")
         && path
             .parent()
             .is_some_and(|parent| parent.file_name().is_some_and(|name| name == ".wt"))
         && std::env::var_os("WT_ROOT")
             .map(std::path::PathBuf::from)
-            .is_some_and(|root| path.parent() == Some(root.join(".wt").as_path()));
-    if valid {
+            .is_some_and(|root| path.parent() == Some(root.join(".wt").as_path()))
+}
+
+fn record_build_result(path: Option<&std::path::Path>, result: &Result<Output, CoreError>) {
+    if let Some(path) = path {
         let status = if result.is_ok() { "ok\n" } else { "failed\n" };
-        let _ = wt_sys::fsx::write_store(&path, status.as_bytes());
+        let _ = wt_sys::fsx::write_store(path, status.as_bytes());
     }
 }
 

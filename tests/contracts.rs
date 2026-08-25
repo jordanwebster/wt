@@ -1,6 +1,6 @@
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use common::Harness;
 use predicates::prelude::*;
@@ -175,12 +175,12 @@ fn backend_none_runs_build_plan_after_ready_and_respects_suppression() {
     let config = format!(
         r#"
 [task.prepare]
-run = ["sh", "-c", "printf 'prepare\\n' >> \"$EVENTS\""]
+run = ["sh", "-c", "printf 'prepare\\n' >> \"$$EVENTS\""]
 [task.prepare.env]
 EVENTS = "{}"
 [task.build]
 needs = ["prepare"]
-run = ["sh", "-c", "printf 'build\\n' >> \"$EVENTS\""]
+run = ["sh", "-c", "printf 'build:%s\\n' \"$$(cat \"$$WT_ROOT/.wt/build.status\")\" >> \"$$EVENTS\""]
 [task.build.env]
 EVENTS = "{}"
 "#,
@@ -193,7 +193,7 @@ EVENTS = "{}"
     let created = h.json(&["new", "repo/work", "--no-sync"]);
     assert_eq!(
         std::fs::read_to_string(&events).unwrap(),
-        "prepare\nbuild\n"
+        "prepare\nbuild:running\n"
     );
     let target = wt_core::model::Target::parse("repo/work").unwrap();
     let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
@@ -206,12 +206,95 @@ EVENTS = "{}"
     assert!(build.window.is_none());
     assert!(Path::new(&build.log).ends_with(".wt/logs/wt-setup.log"));
     assert_eq!(created["data"]["tree"]["phase"], "ready");
+    let status =
+        Path::new(created["data"]["tree"]["path"].as_str().unwrap()).join(".wt/build.status");
+    assert_eq!(std::fs::read_to_string(&status).unwrap(), "ok\n");
+
+    common::write(&events, "");
+    h.json(&["build", "repo/work"]);
+    assert_eq!(
+        std::fs::read_to_string(&events).unwrap(),
+        "prepare\nbuild:running\n"
+    );
+    assert_eq!(std::fs::read_to_string(&status).unwrap(), "ok\n");
 
     common::write(&events, "");
     h.json(&["new", "repo/no-build", "--no-sync", "--no-build"]);
     assert_eq!(std::fs::read_to_string(&events).unwrap(), "");
     h.json(&["new", "repo/no-open", "--no-sync", "--no-open"]);
     assert_eq!(std::fs::read_to_string(&events).unwrap(), "");
+}
+
+#[test]
+fn backend_none_build_failure_is_one_envelope_and_a_terminal_status() {
+    let h = Harness::new();
+    common::write(&h.home.join("config.toml"), "[session]\nbackend='none'\n");
+    let repo = h.repo(
+        "repo",
+        r#"
+bin = ["bin"]
+commands = ["orbit"]
+[task.build]
+run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status\"; exit 9"]
+"#,
+    );
+    common::write_executable(&h.shims.join("orbit"), "#!/bin/sh\nprintf 'INSTALLED\\n'\n");
+    h.register(&repo);
+
+    let output = h
+        .wt()
+        .args(["new", "repo/work", "--no-sync", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(6));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "TASK_FAILED");
+    assert!(envelope["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "BUILD_FAILED"));
+    let root = PathBuf::from(envelope["data"]["tree"]["path"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(root.join("seen-status")).unwrap(),
+        "running\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".wt/build.status")).unwrap(),
+        "failed\n"
+    );
+
+    let refusal = h
+        .wt()
+        .args(["exec", "repo/work", "--", "orbit"])
+        .output()
+        .unwrap();
+    assert_eq!(refusal.status.code(), Some(5));
+    let refusal = String::from_utf8_lossy(&refusal.stderr);
+    assert!(refusal.contains("wt build repo/work"), "{refusal}");
+    assert!(refusal.contains(&h.shims.join("orbit").to_string_lossy().to_string()));
+    assert!(!refusal.contains("wt:setup"), "{refusal}");
+    assert!(!refusal.contains("build is in progress"), "{refusal}");
+
+    common::write(
+        &root.join(".wt.toml"),
+        r#"
+bin = ["bin"]
+commands = ["orbit"]
+[task.build]
+run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status\""]
+"#,
+    );
+    h.json(&["build", "repo/work"]);
+    assert_eq!(
+        std::fs::read_to_string(root.join("seen-status")).unwrap(),
+        "running\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".wt/build.status")).unwrap(),
+        "ok\n"
+    );
 }
 
 #[test]

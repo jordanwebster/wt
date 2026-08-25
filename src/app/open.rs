@@ -135,14 +135,17 @@ pub(crate) fn start_build(context: &mut Context, target: &str) -> Result<(), Cor
         ]
         .into_iter()
         .collect();
-        tmux(context).new_window(
+        let launched = tmux(context).new_window(
             &tree.session_name,
             "wt:setup",
             Path::new(tree.path.as_str()),
             &env,
             &inner,
-        )?;
-        return Ok(());
+        );
+        if launched.is_err() {
+            let _ = wt_sys::fsx::write_store(&status, b"failed\n");
+        }
+        return launched;
     }
 
     let mut request = wt_sys::proc::CommandRequest::new(running_binary);
@@ -152,13 +155,28 @@ pub(crate) fn start_build(context: &mut Context, target: &str) -> Result<(), Cor
         log.to_string_lossy().into_owned(),
     );
     request.env.insert(
+        "WT_HOME".to_owned(),
+        context.home.to_string_lossy().into_owned(),
+    );
+    request
+        .env
+        .insert("WT_ROOT".to_owned(), tree.path.as_str().to_owned());
+    request.env.insert(
         "WT_BACKGROUND_BUILD_STATUS".to_owned(),
         status.to_string_lossy().into_owned(),
     );
-    let output = wt_sys::proc::run(&request, None, None, wt_sys::proc::Tee::Inherit)?;
+    let output = match wt_sys::proc::run(&request, None, None, wt_sys::proc::Tee::Inherit) {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = wt_sys::fsx::write_store(&status, b"failed\n");
+            return Err(error);
+        }
+    };
     if output.success() {
+        wt_sys::fsx::write_store(&status, b"ok\n")?;
         Ok(())
     } else {
+        wt_sys::fsx::write_store(&status, b"failed\n")?;
         Err(CoreError::new(
             ExitClass::ChildFailed,
             "TASK_FAILED",
@@ -363,6 +381,18 @@ pub(crate) fn session_failure_notice(target: &str, error: &CoreError) -> Notice 
         subject: Some(target.to_owned()),
         message: format!(
             "session for {target} was not created: {}; run `wt open {target}` to retry",
+            error.message
+        ),
+    }
+}
+
+pub(crate) fn build_failure_notice(target: &str, error: &CoreError) -> Notice {
+    Notice {
+        level: NoticeLevel::Warn,
+        code: "BUILD_FAILED".to_owned(),
+        subject: Some(target.to_owned()),
+        message: format!(
+            "automatic build for {target} failed: {}; run `wt build {target}` to retry",
             error.message
         ),
     }

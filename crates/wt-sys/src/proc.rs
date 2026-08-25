@@ -161,17 +161,18 @@ pub fn owned_command_fast_path() -> Option<i32> {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let explicit = installed.map_or_else(String::new, |path| {
-        format!(
-            "; run the installed copy explicitly as `{}`",
-            path.display()
-        )
-    });
-    if let Some(message) = recorded_build_refusal(root, &target, &name, &searched) {
-        return Some(shim_refusal(message));
-    }
+    let explicit = installed.map_or_else(
+        || "; no installed copy was found elsewhere on PATH".to_owned(),
+        |path| {
+            format!(
+                "; run the installed copy explicitly as `{}`",
+                path.display()
+            )
+        },
+    );
+    let progress = recorded_build_progress(root, &target).unwrap_or_default();
     Some(shim_refusal(format!(
-        "COMMAND_NOT_BUILT: `{}` belongs to tree `{target}` but was not found; searched: {searched}; run `wt build {target}`{explicit}",
+        "COMMAND_NOT_BUILT: `{}` belongs to tree `{target}` but was not found; searched: {searched}; run `wt build {target}`{explicit}{progress}",
         name.to_string_lossy()
     )))
 }
@@ -207,12 +208,14 @@ fn matching_path_shim(name: &std::ffi::OsStr) -> Option<PathBuf> {
         })
 }
 
-fn recorded_build_refusal(
-    root: &Path,
-    target: &str,
-    name: &std::ffi::OsStr,
-    searched: &str,
-) -> Option<String> {
+fn recorded_build_progress(root: &Path, target: &str) -> Option<String> {
+    if std::fs::read_to_string(root.join(".wt/build.status"))
+        .ok()?
+        .trim()
+        != "running"
+    {
+        return None;
+    }
     let home = PathBuf::from(std::env::var_os("WT_HOME")?);
     let target_value = wt_core::model::Target::parse(target).ok()?;
     let state_path = home.join(wt_core::model::tree_state_path(&target_value));
@@ -220,20 +223,11 @@ fn recorded_build_refusal(
     let build = state.get("build")?.as_object()?;
     let log = build.get("log")?.as_str()?;
     let window = build.get("window").and_then(serde_json::Value::as_str);
-    let status = std::fs::read_to_string(root.join(".wt/build.status")).unwrap_or_default();
     let location = window.map_or_else(
         || format!("log `{log}`"),
         |window| format!("window `{window}`; watch log `{log}`"),
     );
-    let state = match status.trim() {
-        "failed" => format!("the background build failed; inspect {location}"),
-        "ok" => format!("the completed build did not produce it; inspect {location}"),
-        _ => format!("the build is in progress in {location}"),
-    };
-    Some(format!(
-        "COMMAND_NOT_BUILT: `{}` belongs to tree `{target}` but was not found; searched: {searched}; {state}",
-        name.to_string_lossy()
-    ))
+    Some(format!("; the build is in progress in {location}"))
 }
 
 fn shim_refusal(message: String) -> i32 {
