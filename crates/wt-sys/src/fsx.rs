@@ -455,7 +455,8 @@ pub fn remove_dir_all_nofollow(root: &Path, relative: &RelPath) -> Result<bool> 
     Ok(true)
 }
 
-/// Copies a contained file tree, recreating symlinks and trying a reflink per file.
+/// Copies a contained file tree, recreating symlinks and applying the requested
+/// per-file reflink policy.
 pub fn copy_contained(
     source_root: &Path,
     destination_root: &Path,
@@ -1062,7 +1063,7 @@ fn copy_entry(
                             ExitClass::State,
                             "REFLINK_UNAVAILABLE",
                             format!("reflink is unavailable for {}: {error}", source.display()),
-                            "use a reflink-capable filesystem or omit this adapter seed",
+                            "use a reflink-capable filesystem or omit this seed",
                         ));
                     }
                     Err(error) => {

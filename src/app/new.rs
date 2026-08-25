@@ -556,15 +556,13 @@ fn finish_under_lock(
             .root
             .copy
             .iter()
-            .map(|path| (path, MaterializedKind::Copied, CopyPolicy::Plain, false))
-            .chain(config.seed.iter().map(|path| {
-                (
-                    path,
-                    MaterializedKind::Seeded,
-                    CopyPolicy::PreferReflink,
-                    config.adapter_seed.contains(path),
-                )
-            }))
+            .map(|path| (path, MaterializedKind::Copied))
+            .chain(
+                config
+                    .seed
+                    .iter()
+                    .map(|path| (path, MaterializedKind::Seeded)),
+            )
             .collect::<Vec<_>>();
         let tracked = context
             .git(Path::new(canonical.path.as_str()))?
@@ -572,10 +570,10 @@ fn finish_under_lock(
                 Path::new(canonical.path.as_str()),
                 &entries
                     .iter()
-                    .map(|(path, _, _, _)| PathBuf::from(path.as_str()))
+                    .map(|(path, _)| PathBuf::from(path.as_str()))
                     .collect::<Vec<_>>(),
             )?;
-        for (path, kind, policy, adapter_seed) in entries {
+        for (path, kind) in entries {
             let subject = Some(format!("{}:{}", target_of(tree), path));
             if matches!(
                 wt_sys::fsx::path_kind(&Path::new(canonical.path.as_str()).join(path.as_str()))?,
@@ -612,20 +610,20 @@ fn finish_under_lock(
                 });
                 continue;
             }
-            let report = if adapter_seed {
+            if kind == MaterializedKind::Seeded {
                 match wt_sys::fsx::reflink_contained(
                     Path::new(canonical.path.as_str()),
                     root,
                     path,
                 )? {
-                    ReflinkCopy::Copied(report) => report,
+                    ReflinkCopy::Copied(_) => {}
                     ReflinkCopy::Unavailable => {
                         notices.push(Notice {
                             level: NoticeLevel::Info,
                             code: "SEED_SKIPPED_NO_REFLINK".to_owned(),
                             subject,
                             message: format!(
-                                "adapter seed {path} was skipped because reflink is unavailable"
+                                "seed {path} was skipped because reflink is unavailable"
                             ),
                             guidance: None,
                         });
@@ -633,16 +631,12 @@ fn finish_under_lock(
                     }
                 }
             } else {
-                wt_sys::fsx::copy_contained(Path::new(canonical.path.as_str()), root, path, policy)?
-            };
-            if kind == MaterializedKind::Seeded && report.files.iter().any(|file| !file.reflinked) {
-                notices.push(Notice {
-                    level: NoticeLevel::Info,
-                    code: "SEED_COPIED_NOT_CLONED".to_owned(),
-                    subject,
-                    message: format!("seed {path} was copied because reflink was unavailable"),
-                    guidance: None,
-                });
+                wt_sys::fsx::copy_contained(
+                    Path::new(canonical.path.as_str()),
+                    root,
+                    path,
+                    CopyPolicy::PreferReflink,
+                )?;
             }
             copied.push(Materialized {
                 path: path.to_string(),

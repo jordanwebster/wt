@@ -710,6 +710,9 @@ fn validate_materialized_overlap(scope: &Scope, seed: &[RelPath]) -> Result<(), 
             "copy or seed entries may not also be rendered files",
         ));
     }
+    if scope.copy.iter().any(|copy| seed.contains(copy)) {
+        return Err(invalid("copy and seed entries must be disjoint"));
+    }
     Ok(())
 }
 
@@ -1057,6 +1060,13 @@ mod tests {
         assert!(parse("[files.generated]\ncontent='x'\nmode='644'", "x").is_err());
         assert!(parse("[task.t]\nrun='true'\ntimeout='soon'", "x").is_err());
         assert!(parse("[task.t]\nrun='true'\nready_within='1s'", "x").is_err());
+    }
+
+    #[test]
+    fn copy_and_seed_are_disjoint() {
+        let config = parse("copy=['cache']\nseed=['cache']", "repo/.wt.toml").unwrap_err();
+        assert_eq!(config.code.0, "CONFIG_INVALID");
+        assert!(config.message.contains("disjoint"));
     }
 
     #[test]
