@@ -11,6 +11,8 @@ use wt_core::{CoreError, ExitClass};
 use crate::proc::{self, CommandRequest, ProcessOutput};
 use crate::Result;
 
+const SESSION_START_OBSERVATION: Duration = Duration::from_millis(250);
+
 #[derive(Clone, Debug)]
 pub struct Tmux {
     program: OsString,
@@ -117,7 +119,9 @@ impl Tmux {
         let output = proc::capture(&request, self.deadline).map_err(tool_error)?;
         success(output, "create tmux session")?;
         crate::fsx::write_store(&gate, b"ready\n")?;
-        let deadline = Instant::now() + Duration::from_millis(250);
+        // A bounded observation window catches immediate bootstrap failures; it
+        // does not prove that a session will remain alive after this method.
+        let deadline = Instant::now() + SESSION_START_OBSERVATION;
         loop {
             if !self.has_session(session)? {
                 let reason = captured_reason(capture, self.deadline);
@@ -126,7 +130,9 @@ impl Tmux {
                 return Err(CoreError::new(
                     ExitClass::External,
                     "SESSION_CREATE_FAILED",
-                    format!("tmux session `{session}` did not survive creation: {reason}"),
+                    format!(
+                        "tmux session `{session}` exited during the startup observation window: {reason}"
+                    ),
                     "fix the session command or WT_HOME and retry",
                 ));
             }

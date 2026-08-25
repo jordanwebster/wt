@@ -200,38 +200,48 @@ fn session_gets_resolved_home_even_when_server_captured_another_one() {
 }
 
 #[test]
-fn session_creation_is_confirmed_and_carries_dead_pane_output() {
+fn open_reports_a_session_that_dies_during_startup() {
     let Some(private) = PrivateTmux::new(false, false) else {
-        eprintln!("skipping private-tmux confirmation test: tmux is not installed");
+        eprintln!("skipping private-tmux startup test: tmux is not installed");
         return;
     };
+    let dead_agent = private.harness.shims.join("dead-agent");
+    write_executable(
+        &dead_agent,
+        "#!/bin/sh\nprintf 'DEAD_AGENT_OUTPUT\\n'\nexit 9\n",
+    );
+    write(
+        &private.harness.home.join("config.toml"),
+        &format!(
+            "[session]\nbackend='tmux'\nattach=false\n[agents.dead]\nstart=['{}']\nresume=['{}']\n",
+            dead_agent.display(),
+            dead_agent.display()
+        ),
+    );
     let repo = private.harness.repo("repo", "");
     private.harness.register(&repo);
-    let wrong_home = private.harness.root.join("wrong-home");
-    wt_sys::fsx::create_private_dir(&wrong_home).unwrap();
-    let capture = private.harness.root.join("dead-pane.log");
-    let target = wt_core::model::Target::canonical(wt_core::model::Label::new("repo").unwrap());
-    let tree = private.harness.json(&["status", "repo"]);
-    let cwd = Path::new(tree["data"]["path"].as_str().unwrap());
-    let command = vec![
-        OsString::from(env!("CARGO_BIN_EXE_wt")),
-        OsString::from("exec"),
-        OsString::from("--no-gate"),
-        OsString::from(target.to_string()),
-        OsString::from("--"),
-        OsString::from("/bin/sh"),
-        OsString::from("-i"),
-    ];
-    let tmux = wt_sys::tmux::Tmux::new(private.harness.shims.join("tmux"), Duration::from_secs(3));
-    let session = "wt-confirm-mismatch";
-    let error = tmux
-        .new_session(session, cwd, &wrong_home, &capture, &command)
-        .unwrap_err();
-    assert_eq!(error.code.0, "SESSION_CREATE_FAILED");
-    assert_eq!(error.exit(), 7);
-    assert!(error.message.contains("NOT_FOUND"), "{}", error.message);
-    assert!(!private.has_session(session));
-    common::proof_capture("E2", error.to_string());
+    let output = private
+        .harness
+        .wt()
+        .args(["open", "repo", "--agent", "dead", "--no-attach", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "SESSION_CREATE_FAILED");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(message.contains("startup observation window"), "{message}");
+    assert!(message.contains("DEAD_AGENT_OUTPUT"), "{message}");
+    let session = wt_core::session::name("repo", "canonical");
+    assert!(!private.has_session(&session));
+    common::proof_capture(
+        "E2",
+        format!(
+            "wt open exit: {}\nerror: {}\nsession exists after open: false",
+            output.status.code().unwrap(),
+            message
+        ),
+    );
 }
 
 impl Drop for PrivateTmux {
