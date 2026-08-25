@@ -342,6 +342,7 @@ fn config_findings(
     let root = Path::new(tree.path.as_str());
     let effective = wt_core::config::effective_scope(config, ".")?;
     shim_findings(context, tree, &effective, findings)?;
+    let mut has_existing_bin = false;
     for bin in &effective.bin {
         let path = root.join(bin.as_str());
         if !matches!(
@@ -355,9 +356,11 @@ fn config_findings(
                 format!("declared bin directory {} is missing", path.display()),
                 "create the directory by running the build task",
             ));
+        } else {
+            has_existing_bin = true;
         }
     }
-    if (!effective.bin.is_empty() || !effective.commands.is_empty())
+    if (has_existing_bin || !effective.commands.is_empty())
         && !path_prefix_is_assembled(context, root, &effective)
     {
         findings.push(finding(
