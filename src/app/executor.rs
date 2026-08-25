@@ -271,7 +271,7 @@ fn run_task(
         ));
     }
     if let Some(exists) = &node.exists {
-        let request = request(exists, &assembled.env, &cwd)?;
+        let request = request(exists, &assembled, &cwd)?;
         let probe = proc::probe(
             &request,
             duration(
@@ -300,7 +300,7 @@ fn run_task(
     };
     let log = log_path(context, door, node, no_log)?;
     let output = proc::run(
-        &request(run, &assembled.env, &cwd)?,
+        &request(run, &assembled, &cwd)?,
         log.as_deref(),
         timeout
             .or(node.timeout.as_deref())
@@ -701,16 +701,16 @@ fn refresh_node_declaration(context: &Context, door: &Door, node: &Node) -> Resu
         exists: node
             .exists
             .as_ref()
-            .map(|command| expanded(command, &assembled.env))
+            .map(|command| expanded(command, &assembled))
             .transpose()?,
         destroy: expanded(
             node.destroy.as_ref().expect("resource has destroy"),
-            &assembled.env,
+            &assembled,
         )?,
         run: node
             .run
             .as_ref()
-            .map(|command| expanded(command, &assembled.env))
+            .map(|command| expanded(command, &assembled))
             .transpose()?,
         env: wt_core::snapshot::minimise_env(
             &assembled.env,
@@ -898,7 +898,6 @@ fn node_environment(context: &Context, door: &Door, node: &Node) -> Result<EnvOu
         parent: &context.parent_env,
         existing_dirs: &existing_dirs,
         file_sources: &sources,
-        force_env: false,
     })
 }
 
@@ -906,17 +905,18 @@ fn config_for_node(config: &Config, node: &Node) -> Result<EffectiveScope, CoreE
     config::effective_scope(config, node.scope.as_str())
 }
 
-fn expanded(
-    command: &Command,
-    env: &BTreeMap<String, String>,
-) -> Result<ExpandedCommand, CoreError> {
+fn expanded(command: &Command, assembled: &EnvOutput) -> Result<ExpandedCommand, CoreError> {
+    let context = wt_core::template::Context {
+        vars: &assembled.vars,
+        functions: &assembled.functions,
+    };
     match command {
         Command::Shell(shell) => Ok(ExpandedCommand::Shell {
-            shell: shell.clone(),
+            shell: wt_core::template::expand_shell(shell, &context)?,
         }),
         Command::Argv(argv) => argv
             .iter()
-            .map(|value| wt_core::template::expand(value, env))
+            .map(|value| wt_core::template::expand(value, &context))
             .collect::<Result<Vec<_>, _>>()
             .map(|argv| ExpandedCommand::Argv { argv }),
     }
@@ -924,10 +924,10 @@ fn expanded(
 
 fn request(
     command: &Command,
-    env: &BTreeMap<String, String>,
+    assembled: &EnvOutput,
     cwd: &Path,
 ) -> Result<CommandRequest, CoreError> {
-    CommandRequest::expanded(&expanded(command, env)?, cwd, env.clone())
+    CommandRequest::expanded(&expanded(command, assembled)?, cwd, assembled.env.clone())
 }
 
 fn log_path(

@@ -39,6 +39,8 @@ pub const CODES: &[&str] = &[
     "NO_COORDINATION",
     "SESSION_BACKEND",
     "BIN_DIR_MISSING",
+    "SHIM_BROKEN",
+    "SHIM_SHADOWED",
     "PATH_NOT_SHADOWED",
     "PORT_BOUND",
     "EXCLUDE_MISSING",
@@ -130,18 +132,20 @@ pub fn resource_name_findings(
         ));
     }
     if let Some(name_template) = name_template {
-        let references = template::references(name_template)?;
-        let uses_ambiguous = references.contains("WT_NAME") || references.contains("WT_NAME_SNAKE");
-        let uses_identity = ["WT_NAME_SHORT", "WT_SLOT", "WT_ROOT"]
-            .iter()
-            .any(|key| references.contains(*key));
+        let calls = template::calls(name_template)?;
+        let uses_ambiguous = calls.iter().any(|call| {
+            matches!(call, template::Call::Simple(name) if name == "name" || name == "name_snake")
+        });
+        let uses_identity = calls.iter().any(|call| {
+            matches!(call, template::Call::Simple(name) if name == "name_short" || name == "root" || name == "target")
+        });
         if uses_ambiguous && !uses_identity {
             findings.push(Finding::new(
                 Severity::Info,
                 "NAME_MAY_COLLIDE",
                 subject,
                 "resource name uses a many-to-one tree name without an allocated identity",
-                "include WT_NAME_SHORT, WT_SLOT, or WT_ROOT in the name",
+                "include name_short(), target(), or root() in the name",
             ));
         }
     }
@@ -248,7 +252,7 @@ mod tests {
     fn pure_doctor_findings_cover_resource_names_and_adapter_metadata() {
         let findings = resource_name_findings(
             "db",
-            Some("aspire-${WT_LABEL}-${WT_NAME_SNAKE}"),
+            Some("aspire-${label()}-${name_snake()}"),
             &"x".repeat(64),
         )
         .unwrap();

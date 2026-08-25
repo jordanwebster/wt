@@ -340,7 +340,9 @@ fn config_findings(
         }
     }
     let root = Path::new(tree.path.as_str());
-    for bin in &config.root.bin {
+    let effective = wt_core::config::effective_scope(config, ".")?;
+    shim_findings(context, tree, &effective, findings)?;
+    for bin in &effective.bin {
         let path = root.join(bin.as_str());
         if !matches!(
             wt_sys::fsx::path_kind(&path)?,
@@ -353,12 +355,7 @@ fn config_findings(
                 format!("declared bin directory {} is missing", path.display()),
                 "create the directory by running the build task",
             ));
-        } else if context
-            .parent_env
-            .get("PATH")
-            .and_then(|path_env| path_env.split(':').next())
-            != Some(path.to_string_lossy().as_ref())
-        {
+        } else if !path_prefix_is_assembled(context, root, &effective) {
             findings.push(finding(
                 Severity::Warn,
                 "PATH_NOT_SHADOWED",
@@ -410,7 +407,6 @@ fn config_findings(
         .map(str::to_owned)
         .collect::<Vec<_>>(),
     )?;
-    let effective = wt_core::config::effective_scope(config, ".")?;
     let hits = wt_core::adapters::detect(&snapshot, &effective.adapters)?;
     if hits.is_empty() {
         findings.push(finding(
@@ -475,6 +471,88 @@ fn config_findings(
         ));
     }
     Ok(())
+}
+
+fn shim_findings(
+    context: &Context,
+    tree: &wt_core::model::TreeRec,
+    effective: &wt_core::config::EffectiveScope,
+    findings: &mut Vec<Finding>,
+) -> Result<(), CoreError> {
+    let root = Path::new(tree.path.as_str());
+    let target = super::context::target_of(tree).to_string();
+    let shadows = shell_shadows(&context.parent_env);
+    for command in &effective.commands {
+        let path = root.join(".wt/shims").join(command);
+        let broken = match wt_sys::fsx::path_kind(&path)? {
+            wt_sys::fsx::PathKind::Symlink => wt_sys::fsx::read_link(&path)?
+                .is_none_or(|link| !wt_sys::fsx::is_executable_file(&link).unwrap_or(false)),
+            _ => true,
+        };
+        if broken {
+            findings.push(finding(
+                Severity::Warn,
+                "SHIM_BROKEN",
+                format!("{target}:{command}"),
+                format!("owned command shim {} is missing or broken", path.display()),
+                format!("run `wt env {target}` to repair the shim"),
+            ));
+        }
+        if shadows.contains(command) {
+            findings.push(finding(
+                Severity::Info,
+                "SHIM_SHADOWED",
+                format!("{target}:{command}"),
+                format!("shell alias or function `{command}` outranks the owned command shim"),
+                format!("remove the `{command}` alias or function to use the tree's command"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn shell_shadows(environment: &std::collections::BTreeMap<String, String>) -> BTreeSet<String> {
+    let mut shadows = environment
+        .get("WT_SHELL_SHADOWS")
+        .into_iter()
+        .flat_map(|value| value.lines())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    for key in environment.keys() {
+        if let Some(name) = key
+            .strip_prefix("BASH_FUNC_")
+            .and_then(|name| name.strip_suffix("%%"))
+        {
+            shadows.insert(name.to_owned());
+        }
+    }
+    shadows
+}
+
+fn path_prefix_is_assembled(
+    context: &Context,
+    root: &Path,
+    effective: &wt_core::config::EffectiveScope,
+) -> bool {
+    let mut expected = Vec::new();
+    if !effective.commands.is_empty() {
+        expected.push(root.join(".wt/shims").to_string_lossy().into_owned());
+    }
+    expected.extend(
+        effective
+            .bin
+            .iter()
+            .map(|bin| root.join(bin.as_str()).to_string_lossy().into_owned()),
+    );
+    context
+        .parent_env
+        .get("PATH")
+        .map(|path| {
+            path.split(':')
+                .take(expected.len())
+                .eq(expected.iter().map(String::as_str))
+        })
+        .unwrap_or(expected.is_empty())
 }
 
 fn git_registry_findings(

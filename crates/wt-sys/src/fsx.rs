@@ -3,6 +3,7 @@ use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::symlink;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -170,6 +171,51 @@ pub fn read_dir_paths(path: &Path) -> Result<Vec<PathBuf>> {
         .collect::<Result<Vec<_>>>()?;
     paths.sort();
     Ok(paths)
+}
+
+pub fn read_link(path: &Path) -> Result<Option<PathBuf>> {
+    match std::fs::read_link(path) {
+        Ok(target) => Ok(Some(target)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(fs_error("read symlink", path)(error)),
+    }
+}
+
+/// Atomically installs one owned symlink without ever following the previous
+/// final component. A non-symlink occupant is left untouched.
+pub fn replace_symlink(path: &Path, target: &Path) -> Result<bool> {
+    if read_link(path)?.as_deref() == Some(target) {
+        return Ok(false);
+    }
+    match path_kind(path)? {
+        PathKind::Missing | PathKind::Symlink => {}
+        _ => {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "SHIM_CONFLICT",
+                format!("refusing to replace non-symlink `{}`", path.display()),
+                "remove the conflicting path and retry",
+            ))
+        }
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    create_private_dir(parent)?;
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(".wt-shim-{}-{sequence}", std::process::id()));
+    symlink(target, &temporary).map_err(fs_error("create shim symlink", &temporary))?;
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(fs_error("install shim symlink", path)(error));
+    }
+    Ok(true)
+}
+
+pub fn remove_empty_dir(path: &Path) -> Result<bool> {
+    match std::fs::remove_dir(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(fs_error("remove empty directory", path)(error)),
+    }
 }
 
 /// Reports whether the name at `path` is something `exec` would run.

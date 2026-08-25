@@ -13,7 +13,7 @@ pub(crate) fn run(context: &mut Context, args: Which) -> Result<Output, CoreErro
         [target, cmd] => (Some(target.as_str()), cmd.clone()),
         _ => unreachable!("clap bounds which to one or two values"),
     };
-    let door = door::enter(context, target, "which", false)?;
+    let door = door::enter(context, target, "which")?;
     let notices = door.notices.clone();
     let path = door
         .env

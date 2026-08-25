@@ -78,7 +78,7 @@ pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreErro
                 &holder,
                 context.tree_wait(None),
             )?;
-            let door = door::enter_held(context, existing.clone(), "adopt", false, true)?;
+            let door = door::enter_held(context, existing.clone(), "adopt", true)?;
             executor::refresh_all_declarations(context, &door)?;
             context.mutate_state(&target, &holder, |state| {
                 state.phase = StatePhase::Ready;
@@ -87,7 +87,7 @@ pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreErro
             })?;
             (door, true)
         } else {
-            let door = door::enter(context, Some(&target.to_string()), "adopt", false)?;
+            let door = door::enter(context, Some(&target.to_string()), "adopt")?;
             executor::refresh_all_declarations(context, &door)?;
             (door, false)
         };
@@ -155,7 +155,7 @@ pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreErro
         0o600,
     )?;
     door::recompute_exclude(context, &tree.label)?;
-    let door = door::enter_held(context, tree.clone(), "adopt", false, true)?;
+    let door = door::enter_held(context, tree.clone(), "adopt", true)?;
     executor::refresh_all_declarations(context, &door)?;
     context.mutate_state(&target, &holder, |state| {
         state.phase = StatePhase::Ready;

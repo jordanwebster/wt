@@ -73,7 +73,6 @@ mod tests {
             run: None,
             env: EnvMap::from([
                 ("WT_ROOT".to_owned(), format!("/{tree}")),
-                ("WT_PORT_HTTP".to_owned(), "20000".to_owned()),
                 ("KEEP".to_owned(), "yes".to_owned()),
             ]),
             bin_dirs: Vec::new(),

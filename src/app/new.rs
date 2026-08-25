@@ -659,7 +659,7 @@ fn finish_under_lock(
         Ok(())
     })?;
     door::recompute_exclude(context, &tree.label)?;
-    let door = match door::enter_held(context, tree.clone(), "new", false, true) {
+    let door = match door::enter_held(context, tree.clone(), "new", true) {
         Ok(door) => door,
         Err(error) => {
             mark_new_failed(context, &target, holder, &error)?;
@@ -812,7 +812,7 @@ fn verify_ready(
         state.verify_pending = true;
         Ok(())
     })?;
-    let door = door::enter_held(context, tree.clone(), "new", false, true)?;
+    let door = door::enter_held(context, tree.clone(), "new", true)?;
     let mut notices = door.notices.clone();
     let verify = run_verify(context, &door, &holder, &mut notices)?;
     drop(token);

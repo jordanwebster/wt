@@ -1,5 +1,5 @@
 use wt_core::env::ACTIVATION_KEY;
-use wt_core::report::{BinReport, EnvData};
+use wt_core::report::{BinReport, EnvData, PortReport};
 use wt_core::CoreError;
 
 use crate::cli::Env;
@@ -31,7 +31,7 @@ pub(crate) fn run(context: &mut Context, args: Env) -> Result<Output, CoreError>
         return Output::text(serde_json::json!({"deactivated": true}), text);
     }
     let prior_activation = wt_core::deactivate(&context.parent_env)?.prior;
-    let door = door::enter(context, args.target.as_deref(), "env", args.force_env)?;
+    let door = door::enter(context, args.target.as_deref(), "env")?;
     let bins = door
         .config
         .root
@@ -62,7 +62,6 @@ pub(crate) fn run(context: &mut Context, args: Env) -> Result<Output, CoreError>
     let data = EnvData {
         target: door.target.to_string(),
         set: door.env.report.set.clone(),
-        kept: door.env.report.kept.clone(),
         overrode: door.env.report.overrode.clone(),
         restored: door.env.report.restored.clone(),
         missing_bins: door.env.report.missing_bins.clone(),
@@ -73,6 +72,22 @@ pub(crate) fn run(context: &mut Context, args: Env) -> Result<Output, CoreError>
             .map(|render| render.path.clone())
             .collect(),
         bins,
+        ports: {
+            let mut ports = door
+                .identity
+                .ports
+                .iter()
+                .map(|(name, index)| PortReport {
+                    name: name.as_str().to_owned(),
+                    port: door.identity.geometry.port_base + u16::from(*index),
+                    bound: None,
+                })
+                .collect::<Vec<_>>();
+            ports.sort_by_key(|port| {
+                door.identity.ports[&wt_core::model::PortName::new(&port.name).unwrap()]
+            });
+            ports
+        },
         env: door.env.env.clone(),
         activation: door.env.activation.clone(),
     };
@@ -115,6 +130,22 @@ pub(crate) fn run(context: &mut Context, args: Env) -> Result<Output, CoreError>
                 bin.executables.join(",")
             )
         }));
+        lines.push(String::new());
+        lines.push("ports:".to_owned());
+        lines.extend(
+            data.ports
+                .iter()
+                .map(|port| format!("{}\t{}", port.name, port.port)),
+        );
+        if !data.overrode.is_empty() {
+            lines.push(String::new());
+            lines.push("overrides:".to_owned());
+            lines.extend(data.overrode.iter().map(|key| {
+                let applied = &data.activation.applied[key];
+                let prior = data.activation.prior[key].as_deref().unwrap_or("<unset>");
+                format!("{key}\tapplied={applied}\tprior={prior}")
+            }));
+        }
         lines.join("\n")
     };
     Ok(Output::text(data, text)?.with_notices(door.notices))

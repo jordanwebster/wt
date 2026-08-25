@@ -449,12 +449,12 @@ pub struct ClosedSessionReport {
 pub struct EnvData {
     pub target: String,
     pub set: Vec<String>,
-    pub kept: Vec<String>,
     pub overrode: Vec<String>,
     pub restored: Vec<String>,
     pub missing_bins: Vec<String>,
     pub rendered: Vec<String>,
     pub bins: Vec<BinReport>,
+    pub ports: Vec<PortReport>,
     pub env: BTreeMap<String, String>,
     pub activation: Activation,
 }
@@ -1024,7 +1024,6 @@ mod tests {
             EnvData {
                 target: "repo/work".into(),
                 set: vec!["WT_ROOT".to_owned()],
-                kept: vec!["PORT".to_owned()],
                 overrode: vec!["PATH".to_owned()],
                 restored: vec!["WT_TARGET".to_owned()],
                 missing_bins: vec!["missing/bin".to_owned()],
@@ -1033,6 +1032,11 @@ mod tests {
                     dir: "target/debug".to_owned(),
                     exists: true,
                     executables: vec!["wt".to_owned()],
+                }],
+                ports: vec![PortReport {
+                    name: "http".to_owned(),
+                    port: 20016,
+                    bound: None,
                 }],
                 env: BTreeMap::from([("WT_ROOT".to_owned(), "/tree".to_owned())]),
                 activation: activation(),

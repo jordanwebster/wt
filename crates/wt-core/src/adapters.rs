@@ -50,6 +50,7 @@ pub struct Tool {
     pub sync_inputs: Vec<String>,
     pub seed: Vec<String>,
     pub env: IndexMap<String, String>,
+    pub commands: Vec<String>,
     pub task: IndexMap<String, Task>,
 }
 
@@ -80,6 +81,7 @@ pub struct AdapterHit {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AdapterContribution {
     pub env: IndexMap<String, String>,
+    pub commands: Vec<String>,
     pub seed: Vec<String>,
     pub sync_inputs: Vec<String>,
     pub requirements: Vec<String>,
@@ -193,6 +195,7 @@ pub fn contribution(hits: &[AdapterHit]) -> Result<AdapterContribution, CoreErro
         for (key, value) in &tool.env {
             output.env.insert(key.clone(), value.clone());
         }
+        append_unique(&mut output.commands, &tool.commands);
         append_unique(&mut output.seed, &tool.seed);
         append_unique(&mut output.sync_inputs, &tool.sync_inputs);
         if let Some(requirement) = &tool.requires {
@@ -213,6 +216,7 @@ pub fn apply_contribution(
             .env
             .insert(key.clone(), ValueOrFalse::Value(value.clone()));
     }
+    append_unique(&mut config.root.commands, &contribution.commands);
     for path in &contribution.seed {
         let path = RelPath::new(path)?;
         append_unique(&mut config.seed, std::slice::from_ref(&path));

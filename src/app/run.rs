@@ -5,7 +5,7 @@ use crate::cli::Run;
 use super::{door, executor, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Run) -> Result<Output, CoreError> {
-    let door = door::enter(context, args.target.as_deref(), "run", args.force_env)?;
+    let door = door::enter(context, args.target.as_deref(), "run")?;
     let notices = door.notices.clone();
     let plan = executor::plan(context, &door, &args.task)?;
     if args.dry_run {

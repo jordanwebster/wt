@@ -92,7 +92,7 @@ pub enum Command {
     Build(AliasRun),
     /// Run a one-shot command through a passthrough door.
     #[command(
-        override_help = "Run a one-shot command through a passthrough door.\n\nUsage: wt exec [OPTIONS] [TARGET] -- <CMD>...\n\nArguments:\n  [TARGET]  Registered tree target\n  <CMD>...  Command and arguments to execute\n\nOptions:\n      --force-env      Replace protected environment values\n      --yes            Consent without prompting\n      --quiet          Suppress optional notices\n      --verbose        Show notices when stderr is not a terminal\n      --color <COLOR>  Control coloured output [default: auto] [possible values: auto, always, never]\n      --home <DIR>     Use an alternate wt state directory\n  -h, --help           Print help\n\nPassthrough door; not a task (see `wt run`); no `--json` (A20).\n\nExample: wt exec project/feature -- env"
+        override_help = "Run a one-shot command through a passthrough door.\n\nUsage: wt exec [OPTIONS] [TARGET] -- <CMD>...\n\nArguments:\n  [TARGET]  Registered tree target\n  <CMD>...  Command and arguments to execute\n\nOptions:\n      --yes            Consent without prompting\n      --quiet          Suppress optional notices\n      --verbose        Show notices when stderr is not a terminal\n      --color <COLOR>  Control coloured output [default: auto] [possible values: auto, always, never]\n      --home <DIR>     Use an alternate wt state directory\n  -h, --help           Print help\n\nPassthrough door; not a task (see `wt run`); no `--json` (A20).\n\nExample: wt exec project/feature -- env"
     )]
     Exec(Exec),
     /// Start an interactive shell door.
@@ -266,8 +266,6 @@ pub struct Run {
     #[arg(long)]
     pub timeout: Option<String>,
     #[arg(long)]
-    pub force_env: bool,
-    #[arg(long)]
     pub dry_run: bool,
     #[arg(long)]
     pub no_log: bool,
@@ -282,8 +280,6 @@ pub struct AliasRun {
     #[arg(long)]
     pub timeout: Option<String>,
     #[arg(long)]
-    pub force_env: bool,
-    #[arg(long)]
     pub dry_run: bool,
     #[arg(long)]
     pub no_log: bool,
@@ -296,7 +292,6 @@ impl AliasRun {
             target: self.target,
             wait: self.wait,
             timeout: self.timeout,
-            force_env: self.force_env,
             dry_run: self.dry_run,
             no_log: self.no_log,
         }
@@ -315,8 +310,6 @@ pub struct Sync {
 #[command(after_help = "Example: wt exec project/feature -- sh -c 'env'")]
 pub struct Exec {
     pub target: Option<String>,
-    #[arg(long)]
-    pub force_env: bool,
     #[arg(long, hide = true)]
     pub no_gate: bool,
     #[arg(last = true, required = true, num_args = 1..)]
@@ -327,8 +320,6 @@ pub struct Exec {
 #[command(after_help = "Example: wt shell project/feature")]
 pub struct ShellDoor {
     pub target: Option<String>,
-    #[arg(long)]
-    pub force_env: bool,
 }
 
 #[derive(Debug, Args)]
@@ -342,8 +333,6 @@ pub struct Env {
     pub dotenv: bool,
     #[arg(long)]
     pub deactivate: bool,
-    #[arg(long)]
-    pub force_env: bool,
 }
 
 #[derive(Debug, Args)]

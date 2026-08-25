@@ -77,7 +77,7 @@ pub(crate) fn tree_report(
     );
     let identity_ok = exists && context.identity_ok(tree)?;
     if probe && identity_ok {
-        let mut entered = door::enter(context, Some(&target.to_string()), "probe", false)?;
+        let mut entered = door::enter(context, Some(&target.to_string()), "probe")?;
         executor::refresh_all_declarations(context, &entered)?;
         executor::probe_all_resources(context, &entered)?;
         entered.release_gate();

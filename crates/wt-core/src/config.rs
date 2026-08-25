@@ -63,19 +63,6 @@ impl Command {
             Self::Argv(argv) => argv,
         }
     }
-
-    fn references(&self) -> Result<BTreeSet<String>, CoreError> {
-        match self {
-            Self::Shell(shell) => Ok(template::shell_references(shell)),
-            Self::Argv(argv) => {
-                let mut references = BTreeSet::new();
-                for element in argv {
-                    references.extend(template::references(element)?);
-                }
-                Ok(references)
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -140,11 +127,28 @@ pub struct AdapterChoice {
 #[serde(default, deny_unknown_fields)]
 pub struct Scope {
     pub bin: Vec<RelPath>,
+    pub commands: Vec<String>,
+    pub vars: IndexMap<String, ValueOrFalse<String>>,
     pub env: IndexMap<String, ValueOrFalse<String>>,
     pub copy: Vec<RelPath>,
     pub files: IndexMap<String, ValueOrFalse<FileDef>>,
     pub task: IndexMap<String, ValueOrFalse<Task>>,
     pub adapters: IndexMap<String, AdapterChoice>,
+    #[serde(skip)]
+    pub locations: BTreeMap<String, SourceLocation>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SourceLocation {
+    pub path: String,
+    pub line: usize,
+    pub col: usize,
+}
+
+impl std::fmt::Display for SourceLocation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}:{}:{}", self.path, self.line, self.col)
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -183,15 +187,18 @@ pub enum Layer {
 pub struct EffectiveScope {
     pub dir: String,
     pub bin: Vec<RelPath>,
+    pub commands: Vec<String>,
+    pub vars: BTreeMap<String, String>,
     pub env: BTreeMap<String, String>,
     pub copy: Vec<RelPath>,
     pub files: BTreeMap<String, FileDef>,
     pub tasks: BTreeMap<String, Task>,
     pub adapters: BTreeMap<String, AdapterChoice>,
+    pub locations: BTreeMap<String, SourceLocation>,
 }
 
 pub fn parse(source: &str, path: &str) -> Result<Config, CoreError> {
-    let config: Config = toml::from_str(source).map_err(|error| {
+    let mut config: Config = toml::from_str(source).map_err(|error| {
         let span = error.span().unwrap_or(0..0);
         let before = &source[..span.start.min(source.len())];
         let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
@@ -203,8 +210,93 @@ pub fn parse(source: &str, path: &str) -> Result<Config, CoreError> {
             "fix the configuration error",
         )
     })?;
+    record_locations(&mut config, source, path);
     validate(&config)?;
     Ok(config)
+}
+
+fn record_locations(config: &mut Config, source: &str, path: &str) {
+    let mut section = Vec::<String>::new();
+    for (line_index, line) in source.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let body = trimmed.trim_matches('[').trim_matches(']');
+            section = split_toml_path(body);
+            continue;
+        }
+        let Some((raw_key, _)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = unquote(raw_key.trim());
+        let (scope, table) =
+            if section.first().map(String::as_str) == Some("dirs") && section.len() >= 2 {
+                let Some(scope) = config.dirs.get_mut(&section[1]) else {
+                    continue;
+                };
+                (scope, &section[2..])
+            } else {
+                (&mut config.root, section.as_slice())
+            };
+        let logical = match table {
+            [kind] if kind == "vars" => Some(format!("var:{key}")),
+            [kind] if kind == "env" => Some(format!("env:{key}")),
+            [kind, file] if kind == "files" && key == "content" => Some(format!("file:{file}")),
+            [kind, task]
+                if kind == "task"
+                    && matches!(key.as_str(), "name" | "run" | "exists" | "destroy") =>
+            {
+                Some(format!("task:{task}:{key}"))
+            }
+            [kind, task, env] if kind == "task" && env == "env" => {
+                Some(format!("task:{task}:env:{key}"))
+            }
+            _ => None,
+        };
+        if let Some(logical) = logical {
+            let expression_col = line
+                .find("${")
+                .map_or_else(|| line.len() - trimmed.len() + 1, |index| index + 1);
+            scope.locations.insert(
+                logical,
+                SourceLocation {
+                    path: path.to_owned(),
+                    line: line_index + 1,
+                    col: expression_col,
+                },
+            );
+        }
+    }
+}
+
+fn split_toml_path(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    for character in input.chars() {
+        match (quote, character) {
+            (None, '\'' | '"') => quote = Some(character),
+            (Some(active), value) if value == active => quote = None,
+            (None, '.') => parts.push(std::mem::take(&mut current)),
+            _ => current.push(character),
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+fn unquote(input: &str) -> String {
+    input
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+        .or_else(|| {
+            input
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .unwrap_or(input)
+        .to_owned()
 }
 
 pub fn validate(config: &Config) -> Result<(), CoreError> {
@@ -234,42 +326,85 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
     if config.ports.len() > usize::from(stride) {
         return Err(invalid("declared ports exceed the frozen geometry stride"));
     }
-    let allowed_wt: BTreeSet<String> = [
-        "WT_LABEL",
-        "WT_NAME",
-        "WT_NAME_SNAKE",
-        "WT_NAME_SHORT",
-        "WT_TARGET",
-        "WT_BRANCH",
-        "WT_ROOT",
-        "WT_REPO",
-        "WT_HOME",
-        "WT_SLOT",
-        "WT_PORT_BASE",
-        "WT_SESSION",
-        "WT_BIN",
-        "WT_ACTIVATION",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .chain(
-        config
-            .ports
+    let ports = config
+        .ports
+        .iter()
+        .map(|port| port.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let functions = template::FunctionValues {
+        simple: template::FUNCTIONS
             .iter()
-            .map(|port| format!("WT_PORT_{}", port.as_str().to_ascii_uppercase())),
-    )
-    .collect();
+            .filter(|name| **name != "port")
+            .map(|name| ((*name).to_owned(), String::new()))
+            .collect(),
+        ports: ports
+            .iter()
+            .map(|name| (name.clone(), String::new()))
+            .collect(),
+    };
     for dir in std::iter::once(".").chain(config.dirs.keys().map(String::as_str)) {
         let effective = effective_scope(config, dir)?;
-        let aliases: BTreeSet<_> = effective.env.keys().map(String::as_str).collect();
+        validate_var_graph(&effective.vars, &ports, &effective.locations)?;
+        let resolved_vars = template::resolve_vars(&effective.vars, &functions)?;
         for (key, value) in &effective.env {
-            for reference in template::references(value)? {
-                if aliases.contains(reference.as_str()) {
-                    return Err(invalid(format!(
-                        "ALIAS_REFERENCES_ALIAS: `{key}` references `{reference}`"
-                    )));
+            validate_template_value(
+                value,
+                &effective.vars,
+                &ports,
+                effective.locations.get(&format!("env:{key}")),
+            )?;
+        }
+        for (path, file) in &effective.files {
+            if let Some(content) = &file.content {
+                validate_template_value(
+                    content,
+                    &effective.vars,
+                    &ports,
+                    effective.locations.get(&format!("file:{path}")),
+                )?;
+            }
+        }
+        for (task_id, task) in &effective.tasks {
+            if let Some(name) = &task.name {
+                validate_template_value(
+                    name,
+                    &effective.vars,
+                    &ports,
+                    effective.locations.get(&format!("task:{task_id}:name")),
+                )?;
+            }
+            for (key, value) in &task.env {
+                validate_template_value(
+                    value,
+                    &effective.vars,
+                    &ports,
+                    effective
+                        .locations
+                        .get(&format!("task:{task_id}:env:{key}")),
+                )?;
+            }
+            let context = template::Context {
+                vars: &resolved_vars,
+                functions: &functions,
+            };
+            for command in [
+                task.run.as_ref(),
+                task.exists.as_ref(),
+                task.destroy.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                match command {
+                    Command::Shell(shell) => {
+                        template::expand_shell(shell, &context)?;
+                    }
+                    Command::Argv(argv) => {
+                        for value in argv {
+                            validate_template_value(value, &effective.vars, &ports, None)?;
+                        }
+                    }
                 }
-                validate_wt_reference(&reference, &allowed_wt, false)?;
             }
         }
         if effective
@@ -282,62 +417,10 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                 "copy or seed entries may not also be rendered files",
             ));
         }
-    }
-    for scope in std::iter::once(&config.root).chain(config.dirs.values()) {
-        for file in scope.files.values().filter_map(ValueOrFalse::value) {
-            if let Some(content) = &file.content {
-                for reference in template::references(content)? {
-                    validate_wt_reference(&reference, &allowed_wt, false)?;
-                }
-            }
-        }
-        for task in scope.task.values().filter_map(ValueOrFalse::value) {
-            let task_keys: BTreeSet<_> = task.env.keys().map(String::as_str).collect();
-            for (key, value) in &task.env {
-                if let Some(reference) = template::references(value)?
-                    .into_iter()
-                    .find(|reference| reference != key && task_keys.contains(reference.as_str()))
-                {
-                    return Err(invalid(format!(
-                        "TASK_ENV_SELF_REFERENCE: `{key}` references `{reference}`"
-                    )));
-                }
-            }
-            for command in [
-                task.run.as_ref(),
-                task.exists.as_ref(),
-                task.destroy.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                for reference in command.references()? {
-                    validate_wt_reference(&reference, &allowed_wt, true)?;
-                }
-            }
-            for text in task.name.iter().chain(task.env.values()) {
-                for reference in template::references(text)? {
-                    validate_wt_reference(&reference, &allowed_wt, true)?;
-                }
-            }
-        }
-    }
-    let tree_specific = [
-        "WT_ROOT",
-        "WT_TARGET",
-        "WT_NAME",
-        "WT_NAME_SNAKE",
-        "WT_NAME_SHORT",
-        "WT_SLOT",
-        "WT_PORT_BASE",
-        "WT_SESSION",
-        "WT_BIN",
-        "PATH",
-    ];
-    for scope in std::iter::once(&config.root).chain(config.dirs.values()) {
-        for task in scope.task.values().filter_map(ValueOrFalse::value) {
+        for task in effective.tasks.values() {
             if task.tied_to == Some(TiedTo::Repo) {
-                let mut references = BTreeSet::new();
+                let mut calls = BTreeSet::new();
+                let mut legacy_references = BTreeSet::new();
                 for command in [
                     task.run.as_ref(),
                     task.exists.as_ref(),
@@ -346,16 +429,50 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                 .into_iter()
                 .flatten()
                 {
-                    references.extend(command.references()?);
+                    match command {
+                        Command::Shell(shell) => {
+                            legacy_references.extend(template::shell_references(shell));
+                            calls.extend(shell_template_calls(shell)?);
+                        }
+                        Command::Argv(argv) => {
+                            for value in argv {
+                                calls.extend(template::calls(value)?);
+                            }
+                        }
+                    }
                 }
                 for text in task.name.iter().chain(task.env.values()) {
-                    references.extend(template::references(text)?);
+                    calls.extend(template::calls(text)?);
                 }
-                if references.iter().any(|name| {
-                    name.starts_with("WT_PORT_") || tree_specific.contains(&name.as_str())
-                }) {
+                let tree_call = calls.iter().any(|call| {
+                    matches!(
+                        call.name(),
+                        "root"
+                            | "branch"
+                            | "name"
+                            | "name_snake"
+                            | "name_short"
+                            | "target"
+                            | "port"
+                    )
+                });
+                let legacy_tree_reference = legacy_references.iter().any(|name| {
+                    matches!(
+                        name.as_str(),
+                        "WT_ROOT"
+                            | "WT_TARGET"
+                            | "WT_NAME"
+                            | "WT_NAME_SNAKE"
+                            | "WT_NAME_SHORT"
+                            | "WT_SLOT"
+                            | "WT_SESSION"
+                            | "WT_BIN"
+                            | "PATH"
+                    ) || name.starts_with("WT_PORT_")
+                });
+                if tree_call || legacy_tree_reference {
                     return Err(invalid(
-                        "repo-tied resource references a tree-specific variable",
+                        "repo-tied resource references a tree-specific template function",
                     ));
                 }
             }
@@ -364,7 +481,153 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
     Ok(())
 }
 
+fn validate_template_value(
+    value: &str,
+    vars: &BTreeMap<String, String>,
+    ports: &BTreeSet<String>,
+    location: Option<&SourceLocation>,
+) -> Result<(), CoreError> {
+    template::validate_calls(value, ports).map_err(|error| located(error, location))?;
+    for reference in template::references(value)? {
+        if !vars.contains_key(&reference) {
+            return Err(located(
+                CoreError::new(
+                    ExitClass::State,
+                    "VARS_UNKNOWN",
+                    format!("unknown vars name `{reference}`"),
+                    "declare the variable in `vars` or correct the reference",
+                ),
+                location,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_var_graph(
+    vars: &BTreeMap<String, String>,
+    ports: &BTreeSet<String>,
+    locations: &BTreeMap<String, SourceLocation>,
+) -> Result<(), CoreError> {
+    fn visit(
+        key: &str,
+        vars: &BTreeMap<String, String>,
+        ports: &BTreeSet<String>,
+        locations: &BTreeMap<String, SourceLocation>,
+        complete: &mut BTreeSet<String>,
+        active: &mut Vec<String>,
+    ) -> Result<(), CoreError> {
+        if complete.contains(key) {
+            return Ok(());
+        }
+        if let Some(start) = active.iter().position(|candidate| candidate == key) {
+            let mut cycle = active[start..].to_vec();
+            cycle.sort();
+            cycle.dedup();
+            let involved = cycle
+                .iter()
+                .map(|name| format_involved(name, locations.get(&format!("var:{name}"))))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(CoreError::new(
+                ExitClass::State,
+                "VARS_CYCLE",
+                format!("vars cycle involves {involved}"),
+                "break the cycle in `vars`",
+            ));
+        }
+        let value = &vars[key];
+        let location = locations.get(&format!("var:{key}"));
+        template::validate_calls(value, ports).map_err(|error| located(error, location))?;
+        active.push(key.to_owned());
+        for reference in template::references(value)? {
+            if !vars.contains_key(&reference) {
+                return Err(located(
+                    CoreError::new(
+                        ExitClass::State,
+                        "VARS_UNKNOWN",
+                        format!(
+                            "vars `{key}` references unknown name `{reference}`; involved: {}",
+                            format_involved(key, location)
+                        ),
+                        "declare the variable in `vars` or correct the reference",
+                    ),
+                    location,
+                ));
+            }
+            visit(&reference, vars, ports, locations, complete, active)?;
+        }
+        active.pop();
+        complete.insert(key.to_owned());
+        Ok(())
+    }
+
+    let mut complete = BTreeSet::new();
+    for key in vars.keys() {
+        visit(key, vars, ports, locations, &mut complete, &mut Vec::new())?;
+    }
+    Ok(())
+}
+
+fn format_involved(name: &str, location: Option<&SourceLocation>) -> String {
+    location.map_or_else(
+        || format!("`{name}`"),
+        |location| format!("`{name}` at {location}"),
+    )
+}
+
+fn located(mut error: CoreError, location: Option<&SourceLocation>) -> CoreError {
+    if let Some(location) = location {
+        error.message = format!("{location}: {}", error.message);
+    }
+    error
+}
+
+fn shell_template_calls(shell: &str) -> Result<BTreeSet<template::Call>, CoreError> {
+    let mut calls = BTreeSet::new();
+    let mut rest = shell;
+    while let Some(start) = rest.find("${") {
+        rest = &rest[start..];
+        let Some(close) = rest.find('}') else {
+            break;
+        };
+        let candidate = &rest[..=close];
+        if let Ok(found) = template::calls(candidate) {
+            calls.extend(found);
+        }
+        rest = &rest[close + 1..];
+    }
+    Ok(calls)
+}
+
 fn validate_scope(scope: &Scope) -> Result<(), CoreError> {
+    let mut commands = BTreeSet::new();
+    for command in &scope.commands {
+        if command.is_empty()
+            || command.contains('/')
+            || command.contains('\0')
+            || !commands.insert(command)
+        {
+            return Err(invalid(
+                "commands entries must be unique, non-empty basenames without NUL",
+            ));
+        }
+    }
+    for (key, value) in &scope.vars {
+        if !valid_var_key(key) {
+            return Err(invalid(format!(
+                "vars key `{key}` must match [a-z_][a-z0-9_]*"
+            )));
+        }
+        if template::FUNCTIONS.contains(&key.as_str()) {
+            return Err(invalid(format!(
+                "vars key `{key}` collides with a template function"
+            )));
+        }
+        if let Some(value) = value.value() {
+            template::validate(value)?;
+        }
+    }
     for key in scope.env.keys() {
         EnvKey::new(key)?;
         if key == "PATH" {
@@ -399,6 +662,12 @@ fn validate_scope(scope: &Scope) -> Result<(), CoreError> {
         }
     }
     Ok(())
+}
+
+fn valid_var_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(ch) if ch.is_ascii_lowercase() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn validate_task(task: &Task) -> Result<(), CoreError> {
@@ -473,21 +742,6 @@ fn validate_materialized_overlap(scope: &Scope, seed: &[RelPath]) -> Result<(), 
     Ok(())
 }
 
-fn validate_wt_reference(
-    reference: &str,
-    allowed: &BTreeSet<String>,
-    task_context: bool,
-) -> Result<(), CoreError> {
-    if !reference.starts_with("WT_") {
-        return Ok(());
-    }
-    if allowed.contains(reference) || (task_context && matches!(reference, "WT_SELF" | "WT_TASK")) {
-        Ok(())
-    } else {
-        Err(invalid(format!("unknown tool variable `{reference}`")))
-    }
-}
-
 fn is_mode(value: &str) -> bool {
     value.len() == 4 && value.starts_with('0') && value.chars().all(|ch| ('0'..='7').contains(&ch))
 }
@@ -533,7 +787,10 @@ pub fn merge(layers: &[(Layer, Config)]) -> Config {
 
 fn merge_scope(target: &mut Scope, source: &Scope) {
     merge_bins(&mut target.bin, &source.bin);
+    append_unique(&mut target.commands, &source.commands);
+    target.commands.sort();
     append_unique(&mut target.copy, &source.copy);
+    merge_deletable(&mut target.vars, &source.vars);
     merge_deletable(&mut target.env, &source.env);
     merge_deletable(&mut target.files, &source.files);
     merge_deletable(&mut target.task, &source.task);
@@ -546,6 +803,7 @@ fn merge_scope(target: &mut Scope, source: &Scope) {
             current.disabled = choice.disabled;
         }
     }
+    target.locations.extend(source.locations.clone());
 }
 
 fn merge_deletable<T: Clone>(
@@ -597,6 +855,12 @@ pub fn effective_scope(config: &Config, cwd: &str) -> Result<EffectiveScope, Cor
     chain.reverse();
     let mut output = EffectiveScope {
         dir: cwd.to_owned(),
+        commands: std::iter::once(&config.root)
+            .chain(config.dirs.values())
+            .flat_map(|scope| scope.commands.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         ..EffectiveScope::default()
     };
     for dir in chain {
@@ -607,12 +871,14 @@ pub fn effective_scope(config: &Config, cwd: &str) -> Result<EffectiveScope, Cor
         };
         merge_bins(&mut output.bin, &scope.bin);
         append_unique(&mut output.copy, &scope.copy);
+        apply_values(&mut output.vars, &scope.vars);
         apply_values(&mut output.env, &scope.env);
         apply_values(&mut output.files, &scope.files);
         apply_values(&mut output.tasks, &scope.task);
         for (id, choice) in &scope.adapters {
             output.adapters.insert(id.clone(), choice.clone());
         }
+        output.locations.extend(scope.locations.clone());
     }
     Ok(output)
 }
@@ -738,14 +1004,14 @@ mod tests {
     }
 
     #[test]
-    fn resolved_validation_rejects_alias_chains_and_repo_tree_variables() {
-        let chained = parse("[env]\nA='$B'\nB='value'", "x").unwrap();
-        assert!(validate_resolved(&chained, 16)
-            .unwrap_err()
-            .message
-            .contains("ALIAS_REFERENCES_ALIAS"));
+    fn resolved_validation_treats_env_names_as_vars_and_rejects_repo_tree_functions() {
+        let chained = parse("[env]\nA='${B}'\nB='value'", "x").unwrap();
+        assert_eq!(
+            validate_resolved(&chained, 16).unwrap_err().code.0,
+            "VARS_UNKNOWN"
+        );
         let repo = parse(
-            "[task.db]\ntied_to='repo'\nexists='test -e $WT_ROOT'\ndestroy='drop'",
+            "[task.db]\ntied_to='repo'\nexists='test -e ${root()}'\ndestroy='drop'",
             "x",
         )
         .unwrap();
@@ -768,26 +1034,26 @@ mod tests {
     #[test]
     fn resolved_validation_applies_every_scope_sensitive_row() {
         let task_cycle = parse(
-            "[dirs.sub.task.t]\nrun='true'\n[dirs.sub.task.t.env]\nA='$B'\nB='one'",
+            "[dirs.sub.task.t]\nrun='true'\n[dirs.sub.task.t.env]\nA='${missing}'\nB='one'",
             "x",
         )
         .unwrap();
-        assert!(validate_resolved(&task_cycle, 16)
-            .unwrap_err()
-            .message
-            .contains("TASK_ENV_SELF_REFERENCE"));
+        assert_eq!(
+            validate_resolved(&task_cycle, 16).unwrap_err().code.0,
+            "VARS_UNKNOWN"
+        );
 
-        let alias = parse("[dirs.sub.env]\nA='$B'\nB='one'", "x").unwrap();
-        assert!(validate_resolved(&alias, 16)
-            .unwrap_err()
-            .message
-            .contains("ALIAS_REFERENCES_ALIAS"));
+        let alias = parse("[dirs.sub.env]\nA='${B}'\nB='one'", "x").unwrap();
+        assert_eq!(
+            validate_resolved(&alias, 16).unwrap_err().code.0,
+            "VARS_UNKNOWN"
+        );
 
-        let unknown = parse("[dirs.sub.env]\nA='$WT_NONSENSE'", "x").unwrap();
+        let unknown = parse("[dirs.sub.env]\nA='${nonsense}'", "x").unwrap();
         assert!(validate_resolved(&unknown, 16)
             .unwrap_err()
             .message
-            .contains("WT_NONSENSE"));
+            .contains("nonsense"));
 
         assert!(parse(
             "[dirs.sub]\ncopy=['generated']\n[dirs.sub.files.generated]\ncontent='x'",
@@ -813,5 +1079,60 @@ mod tests {
         assert!(parse("[files.generated]\ncontent='x'\nmode='644'", "x").is_err());
         assert!(parse("[task.t]\nrun='true'\ntimeout='soon'", "x").is_err());
         assert!(parse("[task.t]\nrun='true'\nready_within='1s'", "x").is_err());
+    }
+
+    #[test]
+    fn commands_are_a_sorted_union_across_layers_and_all_scopes() {
+        let repo = parse(
+            "commands=['zeta','alpha']\n[dirs.sub]\ncommands=['nested']",
+            "repo/.wt.toml",
+        )
+        .unwrap();
+        let overlay = parse("commands=['alpha','beta']", "repo/.wt/config.toml").unwrap();
+        let merged = merge(&[(Layer::Repo, repo), (Layer::Tree, overlay)]);
+        assert_eq!(
+            effective_scope(&merged, ".").unwrap().commands,
+            ["alpha", "beta", "nested", "zeta"]
+        );
+        assert_eq!(
+            effective_scope(&merged, "sub").unwrap().commands,
+            ["alpha", "beta", "nested", "zeta"]
+        );
+    }
+
+    #[test]
+    fn vars_failures_name_every_involved_key_with_source_locations() {
+        let cycle = parse(
+            "[vars]\nfirst='${second}'\nsecond='${first}'",
+            "repo/.wt.toml",
+        )
+        .unwrap();
+        let error = validate_resolved(&cycle, 16).unwrap_err();
+        assert_eq!(error.code.0, "VARS_CYCLE");
+        assert!(error.message.contains("`first` at repo/.wt.toml:2:"));
+        assert!(error.message.contains("`second` at repo/.wt.toml:3:"));
+
+        let unknown = parse("[vars]\nknown='${missing}'", "repo/.wt.toml").unwrap();
+        let error = validate_resolved(&unknown, 16).unwrap_err();
+        assert_eq!(error.code.0, "VARS_UNKNOWN");
+        assert!(error.message.contains("missing"));
+        assert!(error.message.contains("repo/.wt.toml:2:"));
+    }
+
+    #[test]
+    fn unknown_functions_and_ports_name_the_call_and_location() {
+        for (source, call) in [
+            ("[env]\nA='${mystery()}'", "mystery()"),
+            (
+                "ports=['http']\n[env]\nA=\"${port('admin')}\"",
+                "port('admin')",
+            ),
+        ] {
+            let config = parse(source, "repo/.wt.toml").unwrap();
+            let error = validate_resolved(&config, 16).unwrap_err();
+            assert_eq!(error.code.0, "CONFIG_INVALID");
+            assert!(error.message.contains(call));
+            assert!(error.message.contains("repo/.wt.toml:"));
+        }
     }
 }

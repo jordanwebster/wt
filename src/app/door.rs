@@ -7,7 +7,7 @@ use wt_core::env::{EnvInputs, EnvOutput};
 use wt_core::lifecycle::{DerivedPhase, Materialized, MaterializedKind, TreeState};
 use wt_core::model::{RelPath, Target, TreeIdentity, TreeRec};
 use wt_core::render::{Decision as RenderDecision, RenderRecord};
-use wt_core::report::{Notice, NoticeGuidance, NoticeLevel};
+use wt_core::report::{Notice, NoticeLevel};
 use wt_core::resource::ResourceState;
 use wt_core::{CoreError, ExitClass};
 use wt_sys::lock::{self, DoorToken, Mode, TreeToken};
@@ -28,7 +28,6 @@ pub(crate) struct Door {
 }
 
 struct PrepareOptions {
-    force_env: bool,
     check_all_tracked: bool,
     append_ports: bool,
     tree_token: Option<TreeToken>,
@@ -54,11 +53,7 @@ impl Door {
 
     pub fn emit_notices(&self, context: &Context) {
         for notice in &self.notices {
-            if notice.code == "BIN_DIR_MISSING" {
-                if let Some(next) = notice.next_step() {
-                    eprintln!("  next  {next}");
-                }
-            } else if !context.quiet && (context.tty.stderr || context.verbose) {
+            if !context.quiet && (context.tty.stderr || context.verbose) {
                 eprintln!("wt: {} — {}", notice.code, notice.message);
             }
         }
@@ -69,7 +64,6 @@ pub(crate) fn enter(
     context: &mut Context,
     address: Option<&str>,
     verb: &str,
-    force_env: bool,
 ) -> Result<Door, CoreError> {
     let target = context.resolve(address)?;
     let tree = context.tree(&target)?;
@@ -120,7 +114,6 @@ pub(crate) fn enter(
         tree,
         &holder,
         PrepareOptions {
-            force_env,
             check_all_tracked: false,
             append_ports: true,
             tree_token: Some(tree_token),
@@ -147,7 +140,6 @@ pub(crate) fn enter_held(
     context: &mut Context,
     tree: TreeRec,
     verb: &str,
-    force_env: bool,
     check_all_tracked: bool,
 ) -> Result<Door, CoreError> {
     let target = target_of(&tree);
@@ -159,7 +151,6 @@ pub(crate) fn enter_held(
         tree,
         &holder,
         PrepareOptions {
-            force_env,
             check_all_tracked,
             append_ports: true,
             tree_token: None,
@@ -184,7 +175,6 @@ pub(crate) fn repair_held(
         tree,
         &holder,
         PrepareOptions {
-            force_env: false,
             check_all_tracked: true,
             append_ports: false,
             tree_token: None,
@@ -202,7 +192,6 @@ fn prepare(
     options: PrepareOptions,
 ) -> Result<Door, CoreError> {
     let PrepareOptions {
-        force_env,
         check_all_tracked,
         append_ports,
         tree_token,
@@ -259,7 +248,6 @@ fn prepare(
         parent: &context.parent_env,
         existing_dirs: &existing_dirs,
         file_sources: &file_sources,
-        force_env,
     })?;
     render(
         context,
@@ -269,7 +257,8 @@ fn prepare(
         state.as_ref(),
         check_all_tracked,
     )?;
-    let notices = env_notices(&target, &env, effective.tasks.contains_key("build"));
+    materialize_shims(Path::new(tree.path.as_str()), &effective.commands)?;
+    let notices = env_notices(&target, &env);
     context.pending_notices.extend(notices.clone());
     let cwd = door_cwd(context, &tree);
     Ok(Door {
@@ -283,6 +272,60 @@ fn prepare(
         tree_token,
         door_token,
     })
+}
+
+fn materialize_shims(root: &Path, commands: &[String]) -> Result<(), CoreError> {
+    let directory = root.join(".wt/shims");
+    let declared = commands.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    for path in wt_sys::fsx::read_dir_paths(&directory)? {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                CoreError::new(
+                    ExitClass::State,
+                    "SHIM_CONFLICT",
+                    format!("shim path `{}` is not UTF-8", path.display()),
+                    "remove the conflicting path and retry",
+                )
+            })?;
+        if declared.contains(name) {
+            continue;
+        }
+        if wt_sys::fsx::path_kind(&path)? != wt_sys::fsx::PathKind::Symlink {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "SHIM_CONFLICT",
+                format!("refusing to remove non-symlink `{}`", path.display()),
+                "move the conflicting path out of `.wt/shims` and retry",
+            ));
+        }
+        wt_sys::fsx::remove_path(&path)?;
+    }
+    if commands.is_empty() {
+        wt_sys::fsx::remove_empty_dir(&directory)?;
+        return Ok(());
+    }
+    let binary = std::env::current_exe().map_err(|error| {
+        CoreError::new(
+            ExitClass::Internal,
+            "SELF_UNRESOLVED",
+            format!("cannot resolve the running wt binary: {error}"),
+            "invoke wt through an absolute executable path and retry",
+        )
+    })?;
+    if !binary.is_absolute() {
+        return Err(CoreError::new(
+            ExitClass::Internal,
+            "SELF_UNRESOLVED",
+            format!("running wt binary `{}` is not absolute", binary.display()),
+            "invoke wt through an absolute executable path and retry",
+        ));
+    }
+    for command in commands {
+        wt_sys::fsx::replace_symlink(&directory.join(command), &binary)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn present_resource_env(
@@ -328,24 +371,9 @@ fn present_resource_env_from(
     Ok(contributed)
 }
 
-fn env_notices(target: &Target, output: &EnvOutput, has_build_task: bool) -> Vec<Notice> {
+fn env_notices(target: &Target, output: &EnvOutput) -> Vec<Notice> {
     let subject = Some(target.to_string());
-    let mut notices = output
-        .report
-        .missing_bins
-        .iter()
-        .map(|path| Notice {
-            level: NoticeLevel::Warn,
-            code: "BIN_DIR_MISSING".to_owned(),
-            subject: subject.clone(),
-            message: format!("declared bin directory {path} is missing"),
-            guidance: Some(NoticeGuidance::MissingBin {
-                target: target.to_string(),
-                path: path.clone(),
-                has_build_task,
-            }),
-        })
-        .collect::<Vec<_>>();
+    let mut notices = Vec::new();
     if output.report.activation_ignored {
         notices.push(Notice {
             level: NoticeLevel::Warn,
@@ -355,13 +383,6 @@ fn env_notices(target: &Target, output: &EnvOutput, has_build_task: bool) -> Vec
             guidance: None,
         });
     }
-    notices.extend(output.report.kept.iter().map(|key| Notice {
-        level: NoticeLevel::Info,
-        code: "ENV_KEPT".to_owned(),
-        subject: subject.clone(),
-        message: format!("kept the caller's value for {key}"),
-        guidance: None,
-    }));
     notices.sort_by(|left, right| {
         (&left.level, &left.code, &left.subject, &left.message).cmp(&(
             &right.level,

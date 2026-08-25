@@ -116,7 +116,6 @@ pub struct EnvInputs<'a> {
     pub parent: &'a EnvMap,
     pub existing_dirs: &'a BTreeSet<String>,
     pub file_sources: &'a BTreeMap<String, String>,
-    pub force_env: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -131,7 +130,6 @@ pub struct Render {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EnvReport {
-    pub kept: Vec<String>,
     pub set: Vec<String>,
     pub overrode: Vec<String>,
     pub missing_bins: Vec<String>,
@@ -147,6 +145,8 @@ pub struct EnvOutput {
     pub activation_json: String,
     pub render: Vec<Render>,
     pub report: EnvReport,
+    pub vars: BTreeMap<String, String>,
+    pub functions: template::FunctionValues,
 }
 
 struct Assembly {
@@ -155,18 +155,16 @@ struct Assembly {
     applied: BTreeMap<String, String>,
     prior: BTreeMap<String, Option<String>>,
     report: EnvReport,
-    force: bool,
 }
 
 impl Assembly {
-    fn new(clean: EnvMap, report: EnvReport, force: bool) -> Self {
+    fn new(clean: EnvMap, report: EnvReport) -> Self {
         Self {
             env: clean.clone(),
             clean,
             applied: BTreeMap::new(),
             prior: BTreeMap::new(),
             report,
-            force,
         }
     }
 
@@ -186,10 +184,6 @@ impl Assembly {
         if key == "PATH" {
             return;
         }
-        if self.clean.contains_key(key) && !self.force {
-            self.report.kept.push(key.to_owned());
-            return;
-        }
         self.set(key, value);
         if self.clean.contains_key(key) {
             self.report.overrode.push(key.to_owned());
@@ -207,7 +201,7 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
         ..EnvReport::default()
     };
 
-    let mut state = Assembly::new(deactivated.clean, report, input.force_env);
+    let mut state = Assembly::new(deactivated.clean, report);
 
     let target = input.tree.target().to_string();
     let tool = BTreeMap::from([
@@ -224,10 +218,6 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
         ("WT_REPO".to_owned(), input.tree.repo.clone()),
         ("WT_HOME".to_owned(), input.home.to_owned()),
         ("WT_SLOT".to_owned(), input.tree.slot.to_string()),
-        (
-            "WT_PORT_BASE".to_owned(),
-            input.tree.geometry.port_base.to_string(),
-        ),
         ("WT_SESSION".to_owned(), input.tree.session_name.clone()),
     ]);
     for (key, value) in &tool {
@@ -248,6 +238,7 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
             "delete the corrupt registry and re-register the affected checkouts",
         ));
     }
+    let mut port_values = BTreeMap::new();
     for (port_name, index) in &input.tree.ports {
         let port_value = u32::from(input.tree.geometry.port_base)
             .checked_add(u32::from(*index))
@@ -260,10 +251,7 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
                     "inspect the registry backup and run `wt doctor`",
                 )
             })?;
-        state.set(
-            format!("WT_PORT_{}", port_name.as_str().to_ascii_uppercase()),
-            port_value.to_string(),
-        );
+        port_values.insert(port_name.as_str().to_owned(), port_value.to_string());
     }
 
     let bins: Vec<String> = input
@@ -284,9 +272,11 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
         }
     }
     let parent_path = state.clean.get("PATH").cloned().unwrap_or_default();
-    let path = bins
-        .iter()
-        .cloned()
+    let shims = (!input.cfg.commands.is_empty())
+        .then(|| format!("{}/.wt/shims", input.tree.root.trim_end_matches('/')));
+    let path = shims
+        .into_iter()
+        .chain(bins.iter().cloned())
         .chain((!parent_path.is_empty()).then_some(parent_path))
         .collect::<Vec<_>>()
         .join(":");
@@ -302,24 +292,40 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
         }
     }
 
-    // SPEC §8.2 freezes alias expansion before aliases are applied so map order cannot create dependencies.
-    let mut context = state.clean.clone();
-    for (key, value) in &state.applied {
-        context.insert(key.clone(), value.clone());
-    }
+    let functions = template::FunctionValues {
+        simple: BTreeMap::from([
+            ("root".to_owned(), input.tree.root.clone()),
+            ("repo".to_owned(), input.tree.repo.clone()),
+            (
+                "branch".to_owned(),
+                input.tree.branch.clone().unwrap_or_default(),
+            ),
+            ("label".to_owned(), input.tree.label.to_string()),
+            ("name".to_owned(), input.tree.name.clone()),
+            ("name_snake".to_owned(), name_snake(&input.tree.name)),
+            ("name_short".to_owned(), input.tree.name_short.clone()),
+            ("target".to_owned(), target.clone()),
+        ]),
+        ports: port_values,
+    };
+    let vars = template::resolve_vars(&input.cfg.vars, &functions)?;
+    let template_context = template::Context {
+        vars: &vars,
+        functions: &functions,
+    };
     for (key, value) in &input.cfg.env {
-        let value = template::expand(value, &context)?;
+        let value = template::expand(value, &template_context)?;
         state.alias(key, value);
     }
 
     if let Some(task) = input.task {
         state.set("WT_TASK", task.id);
         if let Some(name) = task.resource_name {
-            let value = template::expand(&name, &state.env)?;
+            let value = template::expand(&name, &template_context)?;
             state.set("WT_SELF", value);
         }
         for (key, value) in task.env {
-            let value = template::expand(&value, &state.env)?;
+            let value = template::expand(&value, &template_context)?;
             state.set(key, value);
         }
     }
@@ -352,7 +358,7 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
     let mut render = Vec::new();
     for (path, file) in &input.cfg.files {
         let source = file_text(file, input.file_sources)?;
-        let body = template::expand(source, &env)?;
+        let body = template::expand(source, &template_context)?;
         let header = (!file.marker.is_empty()).then(|| {
             format!(
                 "{} generated by wt for {target}. If you edit this file, wt stops re-rendering it; delete it to let wt regenerate it, or set files.\"{path}\" = false in .wt/config.toml",
@@ -376,6 +382,8 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
         activation_json,
         render,
         report,
+        vars,
+        functions,
     })
 }
 
@@ -409,7 +417,6 @@ fn file_text<'a>(
 
 fn sort_report(report: &mut EnvReport) {
     for values in [
-        &mut report.kept,
         &mut report.set,
         &mut report.overrode,
         &mut report.missing_bins,
@@ -450,10 +457,10 @@ mod tests {
         }
     }
 
-    fn output(parent: &EnvMap, name: &str, force: bool, task: Option<TaskContext>) -> EnvOutput {
+    fn output(parent: &EnvMap, name: &str, task: Option<TaskContext>) -> EnvOutput {
         let mut cfg = EffectiveScope::default();
         cfg.env
-            .insert("PORT".to_owned(), "$WT_PORT_HTTP".to_owned());
+            .insert("PORT".to_owned(), "${port('http')}".to_owned());
         cfg.bin.push(RelPath::new("bin").unwrap());
         let tree = tree(name, if name == "a" { 20_016 } else { 20_032 });
         assemble(EnvInputs {
@@ -465,7 +472,6 @@ mod tests {
             parent,
             existing_dirs: &BTreeSet::new(),
             file_sources: &BTreeMap::new(),
-            force_env: force,
         })
         .unwrap()
     }
@@ -476,7 +482,6 @@ mod tests {
             path in proptest::option::of(prop_oneof![Just("".to_owned()), "[a-z/:]{0,30}"]),
             preset_target in proptest::option::of("[a-z]{0,8}"),
             preset_alias in proptest::option::of("[0-9]{1,5}"),
-            force in any::<bool>(),
             task_door in any::<bool>(),
         ) {
             let mut parent = EnvMap::new();
@@ -488,7 +493,7 @@ mod tests {
                 env: BTreeMap::from([("TASK_KEY".to_owned(), "owned".to_owned())]),
                 resource_name: None,
             });
-            let activated = output(&parent, "a", force, task);
+            let activated = output(&parent, "a", task);
             prop_assert_eq!(deactivate(&activated.env).unwrap().clean, parent);
         }
 
@@ -497,7 +502,6 @@ mod tests {
             parent_path in proptest::option::of("[a-z/:]{0,30}"),
             preset_alias in proptest::option::of("[0-9]{1,5}"),
             preset_coordinate in proptest::option::of("[a-z]{0,8}"),
-            force in any::<bool>(),
             task_door in any::<bool>(),
         ) {
             let mut parent = EnvMap::new();
@@ -509,10 +513,10 @@ mod tests {
                 env: BTreeMap::from([("TASK_KEY".to_owned(), "owned".to_owned())]),
                 resource_name: None,
             });
-            let first = output(&parent, "a", force, task.clone());
+            let first = output(&parent, "a", task.clone());
             prop_assert_eq!(
-                output(&first.env, "b", force, task.clone()).env,
-                output(&parent, "b", force, task).env
+                output(&first.env, "b", task.clone()).env,
+                output(&parent, "b", task).env
             );
         }
 
@@ -522,7 +526,7 @@ mod tests {
             edit_alias in any::<bool>(),
         ) {
             let parent = EnvMap::from([("UNRELATED".to_owned(), "leave".to_owned())]);
-            let mut activated = output(&parent, "a", false, None).env;
+            let mut activated = output(&parent, "a", None).env;
             if edit_coordinate { activated.insert("WT_TARGET".to_owned(), "edited".to_owned()); }
             if edit_alias { activated.insert("PORT".to_owned(), "edited".to_owned()); }
             let metadata: Activation =
@@ -570,10 +574,10 @@ mod tests {
             env: BTreeMap::from([("TASK_KEY".to_owned(), "owned".to_owned())]),
             resource_name: None,
         };
-        let mut activated = output(&EnvMap::new(), "a", false, Some(task.clone())).env;
+        let mut activated = output(&EnvMap::new(), "a", Some(task.clone())).env;
         activated.insert("WT_TARGET".to_owned(), "edited".to_owned());
         activated.insert("TASK_KEY".to_owned(), "edited".to_owned());
-        let next = output(&activated, "b", false, Some(task));
+        let next = output(&activated, "b", Some(task));
         assert_eq!(next.env["WT_TARGET"], "repo/b");
         assert_eq!(next.env["TASK_KEY"], "owned");
         assert!(next.report.restored.contains(&"WT_TARGET".to_owned()));
@@ -582,10 +586,10 @@ mod tests {
 
     #[test]
     fn activation_json_is_compact_with_recursively_sorted_keys() {
-        let output = output(&EnvMap::new(), "a", false, None);
+        let output = output(&EnvMap::new(), "a", None);
         assert_eq!(
             output.activation_json,
-            r#"{"applied":{"PATH":"/trees/a/bin","PORT":"20016","WT_BIN":"/trees/a/bin","WT_BRANCH":"a","WT_HOME":"/home","WT_LABEL":"repo","WT_NAME":"a","WT_NAME_SHORT":"repo_a_12345678","WT_NAME_SNAKE":"a","WT_PORT_BASE":"20016","WT_PORT_HTTP":"20016","WT_REPO":"/repo","WT_ROOT":"/trees/a","WT_SESSION":"wt_repo_a_12345678","WT_SLOT":"1","WT_TARGET":"repo/a"},"home":"/home","prior":{"PATH":null,"PORT":null,"WT_BIN":null,"WT_BRANCH":null,"WT_HOME":null,"WT_LABEL":null,"WT_NAME":null,"WT_NAME_SHORT":null,"WT_NAME_SNAKE":null,"WT_PORT_BASE":null,"WT_PORT_HTTP":null,"WT_REPO":null,"WT_ROOT":null,"WT_SESSION":null,"WT_SLOT":null,"WT_TARGET":null},"target":"repo/a","v":1}"#
+            r#"{"applied":{"PATH":"/trees/a/bin","PORT":"20016","WT_BIN":"/trees/a/bin","WT_BRANCH":"a","WT_HOME":"/home","WT_LABEL":"repo","WT_NAME":"a","WT_NAME_SHORT":"repo_a_12345678","WT_NAME_SNAKE":"a","WT_REPO":"/repo","WT_ROOT":"/trees/a","WT_SESSION":"wt_repo_a_12345678","WT_SLOT":"1","WT_TARGET":"repo/a"},"home":"/home","prior":{"PATH":null,"PORT":null,"WT_BIN":null,"WT_BRANCH":null,"WT_HOME":null,"WT_LABEL":null,"WT_NAME":null,"WT_NAME_SHORT":null,"WT_NAME_SNAKE":null,"WT_REPO":null,"WT_ROOT":null,"WT_SESSION":null,"WT_SLOT":null,"WT_TARGET":null},"target":"repo/a","v":1}"#
         );
         assert_eq!(output.env[ACTIVATION_KEY], output.activation_json);
     }
@@ -614,7 +618,6 @@ mod tests {
             parent: &EnvMap::from([("PATH".to_owned(), "/usr/bin".to_owned())]),
             existing_dirs: &BTreeSet::new(),
             file_sources: &BTreeMap::new(),
-            force_env: true,
         })
         .unwrap();
         assert_eq!(output.env["PATH"], "/trees/a/bin:/usr/bin");
@@ -633,9 +636,74 @@ mod tests {
             parent: &EnvMap::new(),
             existing_dirs: &BTreeSet::new(),
             file_sources: &BTreeMap::new(),
-            force_env: false,
         })
         .unwrap_err();
         assert_eq!(error.code.0, "REGISTRY_CORRUPT");
+    }
+
+    #[test]
+    fn vars_feed_aliases_and_files_without_becoming_environment_keys() {
+        let mut cfg = EffectiveScope::default();
+        cfg.vars.insert(
+            "composed".to_owned(),
+            "${root()}/${leaf}/${port('http')}".to_owned(),
+        );
+        cfg.vars.insert("leaf".to_owned(), "private".to_owned());
+        cfg.env.insert("VALUE".to_owned(), "${composed}".to_owned());
+        cfg.files.insert(
+            "generated".to_owned(),
+            FileDef {
+                content: Some("${composed}".to_owned()),
+                source: None,
+                marker: String::new(),
+                mode: "0644".to_owned(),
+            },
+        );
+        let output = assemble(EnvInputs {
+            cfg: &cfg,
+            tree: &tree("a", 20_016),
+            home: "/home",
+            contributed: Vec::new(),
+            task: None,
+            parent: &EnvMap::from([("VALUE".to_owned(), "production".to_owned())]),
+            existing_dirs: &BTreeSet::new(),
+            file_sources: &BTreeMap::new(),
+        })
+        .unwrap();
+        assert_eq!(output.env["VALUE"], "/trees/a/private/20016");
+        assert_eq!(output.render[0].content, "/trees/a/private/20016");
+        assert!(!output.env.contains_key("composed"));
+        assert!(!output.env.contains_key("leaf"));
+        assert!(!output.env.contains_key("WT_PORT_HTTP"));
+        assert!(!output.env.contains_key("WT_PORT_BASE"));
+        assert_eq!(output.report.overrode, ["VALUE"]);
+        assert_eq!(
+            output.activation.prior["VALUE"].as_deref(),
+            Some("production")
+        );
+    }
+
+    #[test]
+    fn every_closed_function_resolves_to_its_typed_value() {
+        let mut cfg = EffectiveScope::default();
+        cfg.env.insert(
+            "ALL".to_owned(),
+            "${root()}|${repo()}|${branch()}|${label()}|${name()}|${name_snake()}|${name_short()}|${target()}|${port('http')}".to_owned(),
+        );
+        let output = assemble(EnvInputs {
+            cfg: &cfg,
+            tree: &tree("feature-x", 20_016),
+            home: "/home",
+            contributed: Vec::new(),
+            task: None,
+            parent: &EnvMap::new(),
+            existing_dirs: &BTreeSet::new(),
+            file_sources: &BTreeMap::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            output.env["ALL"],
+            "/trees/feature-x|/repo|feature-x|repo|feature-x|feature_x|repo_feature-x_12345678|repo/feature-x|20016"
+        );
     }
 }

@@ -187,7 +187,7 @@ fn open_tree(
     agent_override: Option<&str>,
 ) -> Result<(OpenSessionReport, Vec<Notice>), CoreError> {
     let target = super::context::target_of(&tree);
-    let mut gate = door::enter(context, Some(&target.to_string()), "open", false)?;
+    let mut gate = door::enter(context, Some(&target.to_string()), "open")?;
     let notices = gate.notices.clone();
     let mut existing = tmux.has_session(&tree.session_name)?;
     let mut created = false;

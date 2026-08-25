@@ -545,7 +545,7 @@ Run exactly once per incarnation at `new` S3 (never for canonical or adopted tre
 |---|---|
 | `STATE_ORPHAN` (info: a state file whose address has no live entry; deleted by `prune`); `REPO_PATH_MISSING`, `TREE_REPLACED` | §4.1, §4.3–4.4, §5.4 |
 | `TREE_MISSING`, `TREE_INCOMPLETE`, `TREE_INTERRUPTED`, `INIT_INTERRUPTED`, `REMOVE_INTERRUPTED`, `TREE_CLAIMED`, `VERIFY_PENDING`; `UNMANAGED_WORKTREE`, `STALE_GIT_WORKTREE`, `BRANCH_MERGED` (`merge-base --is-ancestor` ∧ not equal), `UPSTREAM_GONE` (`%(upstream:track) == [gone]`) | §11.1; git vs registry |
-| `RESOURCE_ORPHANED`, `RESOURCE_GONE`, `RESOURCE_UNDECLARED`, `RESOURCE_PROBE_FAILED`, `REFRESH_SKIPPED`, `NAME_MAY_COLLIDE` (info: a `name` template uses `WT_NAME_SNAKE`/`WT_NAME` but none of `WT_NAME_SHORT`/`WT_SLOT`/`WT_ROOT`) | §10.3–10.5 |
+| `RESOURCE_ORPHANED`, `RESOURCE_GONE`, `RESOURCE_UNDECLARED`, `RESOURCE_PROBE_FAILED`, `REFRESH_SKIPPED`, `NAME_MAY_COLLIDE` (info: a `name` template uses `name()`/`name_snake()` but none of `name_short()`/`target()`/`root()`) | §10.3–10.5 |
 | `TREE_MISSING_PENDING`, `GEOMETRY_CHANGED` (info), `SLOT_SQUATTED`, `PORT_SQUATTED` (warn: bound with no session and no running task), `PORTS_EXHAUSTED` | §7 |
 | `ADAPTER_TOOL_MISSING`, `ACCELERATOR_*`, `NO_LOCKFILE`, `NO_ADAPTER`, `NO_VERIFY` | §6 |
 | `NO_COORDINATION` (info: the label's effective root config declares no `ports`, no `env` alias and no resource, so parallel trees share the application's default coordinates; remedy "declare `ports`/`env` in `.wt.toml` or `$WT_HOME/config.toml [repos.<label>]`"; A13); `SESSION_BACKEND` (info: the effective session backend) | §12, §5.4 |

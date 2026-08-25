@@ -9,7 +9,7 @@ pub(crate) fn run(context: &mut Context, args: ResourceAction) -> Result<Output,
     if !context.confirm(&format!("refresh resource {}", args.task))? {
         return Output::data(serde_json::json!({"refreshed": false}));
     }
-    let door = door::enter(context, args.target.as_deref(), "refresh", false)?;
+    let door = door::enter(context, args.target.as_deref(), "refresh")?;
     let notices = door.notices.clone();
     let plan = executor::plan(context, &door, &args.task)?;
     let node = plan

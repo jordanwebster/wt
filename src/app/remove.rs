@@ -135,7 +135,7 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         Ok(())
     })?;
     let entered = if current_dir_exists && current_identity_ok {
-        let door = door::enter_held(context, tree.clone(), "remove", false, false)?;
+        let door = door::enter_held(context, tree.clone(), "remove", false)?;
         executor::refresh_all_declarations(context, &door)?;
         Some(door)
     } else {
