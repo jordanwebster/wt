@@ -24,6 +24,32 @@ pub struct Notice {
     pub code: String,
     pub subject: Option<String>,
     pub message: String,
+    #[serde(skip)]
+    pub guidance: Option<NoticeGuidance>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NoticeGuidance {
+    MissingBin {
+        target: String,
+        path: String,
+        has_build_task: bool,
+    },
+}
+
+impl Notice {
+    pub fn next_step(&self) -> Option<String> {
+        match self.guidance.as_ref()? {
+            NoticeGuidance::MissingBin {
+                target,
+                path,
+                has_build_task,
+            } if *has_build_task => Some(format!("run `wt build {target}` to create {path}")),
+            NoticeGuidance::MissingBin { path, .. } => {
+                Some(format!("create {path} before running tree binaries"))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -87,6 +113,25 @@ impl<D> Envelope<D> {
             ok: false,
             command: command.into(),
             data: None,
+            notices: Vec::new(),
+            error: Some(error.into()),
+        }
+    }
+
+    pub fn partial_failure(
+        command: impl Into<String>,
+        version: impl Into<String>,
+        data: D,
+        error: CoreError,
+    ) -> Self {
+        Self {
+            wt: WtMeta {
+                schema: 1,
+                version: version.into(),
+            },
+            ok: false,
+            command: command.into(),
+            data: Some(data),
             notices: Vec::new(),
             error: Some(error.into()),
         }
@@ -371,6 +416,7 @@ pub struct SessionsData {
 pub enum SessionReport {
     Open(OpenSessionReport),
     Closed(ClosedSessionReport),
+    Failed(FailedSessionReport),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -381,6 +427,16 @@ pub struct OpenSessionReport {
     pub existing: bool,
     pub agent: Option<String>,
     pub foreground: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FailedSessionReport {
+    pub target: String,
+    pub name: String,
+    pub failed: bool,
+    pub code: String,
+    pub message: String,
+    pub remedy: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -803,6 +859,7 @@ mod tests {
             code: "EXAMPLE".to_owned(),
             subject: Some("repo/work".to_owned()),
             message: "example notice".to_owned(),
+            guidance: None,
         });
         insta::assert_json_snapshot!(name, envelope);
     }

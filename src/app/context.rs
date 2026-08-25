@@ -264,11 +264,23 @@ impl Context {
                     "{} no longer carries its registered identity",
                     tree.path.as_str()
                 ),
-                format!(
-                    "run `wt prune --records {0}`, `wt remove {0}`, or `wt adopt {1}`",
-                    target_of(tree),
-                    tree.path.as_str()
-                ),
+                // A canonical tree refuses both `remove` (USE_UNREGISTER) and
+                // `adopt` (the name is reserved), so offering them here would
+                // send the reader to two dead ends; `register --repair` is the
+                // only route back for one. SPEC §11.6.
+                if tree.canonical {
+                    format!(
+                        "run `wt register {} --label {} --repair`",
+                        tree.path.as_str(),
+                        tree.label.as_str()
+                    )
+                } else {
+                    format!(
+                        "run `wt prune --records {0}`, `wt remove {0}`, or `wt adopt {1}`",
+                        target_of(tree),
+                        tree.path.as_str()
+                    )
+                },
             ))
         }
     }

@@ -1,0 +1,8 @@
+---
+source: tests/human_transcripts.rs
+expression: "normalize(h, &output.stdout)"
+---
+Coordination locks
+  level  name       state  holder  path
+  1      repo       free           <ROOT>/wt-home/locks/repo/canonical.lock
+  1      repo/work  free           <ROOT>/wt-home/locks/repo/work.lock

@@ -13,6 +13,23 @@ pub(crate) fn run(context: &mut Context, args: ShellDoor) -> Result<Output, Core
     }
     let door = door::enter(context, args.target.as_deref(), "shell", args.force_env)?;
     door.emit_notices(context);
+    let mut command = command_argv(context);
+    let program = command.remove(0);
+    eprintln!(
+        "wt: entering {} (WT_BIN={})",
+        door.target,
+        door.env.env.get("WT_BIN").map(String::as_str).unwrap_or("")
+    );
+    let mut request = CommandRequest::new(program);
+    request.args = command;
+    request.cwd = Some(door.cwd.clone());
+    request.env = door.env.env.clone();
+    request.clear_env = true;
+    wt_sys::proc::execvp_inheriting(&request, &door.inherited_fds())?;
+    unreachable!("execvp returns only on failure")
+}
+
+pub(crate) fn command_argv(context: &Context) -> Vec<OsString> {
     let program = context
         .settings
         .shell
@@ -21,16 +38,5 @@ pub(crate) fn run(context: &mut Context, args: ShellDoor) -> Result<Output, Core
         .map(|path| path.as_str().to_owned())
         .or_else(|| context.parent_env.get("SHELL").cloned())
         .unwrap_or_else(|| "/bin/sh".to_owned());
-    eprintln!(
-        "wt: entering {} (WT_BIN={})",
-        door.target,
-        door.env.env.get("WT_BIN").map(String::as_str).unwrap_or("")
-    );
-    let mut request = CommandRequest::new(program);
-    request.args = vec![OsString::from("-i")];
-    request.cwd = Some(door.cwd.clone());
-    request.env = door.env.env.clone();
-    request.clear_env = true;
-    wt_sys::proc::execvp_inheriting(&request, &door.inherited_fds())?;
-    unreachable!("execvp returns only on failure")
+    vec![OsString::from(program), OsString::from("-i")]
 }

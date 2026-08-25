@@ -1,0 +1,9 @@
+---
+source: tests/session_flow.rs
+expression: "pane.replace(&private.harness.root.to_string_lossy().to_string(),\n\"<ROOT>\").trim_end()"
+---
+TP"; printf '__TREE_ENV__\n'; printf 'ROOT=%s PORT=%s\n' "$WT_ROOT" "$WT_PORT_HT
+<ROOT>/wt-home/trees/repo/work/bin/tree-tool
+ROOT=<ROOT>/wt-home/trees/repo/work PORT=20016
+__TREE_ENV__
+sh-3.2$

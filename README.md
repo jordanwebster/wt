@@ -15,7 +15,7 @@ that belonged to it.
 ```sh
 wt register ~/source/myapp
 wt new myapp/fix-login
-wt shell myapp/fix-login
+# new lands in the tree's session; leave it before removing the tree
 wt run test myapp/fix-login
 wt remove myapp/fix-login --yes
 ```
@@ -73,7 +73,10 @@ supported natively; under WSL it behaves as it does on Linux, and
 [docs/windows-support.md](docs/windows-support.md) records what a native
 port would involve. tmux 3.2 or newer
 is optional and enables detached sessions. The adapters only require the
-tools selected by the repository being used.
+tools selected by the repository being used. On the first `wt register` (or
+the first session-relevant command in a home created by an older wt), wt
+records `session.backend = "tmux"` when tmux 3.2 or newer is available and
+`"none"` otherwise; it does not guess again on later commands.
 
 ## Tour
 
@@ -95,19 +98,34 @@ wt shell myapp
 ```
 
 Create a linked worktree. By default `new` runs the detected or declared
-`sync` task; add `--verify` to run the repository's verify plan too.
+`sync` task, creates a tmux session, and lands you inside the tree; add
+`--verify` to run the repository's verify plan too.
 
 ```sh
-wt new myapp/fix-login --from main
-wt new myapp/review-42 --from pr:42 --verify
+$ wt new myapp/fix-login --from main
+Created myapp/fix-login
+  path    /home/me/.wt/trees/myapp/fix-login
+  branch  fix-login
+  sync    1/1 passed
+
+# now inside the tree's session, with its environment active
+$ command -v myapp
+/home/me/.wt/trees/myapp/fix-login/target/debug/myapp
+$ codex                         # agents are work you start explicitly
+
+wt new myapp/review-42 --from pr:42 --verify --no-attach
 wt list
 wt status myapp/fix-login
 ```
 
 Worktrees normally live under `$WT_HOME/trees/<label>/<name>`. `wt path`
 prints the exact root, and `wtcd` from shell initialization changes to it.
+Use `--no-attach` to provision a detached session or `--no-open` to create no
+session at all. If session provisioning fails after the tree is ready, `new`
+still succeeds, reports the tree path, and points to `wt open <target>` as the
+retry.
 
-### Doors: `run`, `exec`, `shell`, and `open`
+### Doors: `run`, `exec`, `shell`, and sessions
 
 Every door computes the same environment, prepends the same declared binary
 directories to `PATH`, and renders the same managed files before starting the
@@ -125,7 +143,8 @@ wt which myapp/fix-login myserver  # resolve through the door PATH
 `--json`. Use `wt env --json` to inspect what a child will receive and `wt run
 --json` when one machine-readable envelope is required.
 
-`open` creates or enters an agent session with the tree environment active:
+`open` creates or enters a session with the tree environment active. Without
+an agent selection, that session runs your interactive shell:
 
 ```sh
 wt open myapp/fix-login --agent codex
@@ -134,18 +153,25 @@ wt open --all
 wt close myapp/fix-login
 ```
 
-With tmux, the session is rooted in the worktree and its status names the
-target. Without tmux, an attaching `open --agent …` can run the agent in the
-foreground when attached to a terminal; detached and batch forms require
-tmux. Configure custom agents in `$WT_HOME/config.toml`:
+An agent starts only when wt creates a session, never when wt attaches to an
+existing one. `wt open --agent codex` is an explicit request for agent work;
+inside an existing shell session, start the agent command yourself. To select
+an agent for every newly created session, configure it explicitly in
+`$WT_HOME/config.toml`:
 
 ```toml
-default_agent = "codex"
+[session]
+backend = "tmux"
+attach = true
+agent = "codex"
 
 [agents.codex]
 start = ["codex"]
 resume = ["codex", "resume", "--last"]
 ```
+
+Leave `session.agent` unset for shells. With `session.backend = "none"`, `new`
+still creates the tree but `open` and `close` explain how to enable tmux.
 
 Remove a linked tree when finished. Destructive commands prompt on a terminal
 and require `--yes` when non-interactive.

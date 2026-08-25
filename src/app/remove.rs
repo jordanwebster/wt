@@ -345,6 +345,9 @@ pub(crate) fn observe_git(
 }
 
 fn tmux_has(context: &Context, tree: &wt_core::model::TreeRec) -> Result<bool, CoreError> {
+    if context.settings.session.backend == wt_core::settings::SessionBackend::None {
+        return Ok(false);
+    }
     let timeout = wt_core::model::duration_millis(&context.settings.session.tmux_timeout)
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(10));

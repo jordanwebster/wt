@@ -1,0 +1,14 @@
+
+running 1 test
+--- B4 ---
+terminal             created=true attached=true agent_started=true
+no-terminal          created=true attached=false agent_started=true
+activation           created=true attached=false agent_started=true
+json                 created=true attached=false agent_started=true
+backend-none         created=false attached=false agent_started=false
+no-open              created=false attached=false agent_started=false
+no-attach            created=true attached=false agent_started=true
+attach-setting-false created=true attached=false agent_started=true
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 14.90s
+

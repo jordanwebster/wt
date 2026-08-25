@@ -7,6 +7,7 @@ use wt_core::model::{
     gitdir_id, AbsPath, Label, LabelRec, SourceKind, Target, TreeRec, TreeSource,
 };
 use wt_core::report::{DeclaredReport, DeclaredResourceReport, RegisterData};
+use wt_core::settings::SessionBackend;
 use wt_core::{CoreError, ExitClass};
 use wt_sys::lock::{self, Mode};
 
@@ -15,7 +16,14 @@ use crate::cli::Register;
 use super::{door, executor, list, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Register) -> Result<Output, CoreError> {
-    perform(context, args.path, args.label, args.move_to, false)
+    perform(
+        context,
+        args.path,
+        args.label,
+        args.move_to,
+        args.repair,
+        false,
+    )
 }
 
 pub(crate) fn perform(
@@ -23,8 +31,34 @@ pub(crate) fn perform(
     path: PathBuf,
     label_arg: Option<String>,
     move_to: Option<PathBuf>,
+    repair: bool,
     cloned: bool,
 ) -> Result<Output, CoreError> {
+    let backend_notice = resolve_session_backend(context)?;
+    let output = perform_with_backend(context, path, label_arg, move_to, repair, cloned)?;
+    Ok(if let Some(notice) = backend_notice {
+        output.with_notices([notice])
+    } else {
+        output
+    })
+}
+
+fn perform_with_backend(
+    context: &mut Context,
+    path: PathBuf,
+    label_arg: Option<String>,
+    move_to: Option<PathBuf>,
+    repair: bool,
+    cloned: bool,
+) -> Result<Output, CoreError> {
+    if repair && move_to.is_some() {
+        return Err(CoreError::new(
+            ExitClass::Usage,
+            "REPAIR_REFUSED",
+            "--repair cannot be combined with --move-to",
+            "use --repair at the registered path or --move-to after moving the checkout",
+        ));
+    }
     if let Some(destination) = move_to {
         return move_existing(context, path, label_arg, destination);
     }
@@ -53,6 +87,48 @@ pub(crate) fn perform(
     let common = wt_sys::fsx::canonicalize(&git.common_dir()?)?;
     let label = Label::new(label_arg.unwrap_or_else(|| default_label(&path)))?;
     let target = Target::canonical(label.clone());
+
+    if repair {
+        let existing = context
+            .registry
+            .trees
+            .iter()
+            .find(|tree| tree.canonical && tree.label == label)
+            .cloned()
+            .ok_or_else(|| {
+                CoreError::new(
+                    ExitClass::State,
+                    "REPAIR_REFUSED",
+                    format!("label {label} has no registered canonical checkout"),
+                    "register the checkout without --repair",
+                )
+            })?;
+        let registered = &context.registry.labels[&label];
+        if existing.path.as_str() != path.to_string_lossy()
+            || registered.path.as_str() != path.to_string_lossy()
+            || registered.gitdir_id != gitdir_id(&common.to_string_lossy())
+        {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "REPAIR_REFUSED",
+                format!(
+                    "{} is not {label}'s registered canonical checkout",
+                    path.display()
+                ),
+                format!("run this command at {}", existing.path.as_str()),
+            ));
+        }
+        let state = context.read_state(&target)?;
+        if context.phase(&existing, state.as_ref())? != wt_core::lifecycle::DerivedPhase::Replaced {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "REPAIR_REFUSED",
+                format!("{label}'s canonical checkout is not replaced"),
+                "omit --repair for an ordinary idempotent registration",
+            ));
+        }
+        return repair_canonical(context, existing);
+    }
 
     if let Some(existing) = context
         .registry
@@ -191,7 +267,66 @@ pub(crate) fn perform(
         Ok(())
     })?;
     drop(token);
-    finish_with_door(context, tree, true, cloned, Some(prepared))
+    finish_with_door(context, tree, true, cloned, Some(prepared), false)
+}
+
+pub(crate) fn resolve_session_backend(
+    context: &mut Context,
+) -> Result<Option<wt_core::report::Notice>, CoreError> {
+    let path = context.home.join("config.toml");
+    let source = wt_sys::fsx::read_string(&path)?.unwrap_or_default();
+    if wt_core::settings::backend_is_declared(&source)? {
+        return Ok(None);
+    }
+    let timeout = wt_core::model::duration_millis(&context.settings.session.tmux_timeout)
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(10));
+    let version = wt_sys::tmux::Tmux::new("tmux", timeout)
+        .check_version()
+        .ok();
+    let backend = if version.is_some() {
+        SessionBackend::Tmux
+    } else {
+        SessionBackend::None
+    };
+    let updated = wt_core::settings::declare_backend(&source, backend)?;
+    wt_sys::fsx::write_store(&path, updated.as_bytes())?;
+    context.settings = wt_core::settings::parse(&updated)?;
+    let selection = version.map_or_else(
+        || "none".to_owned(),
+        |(major, minor)| format!("tmux {major}.{minor}"),
+    );
+    eprintln!("sessions: {selection} (set session.backend to change)");
+    let notice = wt_core::report::Notice {
+        level: wt_core::report::NoticeLevel::Info,
+        code: "SESSION_BACKEND_SELECTED".to_owned(),
+        subject: None,
+        message: format!("sessions: {selection} (set session.backend to change)"),
+        guidance: None,
+    };
+    context.pending_notices.push(notice.clone());
+    Ok(Some(notice))
+}
+
+fn repair_canonical(context: &mut Context, tree: TreeRec) -> Result<Output, CoreError> {
+    let target = super::context::target_of(&tree);
+    let holder = context.holder(target.to_string(), "register")?;
+    let token = lock::tree(
+        &context.tree_lock_path(&target),
+        Mode::Exclusive,
+        &holder,
+        context.tree_wait(None),
+    )?;
+    wt_sys::fsx::write_nofollow(
+        Path::new(tree.path.as_str()),
+        &wt_core::model::RelPath::new(".wt/tree_id")?,
+        format!("{}\n", tree.tree_id).as_bytes(),
+        0o600,
+    )?;
+    door::recompute_exclude(context, &tree.label)?;
+    let prepared = door::repair_held(context, tree.clone(), "register")?;
+    drop(token);
+    finish_with_door(context, tree, false, false, Some(prepared), false)
 }
 
 fn resume_initialising(
@@ -222,7 +357,7 @@ fn resume_initialising(
         Ok(())
     })?;
     drop(token);
-    finish_with_door(context, tree, false, cloned, Some(prepared))
+    finish_with_door(context, tree, false, cloned, Some(prepared), false)
 }
 
 fn move_existing(
@@ -358,7 +493,7 @@ pub(crate) fn finish(
     registered: bool,
     _cloned: bool,
 ) -> Result<Output, CoreError> {
-    finish_with_door(context, tree, registered, _cloned, None)
+    finish_with_door(context, tree, registered, _cloned, None, true)
 }
 
 fn finish_with_door(
@@ -367,8 +502,10 @@ fn finish_with_door(
     registered: bool,
     _cloned: bool,
     prepared: Option<door::Door>,
+    refresh_declarations: bool,
 ) -> Result<Output, CoreError> {
     context.reload_registry()?;
+    let had_prepared = prepared.is_some();
     let door = if let Some(door) = prepared {
         door
     } else {
@@ -384,9 +521,14 @@ fn finish_with_door(
             }
             Err(error) => return Err(error),
         };
-        executor::refresh_all_declarations(context, &door)?;
+        if refresh_declarations {
+            executor::refresh_all_declarations(context, &door)?;
+        }
         door
     };
+    if had_prepared && refresh_declarations {
+        executor::refresh_all_declarations(context, &door)?;
+    }
     let config = door.config.clone();
     let catalog = context.task_catalog(&tree, &config)?;
     let mut resources = catalog
@@ -528,7 +670,29 @@ pub(crate) fn initial_config(
         .get(label)
         .cloned()
         .unwrap_or_default();
-    Ok(config::merge(&[(Layer::Repo, repo), (Layer::User, user)]))
+    let preliminary = config::merge(&[(Layer::Repo, repo.clone()), (Layer::User, user.clone())]);
+    let mut adapter = config::Config::default();
+    let mut hits = Vec::new();
+    for scope in std::iter::once(".").chain(preliminary.dirs.keys().map(String::as_str)) {
+        let relative = wt_core::model::RelPath::new(scope)?;
+        let snapshot = wt_sys::fsx::capture_dir_snapshot(
+            path,
+            &relative,
+            &[
+                "package.json".to_owned(),
+                "rustfmt.toml".to_owned(),
+                ".rustfmt.toml".to_owned(),
+            ],
+        )?;
+        let effective = config::effective_scope(&preliminary, scope)?;
+        hits.extend(wt_core::adapters::detect(&snapshot, &effective.adapters)?);
+    }
+    wt_core::adapters::apply_contribution(&mut adapter, &wt_core::adapters::contribution(&hits)?)?;
+    Ok(config::merge(&[
+        (Layer::Adapter, adapter),
+        (Layer::Repo, repo),
+        (Layer::User, user),
+    ]))
 }
 
 fn default_label(path: &Path) -> String {

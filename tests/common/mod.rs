@@ -47,6 +47,7 @@ impl Harness {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("LC_ALL", "C")
+            .env("TERM", "xterm-256color")
             .env("WT_SHIM_STATE", &self.shim_state)
             .env(
                 "PATH",
@@ -66,6 +67,7 @@ impl Harness {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("LC_ALL", "C")
+            .env("TERM", "xterm-256color")
             .env("WT_SHIM_STATE", &self.shim_state)
             .env(
                 "PATH",
@@ -76,6 +78,14 @@ impl Harness {
     }
 
     pub fn pty_status(&self, args: &[&str], input: &[u8]) -> wt_core::resource::ChildStatus {
+        wt_sys::proc::pty_status(&self.pty_request(args), input).unwrap()
+    }
+
+    pub fn pty_output(&self, args: &[&str], input: &[u8]) -> wt_sys::proc::ProcessOutput {
+        wt_sys::proc::pty_capture(&self.pty_request(args), input, Duration::from_secs(10)).unwrap()
+    }
+
+    pub fn pty_request(&self, args: &[&str]) -> CommandRequest {
         let mut request = CommandRequest::new(env!("CARGO_BIN_EXE_wt"));
         request.args = proc::os_args(args);
         request.clear_env = true;
@@ -88,6 +98,7 @@ impl Harness {
             ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
             ("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned()),
             ("LC_ALL".to_owned(), "C".to_owned()),
+            ("TERM".to_owned(), "xterm-256color".to_owned()),
             (
                 "WT_SHIM_STATE".to_owned(),
                 self.shim_state.to_string_lossy().into_owned(),
@@ -99,7 +110,7 @@ impl Harness {
         ]
         .into_iter()
         .collect();
-        wt_sys::proc::pty_status(&request, input).unwrap()
+        request
     }
 
     pub fn repo(&self, name: &str, config: &str) -> PathBuf {
@@ -216,6 +227,13 @@ fn settle_executable(path: &Path) {
 
 pub fn write(path: &Path, body: &str) {
     wt_sys::fsx::write_store(path, body.as_bytes()).unwrap();
+}
+
+pub fn proof_capture(claim: &str, text: impl AsRef<str>) {
+    let requested = std::env::var("WT_PROOF_CAPTURE").unwrap_or_default();
+    if requested == "1" || requested.split(',').any(|value| value == claim) {
+        println!("--- {claim} ---\n{}", text.as_ref().replace("\r\n", "\n"));
+    }
 }
 
 pub fn git(path: &Path, args: &[&str]) {

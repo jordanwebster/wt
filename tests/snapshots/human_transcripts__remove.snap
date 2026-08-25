@@ -1,0 +1,7 @@
+---
+source: tests/human_transcripts.rs
+expression: "normalize(h, &output.stdout)"
+---
+Removed repo/work
+  destroyed  1
+  session    closed

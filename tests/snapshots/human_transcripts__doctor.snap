@@ -1,0 +1,21 @@
+---
+source: tests/human_transcripts.rs
+expression: "normalize(h, &output.stdout)"
+---
+Doctor found 0 errors, 3 warnings, 5 notes
+  warning  BIN_DIR_MISSING repo - declared bin directory <ROOT>/repos/repo/bin is missing
+  next     create the directory by running the build task
+  warning  BIN_DIR_MISSING repo/work - declared bin directory <ROOT>/wt-home/trees/repo/work/bin is missing
+  next     create the directory by running the build task
+  warning  UNMANAGED_WORKTREE <ROOT>/wt-home/trees/repo/work - git worktree is not registered with wt
+  next     run `wt adopt` for the checkout
+  note     NO_ADAPTER repo - no built-in adapter matched this checkout
+  next     configure tasks explicitly or add a supported project manifest
+  note     NO_ADAPTER repo/work - no built-in adapter matched this checkout
+  next     configure tasks explicitly or add a supported project manifest
+  note     NO_VERIFY repo - no verify task is declared
+  next     declare task.verify when lifecycle verification is desired
+  note     NO_VERIFY repo/work - no verify task is declared
+  next     declare task.verify when lifecycle verification is desired
+  note     SESSION_BACKEND sessions - session backend is tmux
+  next     set `session.backend` in `$WT_HOME/config.toml` to change it

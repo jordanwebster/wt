@@ -5,13 +5,13 @@ use wt_core::model::{AbsPath, SourceKind, Target, TreeRec, TreeSource};
 use wt_core::report::{NewData, NewVerifyReport};
 use wt_core::report::{Notice, NoticeLevel};
 use wt_core::{CoreError, ExitClass};
-use wt_sys::fsx::CopyPolicy;
+use wt_sys::fsx::{CopyPolicy, ReflinkCopy};
 use wt_sys::lock::{self, Mode};
 
 use crate::cli::New;
 
 use super::context::target_of;
-use super::{door, executor, list, register, Context, Output};
+use super::{door, executor, list, open, register, AfterRender, Context, Output};
 
 struct NewFinish {
     sync: Option<Vec<wt_core::report::StepReport>>,
@@ -20,6 +20,39 @@ struct NewFinish {
 }
 
 pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError> {
+    let backend_notice = register::resolve_session_backend(context)?;
+    let target = args.target.clone();
+    let no_open = args.no_open;
+    let no_attach = args.no_attach;
+    let mut output = create_tree(context, args)?;
+    if let Some(notice) = backend_notice {
+        output = output.with_notices([notice]);
+    }
+    if no_open {
+        return Ok(output);
+    }
+    if open::should_attach(context, no_attach) {
+        return Ok(output.after_render(AfterRender::NewSession { target }));
+    }
+    match open::provision_new(context, &target) {
+        Ok(notices) => output = output.with_notices(notices),
+        Err(error) => {
+            output = output.with_notices([open::session_failure_notice(&target, &error)]);
+            return Ok(output);
+        }
+    }
+    if context.settings.session.backend == wt_core::settings::SessionBackend::Tmux {
+        let resolved = context.resolve(Some(&target))?;
+        let tree = context.tree(&resolved)?;
+        output.data["tree"]["session"] = serde_json::Value::String("yes".to_owned());
+        output.data["tree"]["agent"] = tree
+            .agent
+            .map_or(serde_json::Value::Null, serde_json::Value::String);
+    }
+    Ok(output)
+}
+
+fn create_tree(context: &mut Context, args: New) -> Result<Output, CoreError> {
     let target = Target::parse(&args.target)?;
     if target.name == "canonical" {
         return Err(CoreError::new(
@@ -180,7 +213,7 @@ fn create(
         name_short: coordinates.name_short,
         session_name: coordinates.session_name,
         created_at: now,
-        agent: args.agent.clone(),
+        agent: None,
         source: TreeSource {
             kind: if pr.is_some() {
                 SourceKind::Pr
@@ -523,13 +556,15 @@ fn finish_under_lock(
             .root
             .copy
             .iter()
-            .map(|path| (path, MaterializedKind::Copied, CopyPolicy::Plain))
-            .chain(
-                config
-                    .seed
-                    .iter()
-                    .map(|path| (path, MaterializedKind::Seeded, CopyPolicy::PreferReflink)),
-            )
+            .map(|path| (path, MaterializedKind::Copied, CopyPolicy::Plain, false))
+            .chain(config.seed.iter().map(|path| {
+                (
+                    path,
+                    MaterializedKind::Seeded,
+                    CopyPolicy::PreferReflink,
+                    config.adapter_seed.contains(path),
+                )
+            }))
             .collect::<Vec<_>>();
         let tracked = context
             .git(Path::new(canonical.path.as_str()))?
@@ -537,10 +572,10 @@ fn finish_under_lock(
                 Path::new(canonical.path.as_str()),
                 &entries
                     .iter()
-                    .map(|(path, _, _)| PathBuf::from(path.as_str()))
+                    .map(|(path, _, _, _)| PathBuf::from(path.as_str()))
                     .collect::<Vec<_>>(),
             )?;
-        for (path, kind, policy) in entries {
+        for (path, kind, policy, adapter_seed) in entries {
             let subject = Some(format!("{}:{}", target_of(tree), path));
             if matches!(
                 wt_sys::fsx::path_kind(&Path::new(canonical.path.as_str()).join(path.as_str()))?,
@@ -551,6 +586,7 @@ fn finish_under_lock(
                     code: "COPY_ABSENT".to_owned(),
                     subject,
                     message: format!("copy source {path} is absent"),
+                    guidance: None,
                 });
                 continue;
             }
@@ -572,21 +608,40 @@ fn finish_under_lock(
                     code: "COPY_EXISTS".to_owned(),
                     subject,
                     message: format!("copy destination {path} already exists"),
+                    guidance: None,
                 });
                 continue;
             }
-            let report = wt_sys::fsx::copy_contained(
-                Path::new(canonical.path.as_str()),
-                root,
-                path,
-                policy,
-            )?;
+            let report = if adapter_seed {
+                match wt_sys::fsx::reflink_contained(
+                    Path::new(canonical.path.as_str()),
+                    root,
+                    path,
+                )? {
+                    ReflinkCopy::Copied(report) => report,
+                    ReflinkCopy::Unavailable => {
+                        notices.push(Notice {
+                            level: NoticeLevel::Info,
+                            code: "SEED_SKIPPED_NO_REFLINK".to_owned(),
+                            subject,
+                            message: format!(
+                                "adapter seed {path} was skipped because reflink is unavailable"
+                            ),
+                            guidance: None,
+                        });
+                        continue;
+                    }
+                }
+            } else {
+                wt_sys::fsx::copy_contained(Path::new(canonical.path.as_str()), root, path, policy)?
+            };
             if kind == MaterializedKind::Seeded && report.files.iter().any(|file| !file.reflinked) {
                 notices.push(Notice {
                     level: NoticeLevel::Info,
                     code: "SEED_COPIED_NOT_CLONED".to_owned(),
                     subject,
                     message: format!("seed {path} was copied because reflink was unavailable"),
+                    guidance: None,
                 });
             }
             copied.push(Materialized {
@@ -662,18 +717,6 @@ fn finish_under_lock(
         state.last_error = None;
         Ok(())
     })?;
-    if let Some(agent) = &args.agent {
-        context.mutate_registry(holder, |registry| {
-            if let Some(record) = registry
-                .trees
-                .iter_mut()
-                .find(|record| record.tree_id == tree.tree_id)
-            {
-                record.agent = Some(agent.clone());
-            }
-            Ok(())
-        })?;
-    }
     let verify = if args.verify {
         Some(run_verify(context, &door, holder, &mut notices)?)
     } else {
@@ -837,6 +880,7 @@ fn source_notices(
             code: code.to_owned(),
             subject: Some(target.to_string()),
             message: "local branch takes precedence over a different origin branch".to_owned(),
+            guidance: None,
         });
     }
     notices

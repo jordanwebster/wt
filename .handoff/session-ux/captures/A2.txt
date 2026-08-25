@@ -1,0 +1,9 @@
+
+running 1 test
+--- A2 ---
+sh-3.2$ printf '__OPENED_%s__\n' SHELL
+__OPENED_SHELL__
+sh-3.2$
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.42s
+

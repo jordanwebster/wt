@@ -27,7 +27,7 @@ pub(crate) fn run(context: &mut Context, args: CloneRepo) -> Result<Output, Core
             deadlines.for_class(wt_sys::git::Class::Clone),
         )?;
     }
-    let registered = register::perform(context, path, args.label, None, true)?;
+    let registered = register::perform(context, path, args.label, None, false, true)?;
     let register: wt_core::report::RegisterData = serde_json::from_value(registered.data.clone())
         .map_err(|error| {
         wt_core::CoreError::new(

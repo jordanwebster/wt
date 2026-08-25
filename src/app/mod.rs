@@ -10,6 +10,7 @@ mod door;
 mod env;
 mod exec;
 mod executor;
+mod human;
 mod list;
 mod locks;
 mod new;
@@ -43,6 +44,13 @@ pub(crate) struct Output {
     pub data: Value,
     pub text: Option<String>,
     pub notices: Vec<Notice>,
+    after_render: Option<AfterRender>,
+    failure: Option<CoreError>,
+}
+
+pub(crate) enum AfterRender {
+    Attach { session: String },
+    NewSession { target: String },
 }
 
 impl Output {
@@ -52,6 +60,8 @@ impl Output {
             data,
             text: None,
             notices: Vec::new(),
+            after_render: None,
+            failure: None,
         })
     }
 
@@ -71,12 +81,25 @@ impl Output {
                 &right.message,
             ))
         });
+        self.notices
+            .dedup_by(|left, right| left.code == right.code && left.subject == right.subject);
+        self
+    }
+
+    pub fn with_failure(mut self, error: CoreError) -> Self {
+        self.failure = Some(error);
+        self
+    }
+
+    pub fn after_render(mut self, action: AfterRender) -> Self {
+        self.after_render = Some(action);
         self
     }
 }
 
 pub fn main(cli: Cli) -> i32 {
     let command = cli.command.name().to_owned();
+    let human_kind = human::HumanKind::from(&cli.command);
     let json = cli.json;
     let verbose = cli.verbose;
     let quiet = cli.quiet;
@@ -88,85 +111,182 @@ pub fn main(cli: Cli) -> i32 {
         Command::Completions(args) => Some(completions::generate(args.shell)),
         _ => None,
     };
+    let mut opened_context = None;
     let (result, pending_notices) = if let Some(result) = standalone {
         (result, Vec::new())
     } else {
         match Context::open(&cli) {
             Ok(mut context) => {
                 let result = dispatch(&mut context, cli);
-                (result, context.pending_notices)
+                let notices = std::mem::take(&mut context.pending_notices);
+                opened_context = Some(context);
+                (result, notices)
             }
             Err(error) => (Err(error), Vec::new()),
         }
     };
     match result {
         Ok(mut output) => {
+            let output_exit = output
+                .failure
+                .as_ref()
+                .map_or(0, |error| i32::from(error.exit()));
             if json {
-                let mut envelope =
-                    Envelope::success(command, env!("CARGO_PKG_VERSION"), output.data);
+                let mut envelope = if let Some(error) = output.failure.clone() {
+                    Envelope::partial_failure(
+                        command.clone(),
+                        env!("CARGO_PKG_VERSION"),
+                        output.data,
+                        error,
+                    )
+                } else {
+                    Envelope::success(command.clone(), env!("CARGO_PKG_VERSION"), output.data)
+                };
                 envelope.notices.append(&mut output.notices);
                 write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
             } else {
-                for notice in output.notices {
-                    if notice.code == "BIN_DIR_MISSING" || (!quiet && (stderr_tty || verbose)) {
+                for notice in &output.notices {
+                    if !matches!(
+                        notice.code.as_str(),
+                        "BIN_DIR_MISSING" | "SESSION_BACKEND_SELECTED"
+                    ) && !quiet
+                        && (stderr_tty || verbose)
+                    {
                         let code = if color {
                             format!("\u{1b}[33m{}\u{1b}[0m", notice.code)
                         } else {
-                            notice.code
+                            notice.code.clone()
                         };
                         let _ = writeln!(std::io::stderr(), "wt: {} — {}", code, notice.message);
                     }
                 }
-                let text = output.text.unwrap_or_else(|| human_value(&output.data));
-                write_stdout(text);
-            }
-            0
-        }
-        Err(error) => {
-            let exit = if !json
-                && matches!(command.as_str(), "run" | "test" | "lint" | "fmt" | "build")
-                && error.code.0 == "TASK_FAILED"
-            {
-                error.details["child"]["code"]
-                    .as_i64()
-                    .and_then(|code| i32::try_from(code).ok())
-                    .or_else(|| {
-                        error.details["child"]["signal"]
-                            .as_i64()
-                            .and_then(|signal| i32::try_from(signal).ok())
-                            .map(|signal| 128 + signal)
-                    })
-                    .unwrap_or_else(|| i32::from(error.exit()))
-            } else {
-                i32::from(error.exit())
-            };
-            if json {
-                let mut envelope =
-                    Envelope::<Value>::failure(command, env!("CARGO_PKG_VERSION"), error);
-                envelope.notices = pending_notices;
-                write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
-            } else {
-                for notice in pending_notices {
-                    if notice.code == "BIN_DIR_MISSING" || (!quiet && (stderr_tty || verbose)) {
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "wt: {} — {}",
-                            notice.code,
-                            notice.message
-                        );
+                if matches!(human_kind, human::HumanKind::Run) {
+                    let guidance = human::with_expected_next(String::new(), &output.notices);
+                    if !guidance.is_empty() {
+                        let _ = writeln!(std::io::stderr(), "{guidance}");
                     }
                 }
-                let code = if color {
-                    format!("\u{1b}[31m{}\u{1b}[0m", error.code.0)
-                } else {
-                    error.code.0.clone()
-                };
-                let _ = writeln!(std::io::stderr(), "wt: {} — {}", code, error.message);
-                let _ = writeln!(std::io::stderr(), "remedy: {}", error.remedy);
+                let text = output
+                    .text
+                    .map(|text| {
+                        if matches!(human_kind, human::HumanKind::Run) {
+                            text
+                        } else {
+                            human::with_expected_next(text, &output.notices)
+                        }
+                    })
+                    .unwrap_or_else(|| human_kind.render(&output.data, &output.notices));
+                write_stdout(text);
             }
-            exit
+            let _ = std::io::stdout().flush();
+            if let Some(action) = output.after_render {
+                let context = opened_context
+                    .as_mut()
+                    .expect("deferred actions require an open context");
+                match action {
+                    AfterRender::NewSession { target } => {
+                        if let Err(error) = open::open_new_after_summary(context, &target) {
+                            emit_session_warning(&target, &error);
+                        }
+                    }
+                    AfterRender::Attach { session } => {
+                        if let Err(error) = open::attach(context, &session) {
+                            return render_error(&command, json, color, error, Vec::new());
+                        }
+                    }
+                }
+            }
+            output_exit
         }
+        Err(error) => render_error_with_visibility(
+            &command,
+            json,
+            color,
+            error,
+            pending_notices,
+            quiet,
+            stderr_tty,
+            verbose,
+        ),
     }
+}
+
+fn emit_session_warning(target: &str, error: &CoreError) {
+    let _ = writeln!(
+        std::io::stderr(),
+        "wt: SESSION_CREATE_FAILED — session for {target} was not created: {}; run `wt open {target}` to retry",
+        error.message
+    );
+}
+
+fn render_error(
+    command: &str,
+    json: bool,
+    color: bool,
+    error: CoreError,
+    notices: Vec<Notice>,
+) -> i32 {
+    render_error_with_visibility(command, json, color, error, notices, false, true, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_error_with_visibility(
+    command: &str,
+    json: bool,
+    color: bool,
+    error: CoreError,
+    pending_notices: Vec<Notice>,
+    quiet: bool,
+    stderr_tty: bool,
+    verbose: bool,
+) -> i32 {
+    let exit = if !json
+        && matches!(command, "run" | "test" | "lint" | "fmt" | "build")
+        && error.code.0 == "TASK_FAILED"
+    {
+        error.details["child"]["code"]
+            .as_i64()
+            .and_then(|code| i32::try_from(code).ok())
+            .or_else(|| {
+                error.details["child"]["signal"]
+                    .as_i64()
+                    .and_then(|signal| i32::try_from(signal).ok())
+                    .map(|signal| 128 + signal)
+            })
+            .unwrap_or_else(|| i32::from(error.exit()))
+    } else {
+        i32::from(error.exit())
+    };
+    if json {
+        let mut envelope =
+            Envelope::<Value>::failure(command.to_owned(), env!("CARGO_PKG_VERSION"), error);
+        envelope.notices = pending_notices;
+        write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
+    } else {
+        for notice in pending_notices {
+            if !matches!(
+                notice.code.as_str(),
+                "BIN_DIR_MISSING" | "SESSION_BACKEND_SELECTED"
+            ) && !quiet
+                && (stderr_tty || verbose)
+            {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "wt: {} — {}",
+                    notice.code,
+                    notice.message
+                );
+            }
+        }
+        let code = if color {
+            format!("\u{1b}[31m{}\u{1b}[0m", error.code.0)
+        } else {
+            error.code.0.clone()
+        };
+        let _ = writeln!(std::io::stderr(), "wt: {} — {}", code, error.message);
+        let _ = writeln!(std::io::stderr(), "remedy: {}", error.remedy);
+    }
+    exit
 }
 
 fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
@@ -221,8 +341,4 @@ fn write_stdout(mut text: String) {
         text.push('\n');
     }
     let _ = std::io::stdout().write_all(text.as_bytes());
-}
-
-fn human_value(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_owned())
 }

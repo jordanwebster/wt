@@ -258,7 +258,7 @@ fn session_transport_uses_inner_no_gate_door_without_tmux_e() {
     h.register(&repo);
     common::write(
         &h.home.join("config.toml"),
-        "default_agent='probe'\n[agents.probe]\nstart=['true']\nresume=['true']\n",
+        "[session]\nbackend='tmux'\nagent='probe'\n[agents.probe]\nstart=['true']\nresume=['true']\n",
     );
     let opened = h.json(&["open", "repo", "--no-attach"]);
     assert_eq!(opened["data"]["sessions"][0]["created"], true);
@@ -299,6 +299,219 @@ fn old_format_is_rejected_before_current_state_is_written() {
         .code(5)
         .stderr(predicate::str::contains("HOME_OLD_FORMAT"));
     assert!(!h.home.join("registry.json").exists());
+}
+
+#[test]
+fn register_declares_the_session_backend_once_and_legacy_agent_setting_is_rejected() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    let registered = h.register(&repo);
+    assert!(registered["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| {
+            notice["code"] == "SESSION_BACKEND_SELECTED"
+                && notice["message"] == "sessions: tmux 3.4 (set session.backend to change)"
+        }));
+    let config = wt_sys::fsx::read_string(&h.home.join("config.toml"))
+        .unwrap()
+        .unwrap();
+    assert!(config.contains("backend = \"tmux\""));
+    assert!(!config.contains("agent ="));
+    let doctor = h.json(&["doctor"]);
+    assert!(doctor["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "SESSION_BACKEND"
+            && finding["message"] == "session backend is tmux"));
+
+    let record = h.shim_state.join("backend-resolution.log");
+    common::write_executable(
+        &h.shims.join("tmux"),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$1\" in has-session) exit 1;; *) exit 0;; esac\n",
+            record.display()
+        ),
+    );
+    h.register(&repo);
+    let calls = wt_sys::fsx::read_string(&record)
+        .unwrap()
+        .unwrap_or_default();
+    assert!(!calls.lines().any(|line| line == "-V"));
+
+    let unavailable = Harness::new();
+    common::write_executable(
+        &unavailable.shims.join("tmux"),
+        "#!/bin/sh\nif [ \"$1\" = -V ]; then echo 'tmux 3.1'; exit 0; fi\nexit 1\n",
+    );
+    let unavailable_repo = unavailable.repo("unavailable", BASIC);
+    let registered = unavailable.register(&unavailable_repo);
+    assert!(registered["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| { notice["message"] == "sessions: none (set session.backend to change)" }));
+    let config = wt_sys::fsx::read_string(&unavailable.home.join("config.toml"))
+        .unwrap()
+        .unwrap();
+    assert!(config.contains("backend = \"none\""));
+    common::proof_capture(
+        "B8",
+        format!(
+            "selected: tmux 3.4\nconfig: backend = \"tmux\"\nsecond -V probes: {}\nunavailable selection: none\nsession.agent present by default: false",
+            calls.lines().filter(|line| *line == "-V").count()
+        ),
+    );
+
+    let legacy = Harness::new();
+    common::write(&legacy.home.join("config.toml"), "default_agent='codex'\n");
+    legacy
+        .wt()
+        .arg("list")
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("SETTINGS_INVALID"))
+        .stderr(predicate::str::contains("session.agent"));
+}
+
+#[test]
+fn session_verbs_resolve_a_backend_for_preexisting_homes_once() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+    wt_sys::fsx::remove_path(&h.home.join("config.toml")).unwrap();
+
+    let first = h
+        .wt()
+        .args(["new", "repo/work", "--no-sync", "--no-open", "--json"])
+        .output()
+        .unwrap();
+    assert!(first.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&first.stderr),
+        "sessions: tmux 3.4 (set session.backend to change)\n"
+    );
+    let config = wt_sys::fsx::read_string(&h.home.join("config.toml"))
+        .unwrap()
+        .unwrap();
+    assert!(config.contains("backend = \"tmux\""));
+
+    let second = h
+        .wt()
+        .args(["new", "repo/work", "--no-sync", "--no-open", "--json"])
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    assert!(second.stderr.is_empty());
+}
+
+#[test]
+fn register_explains_how_to_rewrite_an_inline_session_table() {
+    let h = Harness::new();
+    common::write(
+        &h.home.join("config.toml"),
+        "session = { attach = false }\n",
+    );
+    let repo = h.repo("repo", BASIC);
+    let output = h
+        .wt()
+        .args(["register", repo.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("rewrite `session = { ... }`"));
+    let config = wt_sys::fsx::read_string(&h.home.join("config.toml"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(config, "session = { attach = false }\n");
+}
+
+#[test]
+fn new_keeps_its_payload_when_session_creation_fails() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+    common::write_executable(
+        &h.shims.join("tmux"),
+        "#!/bin/sh\ncase \"$1\" in has-session) exit 1;; new-session) echo unavailable >&2; exit 9;; esac\n",
+    );
+
+    let output = h
+        .wt()
+        .args(["new", "repo/work", "--no-sync", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["tree"]["target"], "repo/work");
+    assert_eq!(envelope["data"]["tree"]["phase"], "ready");
+    assert!(envelope["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| {
+            notice["code"] == "SESSION_CREATE_FAILED"
+                && notice["subject"] == "repo/work"
+                && notice["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("wt open repo/work")
+        }));
+    assert_eq!(h.json(&["status", "repo/work"])["data"]["phase"], "ready");
+
+    let terminal = Harness::new();
+    let repo = terminal.repo("repo", BASIC);
+    terminal.register(&repo);
+    common::write_executable(
+        &terminal.shims.join("tmux"),
+        "#!/bin/sh\ncase \"$1\" in has-session) exit 1;; new-session) echo unavailable >&2; exit 9;; esac\n",
+    );
+    let output = terminal.pty_output(&["new", "repo/work", "--no-sync"], b"");
+    assert_eq!(output.child.code, Some(0));
+    let transcript = String::from_utf8_lossy(&output.stdout);
+    assert!(transcript.contains("Created repo/work"));
+    assert!(transcript.contains("SESSION_CREATE_FAILED"));
+    assert!(transcript.contains("wt open repo/work"));
+}
+
+#[test]
+fn open_all_reports_each_tree_and_continues_after_a_failure() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+    h.json(&["new", "repo/one", "--no-sync", "--no-open"]);
+    h.json(&["new", "repo/two", "--no-sync", "--no-open"]);
+    wt_sys::fsx::remove_path(&h.home.join("trees/repo/one")).unwrap();
+
+    let output = h.wt().args(["open", "--all", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["exit"], 5);
+    let sessions = envelope["data"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 3);
+    assert!(
+        sessions.iter().any(|session| {
+            session["target"] == "repo/one"
+                && session["failed"] == true
+                && session["code"] == "TREE_REPLACED"
+        }),
+        "{envelope}"
+    );
+    for target in ["repo", "repo/two"] {
+        assert!(sessions
+            .iter()
+            .any(|session| { session["target"] == target && session["created"] == true }));
+    }
+    common::proof_capture(
+        "B6-partial",
+        serde_json::to_string_pretty(&envelope)
+            .unwrap()
+            .replace(&h.root.to_string_lossy().to_string(), "<ROOT>"),
+    );
 }
 
 #[test]
@@ -470,6 +683,112 @@ fn register_move_to_repairs_and_rechecks_the_checkout() {
         moved.canonicalize().unwrap().to_string_lossy().as_ref()
     );
     assert_eq!(h.json(&["status", "repo"])["data"]["phase"], "ready");
+}
+
+#[test]
+fn register_repair_restores_only_a_replaced_canonical_checkout() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        "[files.'.wt/generated']\ncontent='restored $WT_TARGET'\n[task.service]\nrun='true'\nexists='false'\ndestroy='true'\ntied_to='tree'\n",
+    );
+    let registered = h.register(&repo);
+    let tree_id = registered["data"]["tree"]["tree_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let registry_before = wt_sys::fsx::read_string(&h.home.join("registry.json"))
+        .unwrap()
+        .unwrap();
+    let target = wt_core::model::Target::canonical(wt_core::model::Label::new("repo").unwrap());
+    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
+    let state_before =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+
+    wt_sys::fsx::remove_path(&repo.join(".wt/tree_id")).unwrap();
+    wt_sys::fsx::remove_path(&repo.join(".wt/generated")).unwrap();
+    let doctor = h.json(&["doctor", "repo"]);
+    let replaced = doctor["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "TREE_REPLACED")
+        .unwrap();
+    assert!(replaced["remedy"].as_str().unwrap().contains("wt register"));
+    assert!(replaced["remedy"].as_str().unwrap().contains("--repair"));
+
+    // Reaching the same condition through an ordinary command must point at
+    // the same escape. `remove` and `adopt` both refuse a canonical tree, so
+    // naming them here would send the reader to two dead ends.
+    let refused = h.wt().args(["env", "repo"]).output().unwrap();
+    assert_eq!(refused.status.code(), Some(5));
+    let remedy = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(remedy.contains("--repair"), "door remedy was: {remedy}");
+    assert!(!remedy.contains("wt adopt"), "door remedy was: {remedy}");
+
+    let other = h.repo("other", "");
+    h.wt()
+        .args([
+            "register",
+            other.to_str().unwrap(),
+            "--label",
+            "repo",
+            "--repair",
+            "--json",
+        ])
+        .assert()
+        .code(5)
+        .stdout(predicate::str::contains("REPAIR_REFUSED"))
+        .stdout(predicate::str::contains(
+            "not repo's registered canonical checkout",
+        ));
+
+    let repaired = h.json(&[
+        "register",
+        repo.to_str().unwrap(),
+        "--label",
+        "repo",
+        "--repair",
+    ]);
+    assert_eq!(repaired["data"]["registered"], false);
+    assert_eq!(
+        wt_sys::fsx::read_string(&repo.join(".wt/tree_id")).unwrap(),
+        Some(format!("{tree_id}\n"))
+    );
+    assert_eq!(
+        wt_sys::fsx::read_string(&repo.join(".wt/generated")).unwrap(),
+        Some("# generated by wt for repo. If you edit this file, wt stops re-rendering it; delete it to let wt regenerate it, or set files.\".wt/generated\" = false in .wt/config.toml\nrestored repo".to_owned())
+    );
+    assert_eq!(
+        wt_sys::fsx::read_string(&h.home.join("registry.json"))
+            .unwrap()
+            .unwrap(),
+        registry_before
+    );
+    let state_after =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    assert_eq!(state_after.tree_id, state_before.tree_id);
+    assert_eq!(state_after.phase, state_before.phase);
+    assert_eq!(state_after.sync, state_before.sync);
+    assert_eq!(state_after.verify, state_before.verify);
+    assert_eq!(state_after.resources, state_before.resources);
+
+    h.wt()
+        .args([
+            "register",
+            repo.to_str().unwrap(),
+            "--label",
+            "repo",
+            "--repair",
+            "--json",
+        ])
+        .assert()
+        .code(5)
+        .stdout(predicate::str::contains("is not replaced"));
 }
 
 #[test]
@@ -655,7 +974,7 @@ fn refresh_recreates_a_present_resource() {
 }
 
 #[test]
-fn shell_and_attaching_open_refuse_json() {
+fn shell_refuses_json_while_open_provisions_without_attaching() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
     h.register(&repo);
@@ -664,11 +983,8 @@ fn shell_and_attaching_open_refuse_json() {
         .assert()
         .code(2)
         .stdout(predicate::str::contains("JSON_UNSUPPORTED"));
-    h.wt()
-        .args(["open", "repo", "--json"])
-        .assert()
-        .code(2)
-        .stdout(predicate::str::contains("JSON_UNSUPPORTED"));
+    let opened = h.json(&["open", "repo"]);
+    assert_eq!(opened["data"]["sessions"][0]["created"], true);
 }
 
 #[test]
@@ -703,7 +1019,7 @@ tied_to='tree'
     h.json(&["run", "service", "repo/work"]);
     common::write(
         &h.home.join("config.toml"),
-        "default_agent='probe'\n[agents.probe]\nstart=['true']\nresume=['true']\n",
+        "[session]\nbackend='tmux'\nagent='probe'\n[agents.probe]\nstart=['true']\nresume=['true']\n",
     );
     h.json(&["open", "repo/work", "--no-attach"]);
     assert_eq!(
@@ -892,6 +1208,98 @@ fn copy_reporting_distinguishes_absent_and_tracked_sources() {
 }
 
 #[test]
+fn cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs() {
+    let h = Harness::new();
+    common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
+    let repo = h.repo("repo", "");
+    common::write(
+        &repo.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
+    );
+    common::write(&repo.join("Cargo.lock"), "# generated fixture lockfile\n");
+    common::write(&repo.join(".gitignore"), "/target/\n");
+    wt_sys::fsx::create_private_dir(&repo.join("target")).unwrap();
+    common::write(&repo.join("target/cache.bin"), "warm cache\n");
+    common::git(&repo, &["add", "Cargo.toml", "Cargo.lock", ".gitignore"]);
+    common::git(&repo, &["commit", "-qm", "add cargo fixture"]);
+    common::git(&repo, &["push", "-q", "origin", "main"]);
+
+    let probe_root = h.root.join("reflink-probe");
+    wt_sys::fsx::create_private_dir(&probe_root).unwrap();
+    let probe = wt_sys::fsx::copy_contained(
+        &repo,
+        &probe_root,
+        &wt_core::model::RelPath::new("target").unwrap(),
+        wt_sys::fsx::CopyPolicy::PreferReflink,
+    )
+    .unwrap();
+    let reflink_supported = probe.files.iter().all(|file| file.reflinked);
+
+    h.register(&repo);
+    let created = h.json(&["new", "repo/work", "--no-sync"]);
+    let tree_root = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
+    let skipped = created["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "SEED_SKIPPED_NO_REFLINK");
+    assert_eq!(skipped, !reflink_supported);
+    assert_eq!(
+        wt_sys::fsx::read_string(&tree_root.join("target/cache.bin")).unwrap(),
+        reflink_supported.then(|| "warm cache\n".to_owned())
+    );
+    assert!(!created["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "SEED_COPIED_NOT_CLONED"));
+
+    let target = wt_core::model::Target::parse("repo/work").unwrap();
+    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
+        &h.home.join(wt_core::model::tree_state_path(&target)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        state.materialized.iter().any(|entry| {
+            entry.path == "target" && entry.kind == wt_core::lifecycle::MaterializedKind::Seeded
+        }),
+        reflink_supported
+    );
+
+    let synced = h.json(&["sync", "repo/work"]);
+    let inputs = synced["data"]["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|input| input["path"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(inputs, BTreeSet::from(["Cargo.lock", "Cargo.toml"]));
+    common::proof_capture(
+        "A1",
+        format!(
+            "reflink supported: {reflink_supported}\nadapter seed present: {}\nSEED_SKIPPED_NO_REFLINK: {skipped}\nsync inputs: {}",
+            tree_root.join("target/cache.bin").exists(),
+            inputs.iter().copied().collect::<Vec<_>>().join(", ")
+        ),
+    );
+
+    common::write(
+        &repo.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.2.0'\nedition='2021'\n",
+    );
+    common::git(&repo, &["add", "Cargo.toml"]);
+    common::git(&repo, &["commit", "-qm", "advance cargo input"]);
+    common::git(&repo, &["push", "-q", "origin", "main"]);
+    let status = h.json(&["status", "repo/work"]);
+    assert_eq!(
+        status["data"]["sync"]["drift"],
+        serde_json::json!(["Cargo.toml"])
+    );
+}
+
+#[test]
 fn sync_rechecks_tracked_render_paths_even_when_they_have_records() {
     let h = Harness::new();
     let repo = h.repo(
@@ -966,7 +1374,7 @@ fn truth_surfaces_report_descriptions_config_errors_and_live_locks() {
 }
 
 #[test]
-fn door_notices_are_always_in_json_and_missing_bins_are_always_on_stderr() {
+fn door_notices_stay_in_json_and_missing_bins_render_as_next_steps() {
     let h = Harness::new();
     let repo = h.repo("repo", "bin=['missing-bin']\n[task.fail]\nrun='exit 2'\n");
     h.register(&repo);
@@ -974,7 +1382,10 @@ fn door_notices_are_always_in_json_and_missing_bins_are_always_on_stderr() {
         .args(["exec", "repo", "--", "true"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("BIN_DIR_MISSING"));
+        .stderr(predicate::str::contains("next"))
+        .stderr(predicate::str::contains("create "))
+        .stderr(predicate::str::contains("wt build repo").not())
+        .stderr(predicate::str::contains("BIN_DIR_MISSING").not());
     assert!(h.json(&["env", "repo"])["notices"]
         .as_array()
         .unwrap()
@@ -985,6 +1396,23 @@ fn door_notices_are_always_in_json_and_missing_bins_are_always_on_stderr() {
         .assert()
         .code(6)
         .stdout(predicate::str::contains("BIN_DIR_MISSING"));
+}
+
+#[test]
+fn text_run_keeps_wt_guidance_off_the_child_stdout() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        "bin=['missing-bin']\n[task.print-version]\nrun='printf 1.2.3'\n",
+    );
+    h.register(&repo);
+    h.wt()
+        .args(["run", "print-version", "repo"])
+        .assert()
+        .success()
+        .stdout("1.2.3")
+        .stderr(predicate::str::contains("next"))
+        .stderr(predicate::str::contains("missing-bin"));
 }
 
 #[test]
@@ -1227,7 +1655,6 @@ fn doctor_manufactures_repository_capacity_lock_and_tooling_conditions() {
         "UPSTREAM_GONE",
         "TREE_IN_USE",
         "GIT_TOO_OLD",
-        "TMUX_OLD",
         "REPO_PATH_MISSING",
         "PORTS_EXHAUSTED",
     ] {
@@ -1274,6 +1701,7 @@ fn doctor_condition_contracts_cover_every_documented_code() {
         "NO_ADAPTER",
         "NO_VERIFY",
         "NO_COORDINATION",
+        "SESSION_BACKEND",
         "BIN_DIR_MISSING",
         "PATH_NOT_SHADOWED",
         "PORT_BOUND",
@@ -1283,7 +1711,6 @@ fn doctor_condition_contracts_cover_every_documented_code() {
         "IDENTIFIER_LONG",
         "TREE_IN_USE",
         "GIT_TOO_OLD",
-        "TMUX_OLD",
     ]);
     assert_eq!(
         covered,

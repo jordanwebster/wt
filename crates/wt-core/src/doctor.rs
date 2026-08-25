@@ -37,6 +37,7 @@ pub const CODES: &[&str] = &[
     "NO_ADAPTER",
     "NO_VERIFY",
     "NO_COORDINATION",
+    "SESSION_BACKEND",
     "BIN_DIR_MISSING",
     "PATH_NOT_SHADOWED",
     "PORT_BOUND",
@@ -46,7 +47,6 @@ pub const CODES: &[&str] = &[
     "IDENTIFIER_LONG",
     "TREE_IN_USE",
     "GIT_TOO_OLD",
-    "TMUX_OLD",
 ];
 
 pub fn is_code(code: &str) -> bool {

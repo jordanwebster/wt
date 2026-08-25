@@ -157,12 +157,13 @@ A resource's scope is the scope at which its effective task was declared.
 
 ### 5.4 Settings and geometry
 ```
-Settings := { schema?: 1, trees_dir?, default_agent?, agents?: Map<String, { start: Cmd, resume: Cmd }>,
+Settings := { schema?: 1, trees_dir?, agents?: Map<String, { start: Cmd, resume: Cmd }>,
               ports?: { base?: u16 (20000), stride?: u8 (16) }, git?: { timeouts?: GitTimeouts }, task?: TaskDefaults,
-              locks?: LockWaits, session?: { status_bar?: bool (true), tmux_timeout?: Duration ("10s") },
+              locks?: LockWaits, session?: { backend?: "tmux"|"none", attach?: bool (true), agent?: String|null,
+                                            tmux_timeout?: Duration ("10s") },
               logs?: { keep?: u16 (20) } ★, shell?: { program?: AbsPath }, repos?: Map<Label, Config> }
 ```
-Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ base ≤ 65535`; `1 ≤ stride ≤ 255`; `max_slots = (65536 − base)/stride ≥ 1`. Geometry is per incarnation and immutable (§7); `assemble` uses `TreeRec.geometry`; settings changes affect only future allocations; doctor `GEOMETRY_CHANGED` (info). Per tree `ports.len() ≤ geometry.stride` else `CONFIG_INVALID`. Built-in agents: `claude` (`claude` / `claude --continue`), `codex` (`codex` / `codex resume --last`).
+Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ base ≤ 65535`; `1 ≤ stride ≤ 255`; `max_slots = (65536 − base)/stride ≥ 1`; `session.agent`, when set, names a declared agent. The removed top-level agent setting is rejected with a remedy naming `session.agent`. At `register`, or on the first `new`, `open`, or `close` in a home that predates this setting, an absent `session.backend` is resolved once: wt checks for tmux ≥ 3.2, writes `"tmux"` when found and `"none"` otherwise, and prints `sessions: tmux <version> (set session.backend to change)` or its `none` equivalent on stderr. A non-table `session` declaration that cannot be extended without rewriting is refused with a remedy to rewrite it as `[session]`. No command detects a session backend again after the key is written. `doctor` reports the effective backend as `SESSION_BACKEND` (info). Geometry is per incarnation and immutable (§7); `assemble` uses `TreeRec.geometry`; settings changes affect only future allocations; doctor `GEOMETRY_CHANGED` (info). Per tree `ports.len() ≤ geometry.stride` else `CONFIG_INVALID`. Built-in agents: `claude` (`claude` / `claude --continue`), `codex` (`codex` / `codex resume --last`).
 
 ### 5.5 Tool variables (A15; ★ new)
 `WT_LABEL`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_TARGET`, `WT_BRANCH`, `WT_ROOT`, `WT_REPO` (canonical path), `WT_HOME` (resolved home), `WT_SLOT` ★, `WT_PORT_BASE`, `WT_PORT_<NAME>`, `WT_SESSION`, `WT_BIN` ★, `WT_ACTIVATION` ★ (the marker, §8.1), `WT_TASK`, `WT_SELF`. `WT_BRANCH` is the HEAD branch **at spawn** (empty if detached), read by one bounded `git symbolic-ref --short -q HEAD`; it is not updated while a shell or session lives (A31). All except `WT_ACTIVATION` are ordinary variables with a recorded prior (§8.1). **Tree-specific keys** (used by §10.3): `WT_ROOT`, `WT_TARGET`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_SLOT`, `WT_PORT_BASE`, `WT_PORT_*`, `WT_SESSION`, `WT_BIN`, `PATH`.
@@ -177,7 +178,7 @@ Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ bas
 | `bin`/`cwd` existence, `source` readability | door | `BIN_DIR_MISSING` (notice), `CWD_MISSING` (5), `FILE_SOURCE_MISSING` (5) |
 
 ### 5.7 Path containment and no-follow I/O
-Lexical: non-empty, no leading `/`, no `..`, no `.` component (except the whole `"."`), no NUL; normalised. The tree root is canonicalised once at registration (`ROOT_IS_SYMLINK` 5 if a symlink). Writes into a tree: parent directories created with `mkdir -p` semantics; the target inspected with `fstatat(AT_SYMLINK_NOFOLLOW)` and opened `O_NOFOLLOW` (a symlink target → `RENDER_ONTO_SYMLINK`/`COPY_EXISTS` per caller). Render: `tmp` beside the target (`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`) → write → `fsync` → `rename`. `copy`/`seed`: source walked with `fstatat(AT_SYMLINK_NOFOLLOW)`, symlinks recreated, directories created, files copied with reflink attempted per file (`fclonefileat`/`FICLONE`) and read/write fallback on `EXDEV`/`ENOTSUP`. `bin`: lexical join (PATH semantics). `cwd`: lexical containment; `chdir` follows symlinks (documented). `source`: the same rules from the canonical root.
+Lexical: non-empty, no leading `/`, no `..`, no `.` component (except the whole `"."`), no NUL; normalised. The tree root is canonicalised once at registration (`ROOT_IS_SYMLINK` 5 if a symlink). Writes into a tree: parent directories created with `mkdir -p` semantics; the target inspected with `fstatat(AT_SYMLINK_NOFOLLOW)` and opened `O_NOFOLLOW` (a symlink target → `RENDER_ONTO_SYMLINK`/`COPY_EXISTS` per caller). Render: `tmp` beside the target (`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`) → write → `fsync` → `rename`. `copy` and repository-declared `seed`: source walked with `fstatat(AT_SYMLINK_NOFOLLOW)`, symlinks recreated, directories created, files copied with reflink attempted per file (`fclonefileat`/`FICLONE`) and read/write fallback on `EXDEV`/`ENOTSUP`. Adapter seeds use the same contained walk but require reflinks for files; if any file cannot be cloned, the partial destination is removed and the whole adapter seed is skipped (§11.7). `bin`: lexical join (PATH semantics). `cwd`: lexical containment; `chdir` follows symlinks (documented). `source`: the same rules from the canonical root.
 
 ## 6. Adapters
 ### 6.1 Tables
@@ -289,10 +290,10 @@ Used by `exec`, `run` (per plan, §10.1), `shell`, `open` and `env`. The door-eq
 | D6 | render (§8.3) and, if the materialised set changed, exclude (§4.2) | 6, 5 |
 | D7 | spawn (§9.2); for `env` print and release | — |
 
-cwd: caller's cwd if inside the tree, else the tree root (`run`: node cwd). `BIN_DIR_MISSING` is always visible (stderr in text mode, `notices[]` in JSON); other notices go to stderr on a TTY or `--verbose`, and always to `notices[]`. Port-bound findings are reported by `list`/`status`/`doctor` (§12), never by a door (§0).
+cwd: caller's cwd if inside the tree, else the tree root (`run`: node cwd). `BIN_DIR_MISSING` is expected-state guidance: text mode renders one actionable `next` line in the command summary (or on stderr immediately before a passthrough or `run` child), including under `--quiet`; it is never formatted as `wt: BIN_DIR_MISSING — …` and wt never writes it to a `run` child's stdout. When an effective `build` task exists the action names `wt build <target>`; otherwise it says to create the missing directory without naming a nonexistent task. The notice carries the target, path and task availability as internal structured guidance rather than deriving them from its message. Its public shape remains unchanged in `notices[]` in JSON. Other notices go to stderr on a TTY or `--verbose`, and always to `notices[]`. Notices are de-duplicated by `(code, subject)` before rendering. Port-bound findings are reported by `list`/`status`/`doctor` (§12), never by a door (§0).
 
 ### 9.2 Spawn: `execvp`, the `run` parent, `--no-gate`
-**Passthrough doors** (`exec`, `shell`, foreground `open`): after D6 the wt process clears `FD_CLOEXEC` on the tree-lock and door-file fds and `execvp`s the child with the assembled env; the pid is unchanged, so the door file names the running process. `flock` is held by the open file description and survives `exec`; a child that closes every inherited fd releases the lock early — an accepted residual (A31; alongside A23/A27). Shells keep inherited fds, so `wt remove` of a tree someone is sitting in reports `TREE_IN_USE` naming the shell (A31 exception 1).
+**Passthrough doors** (`exec`, `shell`): after D6 the wt process clears `FD_CLOEXEC` on the tree-lock and door-file fds and `execvp`s the child with the assembled env; the pid is unchanged, so the door file names the running process. `flock` is held by the open file description and survives `exec`; a child that closes every inherited fd releases the lock early — an accepted residual (A31; alongside A23/A27). Shells keep inherited fds, so `wt remove` of a tree someone is sitting in reports `TREE_IN_USE` naming the shell (A31 exception 1).
 
 **`run` nodes** keep a wt parent for the child's lifetime: it holds the lock fds (`FD_CLOEXEC` set, not inherited), spawns the child with inherited stdio (`--json`: stdout captured, §9.3), tees output to the log, enforces `timeout`, waits, and exits with the child's code or `128+n` on signal death.
 
@@ -301,27 +302,31 @@ cwd: caller's cwd if inside the tree, else the tree root (`run`: node cwd). `BIN
 ### 9.3 Machine protocol per door (A20)
 | Door | `--json` | stdout / stderr | exit status |
 |---|---|---|---|
-| `exec`, `shell`, attaching `open` | refused: `JSON_UNSUPPORTED` (2), remedy "passthrough doors have no envelope: use `wt env --json` or `wt run --json`" | child's | child's |
-| `open --no-attach`, `open --all`, `close` | supported | one envelope / notices | classes |
+| `exec`, `shell` | refused: `JSON_UNSUPPORTED` (2), remedy "passthrough doors have no envelope: use `wt env --json` or `wt run --json`" | child's | child's |
+| `open`, `open --all`, `close` | supported; JSON suppresses attachment | one envelope / notices | classes |
 | `run <task>` text | — | child stdio tee'd to the log and inherited; notices on stderr | child's once started; signal `n` → `128+n` |
 | `run <task> --json` | supported | stdout = exactly one envelope; child stdout+stderr merged to stderr and the log | classes (0 / 6 `TASK_FAILED` with `error.details.child` / 8) |
 | `env` | supported | envelope or export lines | classes |
 
 Transport (A19): `exec` and `run` children receive the assembled env; `shell` execs `settings.shell.program` (default `$SHELL`, else `/bin/sh`) interactive, non-login, with the assembled env — the promise is at spawn; rc files may alter PATH; the pre-spawn banner names `WT_BIN`; `wt doctor` inside reports `PATH_NOT_SHADOWED` (remedy: the `shell-init` guard, §14.6, or the rc file).
 
-### 9.4 Sessions (A17)
-`wt open [target] [--agent X] [--no-attach] [--all]`, `wt close [target|--all]`. Requires tmux ≥ 3.2 (`TMUX_OLD` 5 otherwise).
+### 9.4 Sessions
+`wt open [target] [--agent X] [--no-attach] [--all]`, `wt close [target|--all]`. `session.backend = "tmux"` declares tmux as the backend; commands do not probe its version after registration.
 
 | Situation | Behaviour |
 |---|---|
-| tmux present, session exists (`has-session`) | release the tree lock (D2 fd and door file) as soon as `has-session` answers; then attach (`switch-client` inside tmux, else `attach-session`) or, with `--no-attach`, report. Attach is a tmux client and holds no wt lock. |
-| tmux present, absent | `tmux new-session -d -s <session_name> -c <root> -- wt exec --no-gate <target> -- <agent start|resume>` (the inner door assembles the environment; nothing is passed with `-e`); if `new-session` fails because the session now exists (a concurrent `open` won) proceed as "exists"; record `agent`; set `status-left` on that session; release the lock; attach unless `--no-attach` |
-| `--all` | every tree with a recorded `agent`: ensure with `resume`, never attach |
-| tmux absent | TTY with `--agent X` and neither `--no-attach` nor `--all`: print "tmux not found; running `X` in the foreground", `execvp` through §9.2, record `agent`; otherwise `TOOL_MISSING` (5); `list` reports `session: "unknown"` |
+| session exists (`has-session`) | release the tree lock (D2 fd and door file) as soon as `has-session` answers; never start or resume an agent; then attach when the attachment predicate below holds. Attach is a tmux client and holds no wt lock. |
+| session absent, agent selected by `--agent X` or `session.agent` | `tmux new-session -d -s <session_name> -c <root> -- wt exec --no-gate <target> -- <agent start>` (the inner door assembles the environment; nothing is passed with `-e`); record the agent only after this process creates the session. A concurrent creator wins without causing a second start. |
+| session absent, tree has a recorded agent and no explicit override | create through the recorded agent's `resume` recipe; the record is unchanged. |
+| session absent, no agent selected or recorded | create through `wt exec --no-gate <target> -- <interactive shell>` using the same program and arguments as `wt shell`; leave the tree's agent null. |
+| `--all` | attempt every live tree; recorded agents use `resume`, unrecorded trees use `session.agent`'s `start` when configured and shells otherwise; never attach. A failure for one tree is recorded as `{target, name, failed:true, code, message, remedy}` and does not stop later trees. The command exits with the highest exit class observed after the batch; JSON has `ok:false`, retains `data.sessions`, and reports the worst error at top level. |
+| `session.backend = "none"` | `open` and `close` refuse with `SESSION_DISABLED` (5), naming `session.backend` and the `"tmux"` value that enables them. `list`, `remove`, and `prune` execute no tmux process. There is no foreground-agent fallback. |
+
+Attachment occurs only when all hold: `session.attach = true`; both stdin and stdout are terminals; output is not JSON; `$WT_ACTIVATION` is unset; neither `--no-attach` nor `--all` applies. Inside tmux wt uses `switch-client`; otherwise it uses `attach-session`. These conditions affect attachment only: except for `new --no-open`, an absent session is still created. An agent therefore starts only when wt successfully creates a session, never when it attaches to one.
 
 Consequently the only tree-lock holders are passthrough doors (through their exec'd child), `run` parents, and doors in their prelude (D2–D6); sessions and attach clients hold none. Sessions are closed by `remove`/`unregister` (§11.4 step 5), by `prune` before tombstoning (§12), and by `wt close`.
 
-**`wt close [target|--all]`**: resolve the target; tmux absent → `TOOL_MISSING` (5); if `has-session <session_name>` → `kill-session` (no lock is taken: sessions hold none); JSON is always `{ sessions: [ { target, session: session_name, closed: bool } ] }` — one element without `--all` (`closed: false` when no session existed); `--all` iterates every live tree with a recorded `agent`. Idempotent.
+**`wt close [target|--all]`**: resolve the target; backend `none` → the refusal above; if `has-session <session_name>` → `kill-session` (no lock is taken: sessions hold none); JSON is always `{ sessions: [ { target, session: session_name, closed: bool } ] }` — one element without `--all` (`closed: false` when no session existed); `--all` iterates every live tree. Idempotent.
 
 ## 10. Tasks and resources
 ### 10.1 Plans, `lock_plan`, execution
@@ -415,7 +420,7 @@ TreeState := { schema: 1, tree_id, label, name, phase: initialising|bootstrappin
 
 ### 11.2 `new`
 ```
-wt new <label>/<name> [--branch B] [--from REF] [--detach] [--no-sync] [--verify] [--no-fetch] [--agent X]
+wt new <label>/<name> [--branch B] [--from REF] [--detach] [--no-sync] [--verify] [--no-fetch] [--no-open] [--no-attach]
 REF := <local branch> | <remote>/<branch> | pr:N | <PR URL> | <rev>
 ```
 `--from` bare `X`: `refs/heads/X` → `refs/remotes/origin/X` → rev; both present and different → local wins with `FROM_LOCAL_SHADOWS_REMOTE`; `origin/X` forces remote. Default start `origin/<default>` after a bounded fetch (`--no-fetch` skips; unpushed local default-branch commits need `--from main`). Default branch: `origin/HEAD` → `main`/`master`/`trunk` → HEAD, cached, refreshed on fetch. PR refspec by origin host: github `refs/pull/N/head`; gitlab `refs/merge-requests/N/head`; bitbucket `refs/pull-requests/N/from`; unknown: pull then merge-requests; fetched as `refs/wt/pr/N`, local branch `pr/N`, default name `pr-N`. A PR URL selects the label whose normalised origin (https or scp-style ssh, `.git` stripped) matches host and `owner/repo`; zero/many → error with remedy. `B` defaults to `<name>`; `--branch feature/x` without a name → `feature-x`. `AddSpec`: existing branch · `-b B <start>` with `--no-track` unless start is `refs/remotes/*` · `--detach`.
@@ -442,9 +447,11 @@ Decision (inside the registry transaction, under the exclusive tree lock):
 | S3 | `copy`, `seed` (§11.7); record `materialized`; exclude | 6, 5 |
 | S4 | `PORTS` (§7); assemble + declaration refresh (§10.5) + render (§8.3) | 5, 6 |
 | S5 | `sync` through §10.1 under the held lock (unless `--no-sync`) | 2,3,4,6 |
-| S6 | state: `sync.inputs`, phase `ready`, `op = null`, `verify_pending = --verify`; registry: record `agent` | 6, 5 |
+| S6 | state: `sync.inputs`, phase `ready`, `op = null`, `verify_pending = --verify` | 6 |
 | V | `--verify`: run `verify` through §10.1; state `verify = {at, ok, log}`, `verify_pending = false` | 2,3,4,6 |
 | F | release | — |
+
+After F, `new` prints its phase-1 human summary, then applies §9.4: with backend `tmux`, it ensures the session and attaches when the attachment predicate holds. `--no-open` skips both creation and attachment. `--no-attach` still creates the session. Backend `none` leaves the ready tree without a session. Agent selection comes only from `session.agent`; `new` has no agent flag. Session provisioning is additional to the completed tree: if it fails, `new` emits warning notice `SESSION_CREATE_FAILED` naming `wt open <target>` as the retry, exits 0, and retains the complete `NewData` payload in JSON as well as text mode.
 
 Failures: G → class 7/5/4, entry stays (`claimed`, resumable); S4/S5 → `failed`, tree remains (R3); V → `VERIFY_FAILED` (6), tree `ready` with `verify_pending` cleared. Never `created:false` without `ready`.
 
@@ -475,7 +482,7 @@ Classification (pure over git results): "unpushed" = upstream present ∧ `rev-l
 `wt unregister <label> [--yes] [--force]`: refuses while non-canonical trees exist (`TREES_EXIST` 5) unless `--force` (removes them first via §11.4, one consent prompt listing all). For the canonical tree the teardown is performed inline: §11.4 step 1 **without** its canonical refusal, then steps 2–8 exactly as written (step 8 is the **only** tree-tied teardown pass), then **every repo-tied record** with `Destroy{teardown}`; **failure barrier**: if any tree-tied or repo-tied record is not dropped → `DESTROY_FAILED` (6), the canonical tree stays `removing` → `remove-interrupted`, and nothing below runs; otherwise artefact cleanup — hash-owned rendered files deleted via §5.7, `.wt/` deleted (consented; it may hold application data), anything else `ARTIFACT_KEPT` with its exclusion retained; exclude block removed if nothing kept; registry and state records deleted. The checkout is never deleted.
 
 ### 11.6 `register` and `adopt`
-`wt register [path] [--label L] [--move-to PATH]`, `wt adopt <path> [--label L] [--name N]`:
+`wt register [path] [--label L] [--move-to PATH] [--repair]`, `wt adopt <path> [--label L] [--name N]`:
 
 | Step | Action | Lock |
 |---|---|---|
@@ -488,8 +495,10 @@ Classification (pure over git results): "unpushed" = upstream present ∧ `rev-l
 
 `adopt` requires the path to be listed by `git worktree list` of that gitdir (`NOT_A_WORKTREE` 5). `register --move-to` updates the canonical path and runs `git worktree repair`.
 
+`register <path> --label L --repair` recovers a canonical checkout in derived phase `replaced` because its `.wt/tree_id` marker is absent or wrong. It succeeds only when `path` is label `L`'s recorded canonical path, its common gitdir still matches the label, and the phase is `replaced`; otherwise `REPAIR_REFUSED` (5). Under the exclusive tree lock it rewrites the marker from the registry entry, recomputes the exclude block, and re-renders hash-owned files. It does not allocate or append coordinates, refresh resource declarations, alter resource/sync/verify state, or touch tombstones. `doctor`'s `TREE_REPLACED` remedy for a canonical tree names this command.
+
 ### 11.7 `copy` and `seed`
-Run exactly once per incarnation at `new` S3 (never for canonical or adopted trees). Source root = the canonical checkout. Per entry: source absent → `COPY_ABSENT` info; tracked by git → `COPY_TRACKED` (5), `new` aborts at S3 (`incomplete`, resumable); destination exists → `COPY_EXISTS` info, never overwritten; otherwise copied via §5.7 (files byte-for-byte with mode, directories recursively, symlinks recreated); record `materialized {kind: copied|seeded, hash: null}`. `seed` is the same with reflink attempted per file (`SEED_COPIED_NOT_CLONED` info on fallback; adapter default seeds per §6.1). Copied/seeded paths are not hash-owned and are never re-rendered or individually deleted; they are excluded while the tree or its tombstone exists. Task side effects outside the tree are never tracked; a side effect that occupies a future tree path surfaces as `PATH_OCCUPIED` at that tree's `new` (§11.2 G).
+Run exactly once per incarnation at `new` S3 (never for canonical or adopted trees). Source root = the canonical checkout. Per entry: source absent → `COPY_ABSENT` info; tracked by git → `COPY_TRACKED` (5), `new` aborts at S3 (`incomplete`, resumable); destination exists → `COPY_EXISTS` info, never overwritten; otherwise copied via §5.7 (files byte-for-byte with mode, directories recursively, symlinks recreated); record `materialized {kind: copied|seeded, hash: null}`. Repository-declared `seed` prefers reflink per file and falls back to a byte copy with `SEED_COPIED_NOT_CLONED` info. An adapter seed is reflink-only: if any file cannot be cloned, remove any partial destination, skip the entry without a materialized record, and emit `SEED_SKIPPED_NO_REFLINK` info naming the path and reason. Copied/seeded paths are not hash-owned and are never re-rendered or individually deleted; they are excluded while the tree or its tombstone exists. Task side effects outside the tree are never tracked; a side effect that occupies a future tree path surfaces as `PATH_OCCUPIED` at that tree's `new` (§11.2 G).
 
 ## 12. Truth: `list`, `status`, `doctor`, `prune`, logs
 `wt list [label] [--probe] [--fast] [--disk]`, `wt status [target] [--probe]`: address, phase (§11.1), branch/detached, dirty counts, upstream ahead/behind, behind default, sync state (`ok | stale (<files>) | failed | never`, `behind <default> by N`, **`drift (<files>)`** = sync inputs changed on the default branch since the merge-base: one bounded `git diff --name-only HEAD...origin/<default> -- <sync_inputs>` per tree, S3/A31; `--fast` skips it), session `yes|no|unknown`, agent, resources `{scope, task, state, external, undeclared, last_probe, last_error}`, slot/ports (+`bound` from one bind probe per declared port, skipped by `--fast`), path. `--probe` refreshes declarations (§10.5) and runs `exists` per record under its resource lock.
@@ -503,9 +512,9 @@ Run exactly once per incarnation at `new` S3 (never for canonical or adopted tre
 | `RESOURCE_ORPHANED`, `RESOURCE_GONE`, `RESOURCE_UNDECLARED`, `RESOURCE_PROBE_FAILED`, `REFRESH_SKIPPED`, `NAME_MAY_COLLIDE` (info: a `name` template uses `WT_NAME_SNAKE`/`WT_NAME` but none of `WT_NAME_SHORT`/`WT_SLOT`/`WT_ROOT`) | §10.3–10.5 |
 | `TREE_MISSING_PENDING`, `GEOMETRY_CHANGED` (info), `SLOT_SQUATTED`, `PORT_SQUATTED` (warn: bound with no session and no running task), `PORTS_EXHAUSTED` | §7 |
 | `ADAPTER_TOOL_MISSING`, `ACCELERATOR_*`, `NO_LOCKFILE`, `NO_ADAPTER`, `NO_VERIFY` | §6 |
-| `NO_COORDINATION` (info: the label's effective root config declares no `ports`, no `env` alias and no resource, so parallel trees share the application's default coordinates; remedy "declare `ports`/`env` in `.wt.toml` or `$WT_HOME/config.toml [repos.<label>]`"; A13) | §12 |
-| `BIN_DIR_MISSING`, `PATH_NOT_SHADOWED`, `PORT_BOUND` (info); `EXCLUDE_MISSING`, `EXCLUDE_REPAIRED`, `ACTIVATION_IGNORED` | §9, §12, §4.2, §8.1 |
-| `IDENTIFIER_LONG` (resource name > 63); `TREE_IN_USE` (info, holders), `GIT_TOO_OLD` (< 2.31), `TMUX_OLD` (< 3.2) | §5, §13, tooling |
+| `NO_COORDINATION` (info: the label's effective root config declares no `ports`, no `env` alias and no resource, so parallel trees share the application's default coordinates; remedy "declare `ports`/`env` in `.wt.toml` or `$WT_HOME/config.toml [repos.<label>]`"; A13); `SESSION_BACKEND` (info: the effective session backend) | §12, §5.4 |
+| `BIN_DIR_MISSING`, `PATH_NOT_SHADOWED`, `PORT_BOUND`, `SEED_SKIPPED_NO_REFLINK` (info); `EXCLUDE_MISSING`, `EXCLUDE_REPAIRED`, `ACTIVATION_IGNORED` | §9, §12, §4.2, §8.1 |
+| `IDENTIFIER_LONG` (resource name > 63); `TREE_IN_USE` (info, holders), `GIT_TOO_OLD` (< 2.31) | §5, §13, tooling |
 
 `wt prune [label] [--yes] [--merged] [--gone] [--records <target>]`: retries orphaned destroys (`Destroy` on `orphaned`); runs §11.4's missing-directory path for `missing` trees (ending in a tombstone); `git worktree prune`; deletes `STATE_ORPHAN` files; `--merged`/`--gone` remove clean trees so classified (dirty ⇒ `keep`). Before any step that creates a tombstone, `prune` `kill-session`s the address's session if tmux reports it (consented by the same prompt). `--records <target>` applies to **live entries** in phase `missing`, `replaced` or `remove-interrupted`: it drives that entry's records with `Destroy{teardown}` from their own snapshots (§10.3, `tree_missing = true` for `missing`/`replaced`) and never acts on any directory; it creates no tombstone (the entry stays live until `wt remove`/`wt new`). **Tombstone collection**: for each tombstone of the label, after the session check, delete the tombstone and recompute the exclude block in one registry RMW (5). Consent: TTY without `--yes` → prompt; **non-TTY without `--yes` → print the plan, exit 0 with `data.applied = false` and notice `CONFIRM_REQUIRED`** (prune is a report-then-act verb; §14.2).
 
@@ -556,10 +565,10 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 ### 14.1 Commands (A15 verbs; ★ added)
 | Command | Idempotent | Owner |
 |---|---|---|
-| `wt register [path] [--label L] [--move-to PATH]` | yes (resumes) | §11.6 |
+| `wt register [path] [--label L] [--move-to PATH] [--repair]` | yes (resumes/repairs) | §11.6 |
 | `wt unregister <label> [--yes] [--force]` | yes | §11.5 |
 | `wt clone <url> [--label L] [--path P]` | yes | `git clone` (class `clone`) to `P` (default `$PWD/<stem>`), then §11.6 |
-| `wt new <label>/<name> …` | yes (phase-aware) | §11.2 |
+| `wt new <label>/<name> [--branch B] [--from REF] [--detach] [--no-sync] [--verify] [--no-fetch] [--no-open] [--no-attach]` | yes (phase-aware) | §11.2 |
 | `wt adopt <path> [--label L] [--name N]` ★ | yes | §11.6 |
 | `wt remove <target> [--yes] [--force] [--delete-branch] [--keep-orphans] [--wait d]` | yes | §11.4 |
 | `wt sync [target] [--force]` | yes | §11.3 |
@@ -576,8 +585,18 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 
 Global: `--json`, `--yes`, `--quiet`, `--verbose`, `--color auto|always|never`, `--home DIR`. Unknown subcommand → exit 2 with the three closest names; every `--help` carries one example.
 
+Text mode is the default and every verb has an intentional human rendering; JSON is emitted only with `--json` (passthrough exceptions: A20). There is no generic JSON-to-text fallback. Summaries use:
+
+```
+<headline: what happened>
+  <key>  <value>
+  next   <action, when one is needed>
+```
+
+The headline comes first. Fact keys are lower case and aligned within the block. Empty optional sections are omitted, but failures, orphaned resources and pending verification remain visible. `status`, `doctor` and `config` summarise rather than restating their JSON payloads. `path` prints only the root and `which` prints only the resolved executable (or `not found`). `list`, `tasks`, `config` and `locks` use aligned columns with a header where it aids reading; `tasks` is the effective task table, `config` shows effective keys with scope and layer, and `locks` is the coordination lock table. Output is plain ASCII apart from optional ANSI colour on existing diagnostic codes.
+
 ### 14.2 TTY and bounded-runtime rules (A14)
-Control-plane deadlines per §13.3; user children run as long as they run. Idempotent re-run applies to `register`, `unregister`, `clone`, `new`, `adopt`, `sync`, `remove`, `prune`, `open --no-attach`, `close`. stdin not a TTY ⇒ never prompt; stdout not a TTY or `--json` ⇒ no colour/pager/tables. Every destructive lifecycle verb whose only purpose is destruction (`remove`, `unregister`, `destroy`, `refresh`) prompts on a TTY without `--yes` and requires `--yes` otherwise (`CONFIRM_REQUIRED` 2); a declined prompt exits 0 with `*: false` and mutates nothing. **Exception**: `prune` is a report-then-act verb; without `--yes` on a non-TTY it prints its plan and exits 0 with `data.applied = false` and the notice `CONFIRM_REQUIRED` (§12).
+Control-plane deadlines per §13.3; user children run as long as they run. Idempotent re-run applies to `register`, `unregister`, `clone`, `new`, `adopt`, `sync`, `remove`, `prune`, `open --no-attach`, `close`. stdin not a TTY ⇒ never prompt. Human stdout has the same format when redirected as it has on a terminal; only ANSI colour is omitted according to `--color`. `--json` selects the envelope instead. Every destructive lifecycle verb whose only purpose is destruction (`remove`, `unregister`, `destroy`, `refresh`) prompts on a TTY without `--yes` and requires `--yes` otherwise (`CONFIRM_REQUIRED` 2); a declined prompt exits 0 with `*: false` and mutates nothing. **Exception**: `prune` is a report-then-act verb; without `--yes` on a non-TTY it prints its plan and exits 0 with `data.applied = false` and the notice `CONFIRM_REQUIRED` (§12).
 
 ### 14.3 Exit classes and error type
 | Code | Class | Examples |
@@ -587,7 +606,7 @@ Control-plane deadlines per §13.3; user children run as long as they run. Idemp
 | 2 | usage | `CONFIRM_REQUIRED`, `JSON_UNSUPPORTED`, `USE_UNREGISTER`, `NO_GATE_REFUSED` |
 | 3 | not found | `NOT_FOUND` |
 | 4 | conflict | `NAME_TAKEN`, `BRANCH_IN_USE`, `LOCK_HELD`, `TREE_BUSY`, `TREE_IN_USE`, `SLOTS_EXHAUSTED`, `NAME_SHADOWS_LABEL`, `PATH_REGISTERED`, `GITDIR_REGISTERED`, `GEOMETRY_CONFLICT`, `PORTS_EXHAUSTED`, `IDENTITY_COLLISION`, `TREE_MISSING_PENDING` |
-| 5 | state | `TREE_DIRTY`, `CONFIG_INVALID` (+ subcodes), `SETTINGS_INVALID`, `ENV_UNDEFINED`, `TOOL_MISSING`, `COPY_TRACKED`, `RENDER_ONTO_*`, `PATH_OCCUPIED`, `HOME_OLD_FORMAT`, `*_CORRUPT`, `NOT_A_WORKTREE`, `VERIFY_PENDING`, `ROOT_IS_SYMLINK`, `TREE_REPLACED`, `TREES_EXIST`, `CWD_MISSING`, `FILE_SOURCE_MISSING`, `TMUX_OLD` |
+| 5 | state | `TREE_DIRTY`, `CONFIG_INVALID` (+ subcodes), `SETTINGS_INVALID`, `SESSION_DISABLED`, `ENV_UNDEFINED`, `TOOL_MISSING`, `COPY_TRACKED`, `RENDER_ONTO_*`, `PATH_OCCUPIED`, `HOME_OLD_FORMAT`, `*_CORRUPT`, `NOT_A_WORKTREE`, `VERIFY_PENDING`, `ROOT_IS_SYMLINK`, `TREE_REPLACED`, `TREES_EXIST`, `CWD_MISSING`, `FILE_SOURCE_MISSING` |
 | 6 | child failed | `SYNC_FAILED`, `TASK_FAILED`, `DESTROY_FAILED`, `VERIFY_FAILED`, `NOT_READY`, `RESOURCE_PROBE_FAILED`, `RESOURCE_ORPHANED`, `TASK_PROBE_FAILED` |
 | 7 | external | `GIT_FAILED`, `FETCH_FAILED`, `TMUX_FAILED` |
 | 8 | timeout | `TIMEOUT`, `LOCK_TIMEOUT` |
@@ -617,7 +636,7 @@ StepRep  := { id, scope, status, child|null, duration_ms }
 | `sync` | `{ target, ran, steps: StepRep[], inputs: [ {path, hash} ] }` |
 | `run` | `{ target, task, child|null, log|null, steps: StepRep[] }`; `--dry-run`: `{ task, steps: [ {id, scope, origin, cwd, run, exists, lock, sys_locks, resource, tied_to} ] }` |
 | `destroy` / `refresh` | `{ target, scope, task, before, after, child|null }` |
-| `open` (non-attaching) / `close` | `{ sessions: [ {target, name, created, existing, agent|null, foreground} ] }` / `{ sessions: [ {target, session, closed} ] }` |
+| `open` (non-attaching) / `close` | `{ sessions: [ {target, name, created, existing, agent|null, foreground} | {target, name, failed:true, code, message, remedy} ] }` / `{ sessions: [ {target, session, closed} ] }`; only `open --all` contains the failure variant and may return a failure envelope with this data retained |
 | `env` | `{ target, set, kept, overrode, restored, missing_bins, rendered, bins: [ {dir, exists, executables} ], env: Map, activation: Activation }` |
 | `list` | `{ trees: [Tree], locks: [ {name, label, holder: {pid, target, verb, since}} ] }`; `status` | `Tree & { tasks: [TaskInfo], config_errors }` |
 | `path` / `which` | `{ target, path }` / `{ target, cmd, path|null, in_bin }` |
@@ -731,7 +750,7 @@ Levels **U** (wt-core), **I** (wt-sys/app on temp repos with shims: tmux, docker
 
 Left out: process supervision; port reservation; agent memory migration beyond `copy`; file watching/shell hooks; Windows; tree rename; multiple canonical checkouts per label; daemon/TUI; config trust protocols; merge-back; secrets beyond `copy`; serialising the user's own git/cargo; field-level task merge; state migration (A16); cross-label pairing variables; preventing rc files from altering PATH (A19); defending against hostile renames (A27); `wt unlock`; cross-tree agreement for repo-tied declarations; state-file backups.
 
-Implementer's choices (explicitly free): JSON whitespace (sorted keys, deterministic); temp-file names (same directory, exclusive create); log buffering/header beyond the listed fields (never env values); tmux `status-left` format (must contain `[<label>/<name>]`); prompt and notice wording (codes, remedies, plan content, confirmation timing are normative); probe-shell fixture; teardown cwd for missing trees = `$TMPDIR` else `/tmp`.
+Implementer's choices (explicitly free): JSON whitespace (sorted keys, deterministic); temp-file names (same directory, exclusive create); log buffering/header beyond the listed fields (never env values); prompt and notice wording (codes, remedies, plan content, confirmation timing are normative); probe-shell fixture; teardown cwd for missing trees = `$TMPDIR` else `/tmp`. A wt-owned tmux status line is deferred and no setting controls one.
 
 ## 19. Consistency check
 | Referrer | Owner | Mechanism |

@@ -47,7 +47,6 @@ fn committed_tmux_stub_records_argv_and_obeys_state() {
         &[OsString::from("wt"), OsString::from("exec")],
     )
     .unwrap();
-    tmux.set_status_left("new", "repo/tree").unwrap();
     tmux.switch_client("new").unwrap();
     tmux.kill_session("new").unwrap();
     let record = fs::read_to_string(log).unwrap();
@@ -55,7 +54,6 @@ fn committed_tmux_stub_records_argv_and_obeys_state() {
     assert!(record.contains("\t-c\t"));
     assert!(record.contains("\t--\twt\texec"));
     assert!(!record.contains("\t-e\t"));
-    assert!(record.contains("tmux\tset-option\t-t\tnew\tstatus-left\t[repo/tree] "));
     assert!(record.contains("tmux\tswitch-client\t-t\tnew"));
     assert!(record.contains("tmux\tkill-session\t-t\tnew"));
 }

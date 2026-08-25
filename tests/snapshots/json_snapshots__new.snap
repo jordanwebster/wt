@@ -50,7 +50,7 @@ expression: "normalize(value, &h.root)"
           "undeclared": false
         }
       ],
-      "session": "no",
+      "session": "yes",
       "session_name": "wt_repo_work_38e4c9ab",
       "slot": 1,
       "sync": {

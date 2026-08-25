@@ -1,0 +1,8 @@
+---
+source: tests/human_transcripts.rs
+expression: "normalize(h, &output.stdout)"
+---
+Synced repo/work
+  steps   1/1 passed
+  inputs  README.md
+  next    run `wt build repo/work` to create <ROOT>/wt-home/trees/repo/work/bin

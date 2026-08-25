@@ -1,0 +1,14 @@
+---
+source: tests/human_transcripts.rs
+expression: "normalize(h, &output.stdout)"
+---
+Effective tasks for repo/work
+  task     scope  layer      cwd  needs
+  build    .      repo       .    
+  fmt      .      repo       .    
+  hello    .      repo       .    
+  lint     .      repo       .    
+  service  .      repo       .    
+  sync     .      repo       .    
+  test     .      repo       .    
+  verify   .      composite  .    test

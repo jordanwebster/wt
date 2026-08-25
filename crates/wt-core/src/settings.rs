@@ -99,15 +99,35 @@ impl Default for LogSettings {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SessionSettings {
-    pub status_bar: bool,
+    pub backend: SessionBackend,
+    pub attach: bool,
+    pub agent: Option<String>,
     pub tmux_timeout: String,
 }
 
 impl Default for SessionSettings {
     fn default() -> Self {
         Self {
-            status_bar: true,
+            backend: SessionBackend::None,
+            attach: true,
+            agent: None,
             tmux_timeout: "10s".to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionBackend {
+    Tmux,
+    None,
+}
+
+impl SessionBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tmux => "tmux",
+            Self::None => "none",
         }
     }
 }
@@ -123,7 +143,6 @@ pub struct ShellSettings {
 pub struct Settings {
     pub schema: u8,
     pub trees_dir: Option<String>,
-    pub default_agent: Option<String>,
     pub agents: BTreeMap<String, Agent>,
     pub ports: PortSettings,
     pub git: GitSettings,
@@ -140,7 +159,6 @@ impl Default for Settings {
         Self {
             schema: 1,
             trees_dir: None,
-            default_agent: None,
             agents: BTreeMap::from([
                 (
                     "claude".to_owned(),
@@ -174,6 +192,22 @@ impl Default for Settings {
 }
 
 pub fn parse(source: &str) -> Result<Settings, CoreError> {
+    let value = source.parse::<toml::Table>().map_err(|error| {
+        CoreError::new(
+            ExitClass::State,
+            "SETTINGS_INVALID",
+            error.to_string(),
+            "fix `$WT_HOME/config.toml`",
+        )
+    })?;
+    if value.contains_key("default_agent") {
+        return Err(CoreError::new(
+            ExitClass::State,
+            "SETTINGS_INVALID",
+            "`default_agent` is no longer a valid setting",
+            "move the agent name to `session.agent` in `$WT_HOME/config.toml`",
+        ));
+    }
     let mut settings: Settings = toml::from_str(source).map_err(|error| {
         CoreError::new(
             ExitClass::State,
@@ -220,12 +254,77 @@ pub fn validate_settings(settings: &Settings) -> Result<(), CoreError> {
     {
         return Err(settings_error("settings contain an invalid duration"));
     }
-    if let Some(default_agent) = &settings.default_agent {
-        if !settings.agents.contains_key(default_agent) {
-            return Err(settings_error("default_agent is not declared"));
+    if let Some(agent) = &settings.session.agent {
+        if !settings.agents.contains_key(agent) {
+            return Err(settings_error("session.agent is not declared"));
         }
     }
     Ok(())
+}
+
+pub fn backend_is_declared(source: &str) -> Result<bool, CoreError> {
+    let value = source.parse::<toml::Table>().map_err(|error| {
+        CoreError::new(
+            ExitClass::State,
+            "SETTINGS_INVALID",
+            error.to_string(),
+            "fix `$WT_HOME/config.toml`",
+        )
+    })?;
+    Ok(value
+        .get("session")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|session| session.contains_key("backend")))
+}
+
+pub fn declare_backend(source: &str, backend: SessionBackend) -> Result<String, CoreError> {
+    parse(source)?;
+    if backend_is_declared(source)? {
+        return Ok(source.to_owned());
+    }
+    let table = source.parse::<toml::Table>().map_err(|error| {
+        CoreError::new(
+            ExitClass::State,
+            "SETTINGS_INVALID",
+            error.to_string(),
+            "fix `$WT_HOME/config.toml`",
+        )
+    })?;
+    if table.contains_key("session") && session_header_end(source).is_none() {
+        return Err(CoreError::new(
+            ExitClass::State,
+            "SETTINGS_INVALID",
+            "cannot add session.backend to a non-table session declaration",
+            "rewrite `session = { ... }` as a `[session]` table, then retry",
+        ));
+    }
+    let mut output = source.to_owned();
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    let declaration = format!("backend = \"{}\"\n", backend.as_str());
+    if let Some(offset) = session_header_end(&output) {
+        output.insert_str(offset, &declaration);
+    } else {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str("[session]\n");
+        output.push_str(&declaration);
+    }
+    parse(&output)?;
+    Ok(output)
+}
+
+fn session_header_end(source: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        offset += line.len();
+        if line.trim() == "[session]" {
+            return Some(offset);
+        }
+    }
+    None
 }
 
 fn settings_error(message: &str) -> CoreError {
@@ -335,6 +434,33 @@ mod tests {
         assert_eq!(settings.task.probe_timeout.as_deref(), Some("10s"));
         assert_eq!(settings.locks.rmw.as_deref(), Some("5s"));
         assert!(parse("mystery=true").is_err());
-        assert!(parse("default_agent='missing'").is_err());
+        let legacy = parse("default_agent='missing'").unwrap_err();
+        assert_eq!(legacy.code.0, "SETTINGS_INVALID");
+        assert!(legacy.remedy.contains("session.agent"));
+        assert_eq!(settings.session.backend, SessionBackend::None);
+        assert!(settings.session.attach);
+        assert_eq!(settings.session.agent, None);
+    }
+
+    #[test]
+    fn backend_declaration_preserves_existing_settings() {
+        let source = "trees_dir='/tmp/trees'\n[session]\nattach=false\n";
+        let updated = declare_backend(source, SessionBackend::Tmux).unwrap();
+        assert_eq!(
+            updated,
+            "trees_dir='/tmp/trees'\n[session]\nbackend = \"tmux\"\nattach=false\n"
+        );
+        let settings = parse(&updated).unwrap();
+        assert_eq!(settings.session.backend, SessionBackend::Tmux);
+        assert!(!settings.session.attach);
+    }
+
+    #[test]
+    fn backend_declaration_explains_how_to_rewrite_an_inline_session_table() {
+        let source = "session = { attach = false }\n";
+        let error = declare_backend(source, SessionBackend::Tmux).unwrap_err();
+        assert_eq!(error.code.0, "SETTINGS_INVALID");
+        assert!(error.remedy.contains("[session]"));
+        assert!(error.remedy.contains("retry"));
     }
 }

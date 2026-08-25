@@ -45,7 +45,7 @@ esac
 fn install_probe_agent(harness: &Harness) {
     write(
         &harness.home.join("config.toml"),
-        "default_agent='probe'\n[agents.probe]\nstart=['true']\nresume=['true']\n",
+        "[session]\nbackend='tmux'\nagent='probe'\n[agents.probe]\nstart=['true']\nresume=['true']\n",
     );
 }
 
