@@ -6,6 +6,7 @@ Effective config for repo/work
   key          scope  layer   value
   adapters     .      merged  -
   bin          .      merged  bin
+  commands     .      merged  -
   copy         .      merged  -
   detect       .      merged  depth, ignore
   dirs         .      merged  -
@@ -15,3 +16,4 @@ Effective config for repo/work
   seed         .      merged  -
   sync_inputs  .      merged  README.md
   task         .      merged  build, fmt, hello, lint, service, sync, test
+  vars         .      merged  -

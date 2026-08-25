@@ -135,7 +135,7 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         Ok(())
     })?;
     let entered = if current_dir_exists && current_identity_ok {
-        let door = door::enter_held(context, tree.clone(), "remove", false, false)?;
+        let door = door::enter_held(context, tree.clone(), "remove", false)?;
         executor::refresh_all_declarations(context, &door)?;
         Some(door)
     } else {
@@ -144,10 +144,12 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
 
     let mut destroyed = Vec::new();
     let mut errors = Vec::new();
-    let records = context
-        .read_state(&target)?
-        .map(|state| state.resources.into_values().collect::<Vec<_>>())
-        .unwrap_or_default();
+    let records = executor::newest_resources_first(
+        context
+            .read_state(&target)?
+            .map(|state| state.resources.into_values().collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
     for record in records {
         let key = record.key.clone();
         let resource_holder = context.holder(target.to_string(), "remove")?;

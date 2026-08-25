@@ -9,7 +9,7 @@ pub(crate) fn run(context: &mut Context, args: ResourceAction) -> Result<Output,
     if !context.confirm(&format!("destroy resource {}", args.task))? {
         return Output::data(serde_json::json!({"destroyed": false}));
     }
-    let door = door::enter(context, args.target.as_deref(), "destroy", false)?;
+    let door = door::enter(context, args.target.as_deref(), "destroy")?;
     let notices = door.notices.clone();
     let plan = executor::plan(context, &door, &args.task)?;
     let node = plan

@@ -64,6 +64,8 @@ pub struct ResourceSnapshot {
     pub bin_dirs: Vec<String>,
     pub bin_exes: Vec<String>,
     pub roots: SnapshotRoots,
+    #[serde(default)]
+    pub recorded_sequence: u64,
     pub recorded_at: String,
 }
 
@@ -702,6 +704,7 @@ mod tests {
                 tree: "/tree".to_owned(),
                 home: "/home".to_owned(),
             },
+            recorded_sequence: 1,
             recorded_at: "T0".to_owned(),
         }
     }

@@ -28,7 +28,7 @@ pub(crate) fn run(context: &mut Context, args: Sync) -> Result<Output, CoreError
             "run `wt doctor` and repair the state",
         )
     })?;
-    let door = match door::enter_held(context, tree.clone(), "sync", false, true) {
+    let door = match door::enter_held(context, tree.clone(), "sync", true) {
         Ok(door) => door,
         Err(error) => {
             fail(context, &target, &holder, &error)?;

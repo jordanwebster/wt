@@ -24,6 +24,7 @@ pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError>
     let target = args.target.clone();
     let no_open = args.no_open;
     let no_attach = args.no_attach;
+    let no_build = args.no_build;
     let mut output = create_tree(context, args)?;
     if let Some(notice) = backend_notice {
         output = output.with_notices([notice]);
@@ -31,11 +32,14 @@ pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError>
     if no_open {
         return Ok(output);
     }
+    let build = !no_build && has_build_task(context, &target)?;
     if open::should_attach(context, no_attach) {
-        return Ok(output.after_render(AfterRender::NewSession { target }));
+        return Ok(output.after_render(AfterRender::NewSession { target, build }));
     }
     match open::provision_new(context, &target) {
-        Ok(notices) => output = output.with_notices(notices),
+        // Creation already carries the same door notice set. Session
+        // provisioning enters that door again only to launch tmux.
+        Ok(_) => {}
         Err(error) => {
             output = output.with_notices([open::session_failure_notice(&target, &error)]);
             return Ok(output);
@@ -49,7 +53,17 @@ pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError>
             .agent
             .map_or(serde_json::Value::Null, serde_json::Value::String);
     }
+    if build {
+        output = output.after_render(AfterRender::Build { target });
+    }
     Ok(output)
+}
+
+fn has_build_task(context: &Context, target: &str) -> Result<bool, CoreError> {
+    let target = context.resolve(Some(target))?;
+    let tree = context.tree(&target)?;
+    let config = context.load_config(&tree)?;
+    Ok(context.task_catalog(&tree, &config)?.contains_key("build"))
 }
 
 fn create_tree(context: &mut Context, args: New) -> Result<Output, CoreError> {
@@ -556,15 +570,13 @@ fn finish_under_lock(
             .root
             .copy
             .iter()
-            .map(|path| (path, MaterializedKind::Copied, CopyPolicy::Plain, false))
-            .chain(config.seed.iter().map(|path| {
-                (
-                    path,
-                    MaterializedKind::Seeded,
-                    CopyPolicy::PreferReflink,
-                    config.adapter_seed.contains(path),
-                )
-            }))
+            .map(|path| (path, MaterializedKind::Copied))
+            .chain(
+                config
+                    .seed
+                    .iter()
+                    .map(|path| (path, MaterializedKind::Seeded)),
+            )
             .collect::<Vec<_>>();
         let tracked = context
             .git(Path::new(canonical.path.as_str()))?
@@ -572,10 +584,10 @@ fn finish_under_lock(
                 Path::new(canonical.path.as_str()),
                 &entries
                     .iter()
-                    .map(|(path, _, _, _)| PathBuf::from(path.as_str()))
+                    .map(|(path, _)| PathBuf::from(path.as_str()))
                     .collect::<Vec<_>>(),
             )?;
-        for (path, kind, policy, adapter_seed) in entries {
+        for (path, kind) in entries {
             let subject = Some(format!("{}:{}", target_of(tree), path));
             if matches!(
                 wt_sys::fsx::path_kind(&Path::new(canonical.path.as_str()).join(path.as_str()))?,
@@ -586,7 +598,6 @@ fn finish_under_lock(
                     code: "COPY_ABSENT".to_owned(),
                     subject,
                     message: format!("copy source {path} is absent"),
-                    guidance: None,
                 });
                 continue;
             }
@@ -608,41 +619,35 @@ fn finish_under_lock(
                     code: "COPY_EXISTS".to_owned(),
                     subject,
                     message: format!("copy destination {path} already exists"),
-                    guidance: None,
                 });
                 continue;
             }
-            let report = if adapter_seed {
+            if kind == MaterializedKind::Seeded {
                 match wt_sys::fsx::reflink_contained(
                     Path::new(canonical.path.as_str()),
                     root,
                     path,
                 )? {
-                    ReflinkCopy::Copied(report) => report,
+                    ReflinkCopy::Copied(_) => {}
                     ReflinkCopy::Unavailable => {
                         notices.push(Notice {
                             level: NoticeLevel::Info,
                             code: "SEED_SKIPPED_NO_REFLINK".to_owned(),
                             subject,
                             message: format!(
-                                "adapter seed {path} was skipped because reflink is unavailable"
+                                "seed {path} was skipped because reflink is unavailable"
                             ),
-                            guidance: None,
                         });
                         continue;
                     }
                 }
             } else {
-                wt_sys::fsx::copy_contained(Path::new(canonical.path.as_str()), root, path, policy)?
-            };
-            if kind == MaterializedKind::Seeded && report.files.iter().any(|file| !file.reflinked) {
-                notices.push(Notice {
-                    level: NoticeLevel::Info,
-                    code: "SEED_COPIED_NOT_CLONED".to_owned(),
-                    subject,
-                    message: format!("seed {path} was copied because reflink was unavailable"),
-                    guidance: None,
-                });
+                wt_sys::fsx::copy_contained(
+                    Path::new(canonical.path.as_str()),
+                    root,
+                    path,
+                    CopyPolicy::PreferReflink,
+                )?;
             }
             copied.push(Materialized {
                 path: path.to_string(),
@@ -659,7 +664,7 @@ fn finish_under_lock(
         Ok(())
     })?;
     door::recompute_exclude(context, &tree.label)?;
-    let door = match door::enter_held(context, tree.clone(), "new", false, true) {
+    let door = match door::enter_held(context, tree.clone(), "new", true) {
         Ok(door) => door,
         Err(error) => {
             mark_new_failed(context, &target, holder, &error)?;
@@ -812,7 +817,7 @@ fn verify_ready(
         state.verify_pending = true;
         Ok(())
     })?;
-    let door = door::enter_held(context, tree.clone(), "new", false, true)?;
+    let door = door::enter_held(context, tree.clone(), "new", true)?;
     let mut notices = door.notices.clone();
     let verify = run_verify(context, &door, &holder, &mut notices)?;
     drop(token);
@@ -880,7 +885,6 @@ fn source_notices(
             code: code.to_owned(),
             subject: Some(target.to_string()),
             message: "local branch takes precedence over a different origin branch".to_owned(),
-            guidance: None,
         });
     }
     notices

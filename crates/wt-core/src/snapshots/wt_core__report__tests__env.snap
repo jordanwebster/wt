@@ -14,9 +14,6 @@ expression: envelope
     "set": [
       "WT_ROOT"
     ],
-    "kept": [
-      "PORT"
-    ],
     "overrode": [
       "PATH"
     ],
@@ -36,6 +33,13 @@ expression: envelope
         "executables": [
           "wt"
         ]
+      }
+    ],
+    "ports": [
+      {
+        "name": "http",
+        "port": 20016,
+        "bound": null
       }
     ],
     "env": {

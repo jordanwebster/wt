@@ -9,9 +9,9 @@ const TREE_SPECIFIC_KEYS: &[&str] = &[
     "WT_NAME_SNAKE",
     "WT_NAME_SHORT",
     "WT_SLOT",
-    "WT_PORT_BASE",
     "WT_SESSION",
     "WT_BIN",
+    "WT_PATH_PREFIX",
     "PATH",
 ];
 
@@ -43,7 +43,7 @@ pub fn minimise_env(
 }
 
 pub(crate) fn is_tree_specific_key(key: &str) -> bool {
-    TREE_SPECIFIC_KEYS.contains(&key) || key.starts_with("WT_PORT_")
+    TREE_SPECIFIC_KEYS.contains(&key)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -95,7 +95,6 @@ mod tests {
         let assembled = EnvMap::from([
             ("WT_LABEL".to_owned(), "repo".to_owned()),
             ("WT_ROOT".to_owned(), "/tree".to_owned()),
-            ("WT_PORT_HTTP".to_owned(), "20000".to_owned()),
             ("WT_ACTIVATION".to_owned(), "secret-marker".to_owned()),
             ("PATH".to_owned(), "/tree/bin:/usr/bin".to_owned()),
             ("ALIAS".to_owned(), "alias".to_owned()),
@@ -116,7 +115,6 @@ mod tests {
                 "PATH",
                 "TASK_KEY",
                 "WT_LABEL",
-                "WT_PORT_HTTP",
                 "WT_ROOT",
             ]
         );

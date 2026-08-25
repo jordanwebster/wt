@@ -6,7 +6,7 @@ ports = ["metro"]
 # Expo's fallback bundler port wherever a bundler starts (`expo start`,
 # `expo run:ios`, `expo run:android`, the npm scripts); also passed into
 # xcodebuild so the dev client's built-in default matches.
-RCT_METRO_PORT = "$WT_PORT_METRO"
+RCT_METRO_PORT = "${ports.metro}"
 
 # modules/orbit-core/ios/rust depends on the orbit crate by relative path,
 # expecting an `orbit` checkout beside this one. Worktrees live elsewhere,

@@ -1,0 +1,17 @@
+# wt coordinates its own worktrees. Each checkout builds its own wt into
+# target/debug, which is first on PATH inside every door, so a worktree runs
+# the binary it just built rather than the one installed on this machine.
+#
+# `commands` is deliberately not declared: `wt` is a reserved name, because a
+# claim that refuses until it is built would make `wt build` unrunnable.
+
+bin = ["target/debug"]
+
+[task.failpoints]
+run = "cargo test --workspace --features failpoints"
+description = "Run the suite with fault injection enabled"
+
+[task.verify]
+needs = ["lint", "test", "failpoints"]
+run = "cargo fmt --all -- --check"
+description = "Everything CI enforces, in one plan"

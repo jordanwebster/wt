@@ -259,7 +259,7 @@ fn perform_with_backend(
     let identity = wt_core::model::RelPath::new(".wt/tree_id")?;
     wt_sys::fsx::write_nofollow(&path, &identity, format!("{tree_id}\n").as_bytes(), 0o600)?;
     door::recompute_exclude(context, &label)?;
-    let prepared = door::enter_held(context, tree.clone(), "register", false, true)?;
+    let prepared = door::enter_held(context, tree.clone(), "register", true)?;
     executor::refresh_all_declarations(context, &prepared)?;
     context.mutate_state(&target, &holder, |state| {
         state.phase = StatePhase::Ready;
@@ -302,7 +302,6 @@ pub(crate) fn resolve_session_backend(
         code: "SESSION_BACKEND_SELECTED".to_owned(),
         subject: None,
         message: format!("sessions: {selection} (set session.backend to change)"),
-        guidance: None,
     };
     context.pending_notices.push(notice.clone());
     Ok(Some(notice))
@@ -349,7 +348,7 @@ fn resume_initialising(
         0o600,
     )?;
     door::recompute_exclude(context, &tree.label)?;
-    let prepared = door::enter_held(context, tree.clone(), "register", false, true)?;
+    let prepared = door::enter_held(context, tree.clone(), "register", true)?;
     executor::refresh_all_declarations(context, &prepared)?;
     context.mutate_state(&target, &holder, |state| {
         state.phase = StatePhase::Ready;
@@ -513,7 +512,6 @@ fn finish_with_door(
             context,
             Some(&super::context::target_of(&tree).to_string()),
             "register",
-            false,
         ) {
             Ok(door) => door,
             Err(error) if error.code.0 == "CONFIG_INVALID" => {
@@ -648,6 +646,7 @@ pub(crate) fn new_state(
         verify_pending: false,
         sync: None,
         verify: None,
+        build: None,
         resources: BTreeMap::new(),
         materialized: Vec::new(),
         last_error: None,

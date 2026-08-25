@@ -11,7 +11,7 @@ pub(crate) fn run(context: &mut Context, args: ShellDoor) -> Result<Output, Core
     if context.json {
         return Err(exec::json_unsupported());
     }
-    let door = door::enter(context, args.target.as_deref(), "shell", args.force_env)?;
+    let door = door::enter(context, args.target.as_deref(), "shell")?;
     door.emit_notices(context);
     let mut command = command_argv(context);
     let program = command.remove(0);

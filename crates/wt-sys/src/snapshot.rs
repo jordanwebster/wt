@@ -134,7 +134,7 @@ pub fn execute_observed(
     let mut environment = invoker_env.clone();
     environment.extend(snapshot.env.clone());
     if tree_missing || bin_missing {
-        strip_bin_dirs(&mut environment, &snapshot.bin_dirs)?;
+        strip_tree_paths(&mut environment, &snapshot.bin_dirs, tree_root)?;
     }
 
     let cwd = match snapshot.key.tied_to {
@@ -239,11 +239,16 @@ fn recipe_text(command: &ExpandedCommand) -> String {
     }
 }
 
-fn strip_bin_dirs(environment: &mut BTreeMap<String, String>, bin_dirs: &[String]) -> Result<()> {
+fn strip_tree_paths(
+    environment: &mut BTreeMap<String, String>,
+    bin_dirs: &[String],
+    tree_root: &Path,
+) -> Result<()> {
     let Some(path) = environment.get("PATH") else {
         return Ok(());
     };
-    let bins = bin_dirs.iter().map(PathBuf::from).collect::<BTreeSet<_>>();
+    let mut bins = bin_dirs.iter().map(PathBuf::from).collect::<BTreeSet<_>>();
+    bins.insert(tree_root.join(".wt/shims"));
     let kept = std::env::split_paths(path)
         .filter(|entry| !bins.contains(entry))
         .collect::<Vec<_>>();
@@ -318,6 +323,7 @@ mod tests {
                 tree: tree.to_string_lossy().into_owned(),
                 home: "/tmp/wt-home".into(),
             },
+            recorded_sequence: 1,
             recorded_at: "now".into(),
         }
     }
@@ -354,7 +360,11 @@ mod tests {
         );
         let invoker = BTreeMap::from([(
             "PATH".into(),
-            format!("{}:/bin:/usr/bin", missing.join("bin").display()),
+            format!(
+                "{}:{}:/bin:/usr/bin",
+                missing.join(".wt/shims").display(),
+                missing.join("bin").display()
+            ),
         )]);
         let result = execute(
             &safe,

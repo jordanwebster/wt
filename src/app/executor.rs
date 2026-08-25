@@ -271,7 +271,7 @@ fn run_task(
         ));
     }
     if let Some(exists) = &node.exists {
-        let request = request(exists, &assembled.env, &cwd)?;
+        let request = request(exists, &assembled, &cwd)?;
         let probe = proc::probe(
             &request,
             duration(
@@ -300,7 +300,7 @@ fn run_task(
     };
     let log = log_path(context, door, node, no_log)?;
     let output = proc::run(
-        &request(run, &assembled.env, &cwd)?,
+        &request(run, &assembled, &cwd)?,
         log.as_deref(),
         timeout
             .or(node.timeout.as_deref())
@@ -398,7 +398,6 @@ fn step_notices(step: &wt_core::resource::StepResult, node: &Node) -> Vec<Notice
                 "RESOURCE_DECLARED_EXTERNAL" => "declared; created by the application".to_owned(),
                 _ => format!("resource transition reported {code}"),
             },
-            guidance: None,
         })
         .collect()
 }
@@ -502,6 +501,23 @@ pub(crate) fn destroy_stored_resource(
         return Err(error);
     }
     Ok((resource_status(&final_step), child))
+}
+
+pub(crate) fn newest_resources_first(mut records: Vec<ResourceRecord>) -> Vec<ResourceRecord> {
+    records.sort_by(|left, right| {
+        right
+            .effective_snapshot()
+            .recorded_sequence
+            .cmp(&left.effective_snapshot().recorded_sequence)
+            .then_with(|| {
+                right
+                    .effective_snapshot()
+                    .recorded_at
+                    .cmp(&left.effective_snapshot().recorded_at)
+            })
+            .then_with(|| scoped_id(&right.key).cmp(&scoped_id(&left.key)))
+    });
+    records
 }
 
 fn execute_stored_probe(
@@ -701,16 +717,16 @@ fn refresh_node_declaration(context: &Context, door: &Door, node: &Node) -> Resu
         exists: node
             .exists
             .as_ref()
-            .map(|command| expanded(command, &assembled.env))
+            .map(|command| expanded(command, &assembled))
             .transpose()?,
         destroy: expanded(
             node.destroy.as_ref().expect("resource has destroy"),
-            &assembled.env,
+            &assembled,
         )?,
         run: node
             .run
             .as_ref()
-            .map(|command| expanded(command, &assembled.env))
+            .map(|command| expanded(command, &assembled))
             .transpose()?,
         env: wt_core::snapshot::minimise_env(
             &assembled.env,
@@ -728,6 +744,7 @@ fn refresh_node_declaration(context: &Context, door: &Door, node: &Node) -> Resu
             tree: door.tree.path.as_str().to_owned(),
             home: context.home.to_string_lossy().into_owned(),
         },
+        recorded_sequence: 0,
         recorded_at: wt_sys::fsx::timestamp()?,
     };
     store_declaration(context, door, key, snapshot)
@@ -742,6 +759,7 @@ fn store_declaration(
     let holder = context.holder(door.target.to_string(), "refresh")?;
     match key.tied_to {
         TiedTo::Tree => context.mutate_state(&door.target, &holder, |state| {
+            snapshot.recorded_sequence = next_recorded_sequence(state.resources.values());
             let id = scoped_id(key);
             let step = wt_core::resource::step(
                 state.resources.remove(&id),
@@ -767,6 +785,7 @@ fn store_declaration(
                     label: key.label.clone(),
                     resources: BTreeMap::new(),
                 });
+            snapshot.recorded_sequence = next_recorded_sequence(state.resources.values());
             let id = scoped_id(key);
             let step = wt_core::resource::step(
                 state.resources.remove(&id),
@@ -778,6 +797,15 @@ fn store_declaration(
             wt_sys::fsx::write_json(&path, &state)
         }
     }
+}
+
+fn next_recorded_sequence<'a>(records: impl Iterator<Item = &'a ResourceRecord>) -> u64 {
+    records
+        .flat_map(|record| std::iter::once(&record.declaration).chain(record.instance.iter()))
+        .map(|snapshot| snapshot.recorded_sequence)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
 }
 
 fn load_record(
@@ -898,7 +926,6 @@ fn node_environment(context: &Context, door: &Door, node: &Node) -> Result<EnvOu
         parent: &context.parent_env,
         existing_dirs: &existing_dirs,
         file_sources: &sources,
-        force_env: false,
     })
 }
 
@@ -906,17 +933,18 @@ fn config_for_node(config: &Config, node: &Node) -> Result<EffectiveScope, CoreE
     config::effective_scope(config, node.scope.as_str())
 }
 
-fn expanded(
-    command: &Command,
-    env: &BTreeMap<String, String>,
-) -> Result<ExpandedCommand, CoreError> {
+fn expanded(command: &Command, assembled: &EnvOutput) -> Result<ExpandedCommand, CoreError> {
+    let context = wt_core::template::Context {
+        vars: &assembled.vars,
+        functions: &assembled.functions,
+    };
     match command {
         Command::Shell(shell) => Ok(ExpandedCommand::Shell {
             shell: shell.clone(),
         }),
         Command::Argv(argv) => argv
             .iter()
-            .map(|value| wt_core::template::expand(value, env))
+            .map(|value| wt_core::template::expand(value, &context))
             .collect::<Result<Vec<_>, _>>()
             .map(|argv| ExpandedCommand::Argv { argv }),
     }
@@ -924,10 +952,10 @@ fn expanded(
 
 fn request(
     command: &Command,
-    env: &BTreeMap<String, String>,
+    assembled: &EnvOutput,
     cwd: &Path,
 ) -> Result<CommandRequest, CoreError> {
-    CommandRequest::expanded(&expanded(command, env)?, cwd, env.clone())
+    CommandRequest::expanded(&expanded(command, assembled)?, cwd, assembled.env.clone())
 }
 
 fn log_path(
@@ -941,6 +969,17 @@ fn log_path(
     }
     let dir = Path::new(door.tree.path.as_str()).join(".wt/logs");
     wt_sys::fsx::create_private_dir(&dir)?;
+    if node.id == "build" {
+        if let Some(requested) = context.parent_env.get("WT_BUILD_LOG").map(PathBuf::from) {
+            if requested.parent() == Some(dir.as_path())
+                && requested
+                    .file_name()
+                    .is_some_and(|name| name == "wt-setup.log")
+            {
+                return Ok(Some(requested));
+            }
+        }
+    }
     wt_sys::fsx::retain_logs(
         &dir,
         node.scope.as_str(),

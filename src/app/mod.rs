@@ -50,7 +50,8 @@ pub(crate) struct Output {
 
 pub(crate) enum AfterRender {
     Attach { session: String },
-    NewSession { target: String },
+    NewSession { target: String, build: bool },
+    Build { target: String },
 }
 
 impl Output {
@@ -81,8 +82,6 @@ impl Output {
                 &right.message,
             ))
         });
-        self.notices
-            .dedup_by(|left, right| left.code == right.code && left.subject == right.subject);
         self
     }
 
@@ -127,6 +126,20 @@ pub fn main(cli: Cli) -> i32 {
     };
     match result {
         Ok(mut output) => {
+            if json {
+                if let Some(AfterRender::Build { target }) = output.after_render.take() {
+                    if let Err(error) = open::start_build(
+                        opened_context
+                            .as_mut()
+                            .expect("deferred actions require an open context"),
+                        &target,
+                    ) {
+                        output = output
+                            .with_notices([open::build_failure_notice(&target, &error)])
+                            .with_failure(error);
+                    }
+                }
+            }
             let output_exit = output
                 .failure
                 .as_ref()
@@ -146,10 +159,8 @@ pub fn main(cli: Cli) -> i32 {
                 write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
             } else {
                 for notice in &output.notices {
-                    if !matches!(
-                        notice.code.as_str(),
-                        "BIN_DIR_MISSING" | "SESSION_BACKEND_SELECTED"
-                    ) && !quiet
+                    if notice.code != "SESSION_BACKEND_SELECTED"
+                        && !quiet
                         && (stderr_tty || verbose)
                     {
                         let code = if color {
@@ -160,21 +171,8 @@ pub fn main(cli: Cli) -> i32 {
                         let _ = writeln!(std::io::stderr(), "wt: {} — {}", code, notice.message);
                     }
                 }
-                if matches!(human_kind, human::HumanKind::Run) {
-                    let guidance = human::with_expected_next(String::new(), &output.notices);
-                    if !guidance.is_empty() {
-                        let _ = writeln!(std::io::stderr(), "{guidance}");
-                    }
-                }
                 let text = output
                     .text
-                    .map(|text| {
-                        if matches!(human_kind, human::HumanKind::Run) {
-                            text
-                        } else {
-                            human::with_expected_next(text, &output.notices)
-                        }
-                    })
                     .unwrap_or_else(|| human_kind.render(&output.data, &output.notices));
                 write_stdout(text);
             }
@@ -184,9 +182,14 @@ pub fn main(cli: Cli) -> i32 {
                     .as_mut()
                     .expect("deferred actions require an open context");
                 match action {
-                    AfterRender::NewSession { target } => {
-                        if let Err(error) = open::open_new_after_summary(context, &target) {
+                    AfterRender::NewSession { target, build } => {
+                        if let Err(error) = open::open_new_after_summary(context, &target, build) {
                             emit_session_warning(&target, &error);
+                        }
+                    }
+                    AfterRender::Build { target } => {
+                        if let Err(error) = open::start_build(context, &target) {
+                            return render_error(&command, json, color, error, Vec::new());
                         }
                     }
                     AfterRender::Attach { session } => {
@@ -264,12 +267,7 @@ fn render_error_with_visibility(
         write_stdout(canonical_json(&envelope).unwrap_or_else(|_| "{}".to_owned()));
     } else {
         for notice in pending_notices {
-            if !matches!(
-                notice.code.as_str(),
-                "BIN_DIR_MISSING" | "SESSION_BACKEND_SELECTED"
-            ) && !quiet
-                && (stderr_tty || verbose)
-            {
+            if notice.code != "SESSION_BACKEND_SELECTED" && !quiet && (stderr_tty || verbose) {
                 let _ = writeln!(
                     std::io::stderr(),
                     "wt: {} — {}",
@@ -304,7 +302,19 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Test(args) => run::run(context, args.into_run("test")),
         Command::Lint(args) => run::run(context, args.into_run("lint")),
         Command::Fmt(args) => run::run(context, args.into_run("fmt")),
-        Command::Build(args) => run::run(context, args.into_run("build")),
+        Command::Build(args) => {
+            let dry_run = args.dry_run;
+            let target = args.target.clone();
+            let status = (!dry_run)
+                .then(|| build_status_path(context, target.as_deref()))
+                .flatten();
+            if let Some(path) = &status {
+                let _ = wt_sys::fsx::write_store(path, b"running\n");
+            }
+            let result = run::run(context, args.into_run("build"));
+            record_build_result(status.as_deref(), &result);
+            result
+        }
         Command::Exec(args) => exec::run(context, args),
         Command::Shell(args) => shell::run(context, args),
         Command::Env(args) => env::run(context, args),
@@ -321,6 +331,34 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Locks(args) => locks::run(context, args),
         Command::ShellInit(args) => shell_init::run(context, args),
         Command::Completions(args) => completions::run(context, args),
+    }
+}
+
+fn build_status_path(context: &Context, target: Option<&str>) -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("WT_BACKGROUND_BUILD_STATUS").map(std::path::PathBuf::from)
+    {
+        return valid_background_build_status(&path).then_some(path);
+    }
+    let target = context.resolve(target).ok()?;
+    context.read_state(&target).ok()??.build.as_ref()?;
+    let tree = context.tree(&target).ok()?;
+    Some(std::path::Path::new(tree.path.as_str()).join(".wt/build.status"))
+}
+
+fn valid_background_build_status(path: &std::path::Path) -> bool {
+    path.file_name().is_some_and(|name| name == "build.status")
+        && path
+            .parent()
+            .is_some_and(|parent| parent.file_name().is_some_and(|name| name == ".wt"))
+        && std::env::var_os("WT_ROOT")
+            .map(std::path::PathBuf::from)
+            .is_some_and(|root| path.parent() == Some(root.join(".wt").as_path()))
+}
+
+fn record_build_result(path: Option<&std::path::Path>, result: &Result<Output, CoreError>) {
+    if let Some(path) = path {
+        let status = if result.is_ok() { "ok\n" } else { "failed\n" };
+        let _ = wt_sys::fsx::write_store(path, status.as_bytes());
     }
 }
 

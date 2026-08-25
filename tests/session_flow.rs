@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use common::{write, write_executable, Harness};
 use wt_sys::proc::{self, CommandRequest, ProcessOutput};
 
-const SESSION_CONFIG: &str = "bin=['bin']\nports=['http']\n";
+const SESSION_CONFIG: &str = "bin=['bin']\nports=['http']\n[env]\nAPP_PORT=\"${ports.http}\"\n";
 
 struct PrivateTmux {
     harness: Harness,
@@ -59,9 +59,18 @@ impl PrivateTmux {
     }
 
     fn tmux(&self, args: &[&str]) -> ProcessOutput {
+        self.tmux_with_env(args, None)
+    }
+
+    fn tmux_with_env(&self, args: &[&str], wt_home: Option<&Path>) -> ProcessOutput {
         let mut request = CommandRequest::new(&self.binary);
         request.args = vec![OsString::from("-L"), OsString::from(&self.socket)];
         request.args.extend(proc::os_args(args));
+        if let Some(home) = wt_home {
+            request
+                .env
+                .insert("WT_HOME".to_owned(), home.to_string_lossy().into_owned());
+        }
         proc::capture(&request, Duration::from_secs(2)).expect("run private tmux")
     }
 
@@ -135,6 +144,117 @@ impl PrivateTmux {
     }
 }
 
+#[test]
+fn session_gets_resolved_home_even_when_server_captured_another_one() {
+    let Some(private) = PrivateTmux::new(false, false) else {
+        eprintln!("skipping private-tmux home test: tmux is not installed");
+        return;
+    };
+    let wrong_home = private.harness.root.join("server-home");
+    wt_sys::fsx::create_private_dir(&wrong_home).unwrap();
+    assert!(private
+        .tmux_with_env(&["new-session", "-d", "-s", "keeper"], Some(&wrong_home))
+        .success());
+
+    let observed = private.harness.root.join("observed-home");
+    let agent = private.harness.shims.join("home-agent");
+    write_executable(
+        &agent,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$WT_HOME\" > \"{}\"\nexec /bin/sh -i\n",
+            observed.display()
+        ),
+    );
+    write(
+        &private.harness.home.join("config.toml"),
+        &format!(
+            "[session]\nbackend='tmux'\nattach=false\n[agents.home]\nstart=['{}']\nresume=['{}']\n",
+            agent.display(),
+            agent.display()
+        ),
+    );
+    let repo = private.harness.repo("repo", "");
+    private.harness.register(&repo);
+    let opened = private
+        .harness
+        .json(&["open", "repo", "--agent", "home", "--no-attach"]);
+    assert_eq!(opened["data"]["sessions"][0]["created"], true);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !observed.exists() {
+        assert!(Instant::now() < deadline, "agent never recorded WT_HOME");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::read_to_string(&observed).unwrap().trim(),
+        private.harness.home.to_string_lossy()
+    );
+    assert_ne!(private.harness.home, wrong_home);
+    common::proof_capture(
+        "E1",
+        format!(
+            "tmux server WT_HOME: {}\nsession WT_HOME: {}",
+            wrong_home.display(),
+            std::fs::read_to_string(&observed).unwrap().trim()
+        )
+        .replace(
+            &std::fs::canonicalize(&private.harness.root)
+                .unwrap_or_else(|_| private.harness.root.clone())
+                .to_string_lossy()
+                .to_string(),
+            "<ROOT>",
+        )
+        .replace(
+            &private.harness.root.to_string_lossy().to_string(),
+            "<ROOT>",
+        ),
+    );
+}
+
+#[test]
+fn open_reports_a_session_that_dies_during_startup() {
+    let Some(private) = PrivateTmux::new(false, false) else {
+        eprintln!("skipping private-tmux startup test: tmux is not installed");
+        return;
+    };
+    let dead_agent = private.harness.shims.join("dead-agent");
+    write_executable(
+        &dead_agent,
+        "#!/bin/sh\nprintf 'DEAD_AGENT_OUTPUT\\n'\nexit 9\n",
+    );
+    write(
+        &private.harness.home.join("config.toml"),
+        &format!(
+            "[session]\nbackend='tmux'\nattach=false\n[agents.dead]\nstart=['{}']\nresume=['{}']\n",
+            dead_agent.display(),
+            dead_agent.display()
+        ),
+    );
+    let repo = private.harness.repo("repo", "");
+    private.harness.register(&repo);
+    let output = private
+        .harness
+        .wt()
+        .args(["open", "repo", "--agent", "dead", "--no-attach", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "SESSION_CREATE_FAILED");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(message.contains("startup observation window"), "{message}");
+    assert!(message.contains("DEAD_AGENT_OUTPUT"), "{message}");
+    let session = wt_core::session::name("repo", "canonical");
+    assert!(!private.has_session(&session));
+    common::proof_capture(
+        "E2",
+        format!(
+            "wt open exit: {}\nerror: {}\nsession exists after open: false",
+            output.status.code().unwrap(),
+            message
+        ),
+    );
+}
+
 impl Drop for PrivateTmux {
     fn drop(&mut self) {
         let _ = self.tmux(&["kill-server"]);
@@ -174,7 +294,7 @@ fn new_attaches_and_the_live_pane_has_the_tree_environment() {
 
     private.send_line(
         &session,
-        "command -v tree-tool; printf 'ROOT=%s PORT=%s\\n' \"$WT_ROOT\" \"$WT_PORT_HTTP\"; printf '__TREE_ENV__\\n'",
+        "command -v tree-tool; printf 'ROOT=%s PORT=%s RAW=%s\\n' \"$WT_ROOT\" \"$APP_PORT\" \"${WT_PORT_HTTP-unset}\"; printf '__TREE_ENV__\\n'",
     );
     let pane = private.wait_for_pane(&session, "__TREE_ENV__");
     let tree = private.harness.home.join("trees/repo/work");
@@ -189,6 +309,10 @@ fn new_attaches_and_the_live_pane_has_the_tree_environment() {
     assert!(
         pane.contains("PORT=20016"),
         "pane did not contain the port:\n{pane}"
+    );
+    assert!(
+        pane.contains("RAW=unset"),
+        "pane exported WT_PORT_HTTP:\n{pane}"
     );
     insta::assert_snapshot!(
         "session_tree_environment",
@@ -575,6 +699,198 @@ fn backend_none_never_invokes_tmux_for_truth_or_teardown() {
     }
     assert_eq!(wt_sys::fsx::read_string(&record).unwrap(), None);
     common::proof_capture("B7", "list/remove/prune/open/close tmux invocations: 0");
+}
+
+#[test]
+fn new_starts_build_in_setup_window_and_shims_report_progress_and_failure() {
+    let Some(private) = PrivateTmux::new(false, false) else {
+        eprintln!("skipping private-tmux build test: tmux is not installed");
+        return;
+    };
+    let worker = private.harness.shims.join("build-worker");
+    let events = private.harness.root.join("build-events");
+    let release = private.harness.root.join("release-build");
+    write_executable(
+        &worker,
+        r#"#!/bin/sh
+if [ "$1" = prepare ]; then
+  printf 'prepare\n' >> "$2"
+  exit 0
+fi
+printf 'build-start\n' >> "$2"
+i=0
+while [ ! -f "$3" ] && [ "$i" -lt 500 ]; do
+  i=$((i + 1))
+  sleep 0.02
+done
+[ -f "$3" ] || exit 98
+printf 'build-failed\n' >> "$2"
+exit 9
+"#,
+    );
+    let config = format!(
+        r#"
+bin = ["bin"]
+commands = ["orbit"]
+[task.prepare]
+run = ["{}", "prepare", "{}", "{}"]
+[task.build]
+needs = ["prepare"]
+run = ["{}", "build", "{}", "{}"]
+"#,
+        worker.display(),
+        events.display(),
+        release.display(),
+        worker.display(),
+        events.display(),
+        release.display(),
+    );
+    let repo = private.harness.repo("repo", &config);
+    write_executable(
+        &private.harness.shims.join("orbit"),
+        "#!/bin/sh\nprintf 'INSTALLED\\n'\n",
+    );
+    private.harness.register(&repo);
+
+    let output = private
+        .harness
+        .wt()
+        .args(["new", "repo/work", "--no-sync", "--no-attach"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let observed = wt_sys::fsx::read_string(&events)
+            .unwrap()
+            .unwrap_or_default();
+        if observed.contains("build-start") {
+            assert_eq!(observed, "prepare\nbuild-start\n");
+            break;
+        }
+        assert!(Instant::now() < deadline, "build never started: {observed}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let progress = private
+        .harness
+        .wt()
+        .args(["exec", "repo/work", "--", "orbit"])
+        .output()
+        .unwrap();
+    assert_eq!(progress.status.code(), Some(5));
+    let progress_text = String::from_utf8_lossy(&progress.stderr);
+    assert!(
+        progress_text.contains("build is in progress"),
+        "{progress_text}"
+    );
+    assert!(progress_text.contains("wt:setup"), "{progress_text}");
+    assert!(progress_text.contains("wt-setup.log"), "{progress_text}");
+    assert!(
+        progress_text.contains("wt build repo/work"),
+        "{progress_text}"
+    );
+    assert!(
+        progress_text.contains(
+            &private
+                .harness
+                .shims
+                .join("orbit")
+                .to_string_lossy()
+                .to_string()
+        ),
+        "{progress_text}"
+    );
+
+    write(&release, "go\n");
+    let status = private
+        .harness
+        .home
+        .join("trees/repo/work/.wt/build.status");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while wt_sys::fsx::read_string(&status).unwrap().as_deref() != Some("failed\n") {
+        assert!(
+            Instant::now() < deadline,
+            "build status never became failed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let failed = private
+        .harness
+        .wt()
+        .args(["exec", "repo/work", "--", "orbit"])
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(5));
+    let failed_text = String::from_utf8_lossy(&failed.stderr);
+    assert!(failed_text.contains("wt build repo/work"), "{failed_text}");
+    assert!(
+        failed_text.contains(
+            &private
+                .harness
+                .shims
+                .join("orbit")
+                .to_string_lossy()
+                .to_string()
+        ),
+        "{failed_text}"
+    );
+    assert!(!failed_text.contains("wt:setup"), "{failed_text}");
+    assert!(!failed_text.contains("wt-setup.log"), "{failed_text}");
+
+    let target = wt_core::model::Target::parse("repo/work").unwrap();
+    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
+        &private
+            .harness
+            .home
+            .join(wt_core::model::tree_state_path(&target)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    let build = state.build.unwrap();
+    assert_eq!(build.window.as_deref(), Some("wt:setup"));
+    assert!(Path::new(&build.log).exists());
+    assert_eq!(state.phase, wt_core::lifecycle::StatePhase::Ready);
+    common::proof_capture(
+        "D2",
+        format!(
+            "events:\n{}state window: {:?}\nstate log: {}",
+            std::fs::read_to_string(&events).unwrap(),
+            build.window,
+            build.log
+        )
+        .replace(
+            &std::fs::canonicalize(&private.harness.root)
+                .unwrap_or_else(|_| private.harness.root.clone())
+                .to_string_lossy()
+                .to_string(),
+            "<ROOT>",
+        )
+        .replace(
+            &private.harness.root.to_string_lossy().to_string(),
+            "<ROOT>",
+        ),
+    );
+    common::proof_capture(
+        "D3",
+        format!("running refusal:\n{progress_text}\nterminal refusal:\n{failed_text}")
+            .replace(
+                &std::fs::canonicalize(&private.harness.root)
+                    .unwrap_or_else(|_| private.harness.root.clone())
+                    .to_string_lossy()
+                    .to_string(),
+                "<ROOT>",
+            )
+            .replace(
+                &private.harness.root.to_string_lossy().to_string(),
+                "<ROOT>",
+            ),
+    );
 }
 
 #[test]

@@ -192,22 +192,6 @@ impl Default for Settings {
 }
 
 pub fn parse(source: &str) -> Result<Settings, CoreError> {
-    let value = source.parse::<toml::Table>().map_err(|error| {
-        CoreError::new(
-            ExitClass::State,
-            "SETTINGS_INVALID",
-            error.to_string(),
-            "fix `$WT_HOME/config.toml`",
-        )
-    })?;
-    if value.contains_key("default_agent") {
-        return Err(CoreError::new(
-            ExitClass::State,
-            "SETTINGS_INVALID",
-            "`default_agent` is no longer a valid setting",
-            "move the agent name to `session.agent` in `$WT_HOME/config.toml`",
-        ));
-    }
     let mut settings: Settings = toml::from_str(source).map_err(|error| {
         CoreError::new(
             ExitClass::State,
@@ -434,9 +418,11 @@ mod tests {
         assert_eq!(settings.task.probe_timeout.as_deref(), Some("10s"));
         assert_eq!(settings.locks.rmw.as_deref(), Some("5s"));
         assert!(parse("mystery=true").is_err());
-        let legacy = parse("default_agent='missing'").unwrap_err();
-        assert_eq!(legacy.code.0, "SETTINGS_INVALID");
-        assert!(legacy.remedy.contains("session.agent"));
+        let removed = parse("default_agent='codex'").unwrap_err();
+        assert_eq!(removed.code.0, "SETTINGS_INVALID");
+        assert!(removed.message.contains("unknown field `default_agent`"));
+        assert!(!removed.message.contains("session.agent"));
+        assert!(!removed.remedy.contains("session.agent"));
         assert_eq!(settings.session.backend, SessionBackend::None);
         assert!(settings.session.attach);
         assert_eq!(settings.session.agent, None);

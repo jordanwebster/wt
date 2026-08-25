@@ -50,6 +50,13 @@ pub struct VerifyState {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BuildState {
+    pub started: String,
+    pub window: Option<String>,
+    pub log: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Materialized {
     pub path: String,
     pub kind: MaterializedKind,
@@ -78,6 +85,8 @@ pub struct TreeState {
     pub verify_pending: bool,
     pub sync: Option<SyncState>,
     pub verify: Option<VerifyState>,
+    #[serde(default)]
+    pub build: Option<BuildState>,
     pub resources: BTreeMap<String, ResourceRecord>,
     pub materialized: Vec<Materialized>,
     pub last_error: Option<String>,

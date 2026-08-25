@@ -2,10 +2,58 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{CoreError, ExitClass};
 
+pub const FUNCTIONS: &[&str] = &[
+    "root",
+    "repo",
+    "branch",
+    "label",
+    "name",
+    "name_snake",
+    "name_short",
+    "target",
+];
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Call {
+    Simple(String),
+}
+
+impl Call {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Simple(name) => name,
+        }
+    }
+
+    pub fn display(&self) -> String {
+        match self {
+            Self::Simple(name) => format!("{name}()"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Expression {
+    Var(String),
+    Port(String),
+    Call(Call),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Part {
     Literal(String),
-    Variable(String),
+    Expression(Expression),
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FunctionValues {
+    pub simple: BTreeMap<String, String>,
+    pub ports: BTreeMap<String, String>,
+}
+
+pub struct Context<'a> {
+    pub vars: &'a BTreeMap<String, String>,
+    pub functions: &'a FunctionValues,
 }
 
 fn parse_parts(input: &str) -> Result<Vec<Part>, CoreError> {
@@ -28,47 +76,77 @@ fn parse_parts(input: &str) -> Result<Vec<Part>, CoreError> {
             index += 2;
             continue;
         }
-        let (name, next) = if chars[index + 1] == '{' {
-            let Some(close) = chars[index + 2..].iter().position(|ch| *ch == '}') else {
-                return Err(invalid("unclosed `${...}` variable"));
-            };
-            let close = index + 2 + close;
-            (
-                chars[index + 2..close].iter().collect::<String>(),
-                close + 1,
-            )
-        } else if chars[index + 1].is_ascii_alphabetic() || chars[index + 1] == '_' {
-            let mut end = index + 2;
-            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
-                end += 1;
+        if chars[index + 1] != '{' {
+            if chars[index + 1].is_ascii_alphabetic() || chars[index + 1] == '_' {
+                let mut end = index + 2;
+                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
+                {
+                    end += 1;
+                }
+                let name = chars[index + 1..end].iter().collect::<String>();
+                return Err(not_template_syntax(&format!("${name}")));
             }
-            (chars[index + 1..end].iter().collect::<String>(), end)
-        } else {
             literal.push('$');
             index += 1;
             continue;
-        };
-        if name.is_empty()
-            || !name
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
-            || !name
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        {
-            return Err(invalid("invalid template variable name"));
         }
+        let Some(relative_close) = chars[index + 2..].iter().position(|ch| *ch == '}') else {
+            return Err(invalid("unclosed `${...}` expression"));
+        };
+        let close = index + 2 + relative_close;
+        let body = chars[index + 2..close].iter().collect::<String>();
+        let expression = parse_expression(&body)?;
         if !literal.is_empty() {
             parts.push(Part::Literal(std::mem::take(&mut literal)));
         }
-        parts.push(Part::Variable(name));
-        index = next;
+        parts.push(Part::Expression(expression));
+        index = close + 1;
     }
     if !literal.is_empty() {
         parts.push(Part::Literal(literal));
     }
     Ok(parts)
+}
+
+fn parse_expression(input: &str) -> Result<Expression, CoreError> {
+    let input = input.trim();
+    if input.starts_with("WT_") && valid_identifier(input) {
+        return Err(not_template_syntax(&format!("${{{input}}}")));
+    }
+    if let Some(name) = input.strip_prefix("ports.") {
+        if valid_port_name(name) {
+            return Ok(Expression::Port(name.to_owned()));
+        }
+        return Err(invalid("invalid port reference in `${...}`"));
+    }
+    if valid_identifier(input) {
+        return Ok(Expression::Var(input.to_owned()));
+    }
+    let Some(open) = input.find('(') else {
+        return Err(invalid("invalid `${...}` expression"));
+    };
+    let Some(arguments) = input.strip_suffix(')') else {
+        return Err(invalid("invalid function call in `${...}`"));
+    };
+    let name = input[..open].trim();
+    if !valid_identifier(name) {
+        return Err(invalid("invalid function name in `${...}`"));
+    }
+    let arguments = arguments[open + 1..].trim();
+    if !arguments.is_empty() {
+        return Err(invalid("template function takes no arguments"));
+    }
+    Ok(Expression::Call(Call::Simple(name.to_owned())))
+}
+
+/// A bare `$name` is not template syntax. wt deliberately refuses rather than
+/// treating it as literal text: a value that silently renders as its own name
+/// produces a wrong environment with nothing on screen to say so, which is the
+/// failure the template language exists to prevent (SPEC §5.2).
+fn not_template_syntax(spelling: &str) -> CoreError {
+    invalid(&format!(
+        "`{spelling}` is not template syntax; write `${{...}}` to evaluate a value, or `$$` for a literal dollar"
+    ))
 }
 
 fn invalid(message: &str) -> CoreError {
@@ -80,6 +158,15 @@ fn invalid(message: &str) -> CoreError {
     )
 }
 
+fn vars_unknown(message: impl Into<String>) -> CoreError {
+    CoreError::new(
+        ExitClass::State,
+        "VARS_UNKNOWN",
+        message,
+        "declare the variable in `vars` or correct the reference",
+    )
+}
+
 pub fn validate(input: &str) -> Result<(), CoreError> {
     parse_parts(input).map(|_| ())
 }
@@ -88,15 +175,162 @@ pub fn references(input: &str) -> Result<BTreeSet<String>, CoreError> {
     Ok(parse_parts(input)?
         .into_iter()
         .filter_map(|part| match part {
-            Part::Variable(name) => Some(name),
-            Part::Literal(_) => None,
+            Part::Expression(Expression::Var(name)) => Some(name),
+            Part::Literal(_)
+            | Part::Expression(Expression::Port(_))
+            | Part::Expression(Expression::Call(_)) => None,
         })
         .collect())
 }
 
-/// Extracts template-shaped references from shell-owned text without rejecting
-/// shell parameter expansions. Shell commands are never templates, but the
-/// configuration validator still needs to recognise valid `$WT_*` occurrences.
+pub fn calls(input: &str) -> Result<BTreeSet<Call>, CoreError> {
+    Ok(parse_parts(input)?
+        .into_iter()
+        .filter_map(|part| match part {
+            Part::Expression(Expression::Call(call)) => Some(call),
+            Part::Literal(_)
+            | Part::Expression(Expression::Var(_))
+            | Part::Expression(Expression::Port(_)) => None,
+        })
+        .collect())
+}
+
+pub fn port_references(input: &str) -> Result<BTreeSet<String>, CoreError> {
+    Ok(parse_parts(input)?
+        .into_iter()
+        .filter_map(|part| match part {
+            Part::Expression(Expression::Port(name)) => Some(name),
+            Part::Literal(_)
+            | Part::Expression(Expression::Var(_))
+            | Part::Expression(Expression::Call(_)) => None,
+        })
+        .collect())
+}
+
+pub fn validate_calls(input: &str, declared_ports: &BTreeSet<String>) -> Result<(), CoreError> {
+    for call in calls(input)? {
+        match &call {
+            Call::Simple(name) if FUNCTIONS.contains(&name.as_str()) => {}
+            Call::Simple(_) => {
+                return Err(invalid(&format!(
+                    "unknown template function `{}`",
+                    call.display()
+                )))
+            }
+        }
+    }
+    if let Some(name) = port_references(input)?
+        .into_iter()
+        .find(|name| !declared_ports.contains(name))
+    {
+        return Err(invalid(&format!(
+            "port reference `ports.{name}` names an undeclared port"
+        )));
+    }
+    Ok(())
+}
+
+pub fn expand(input: &str, context: &Context<'_>) -> Result<String, CoreError> {
+    let mut output = String::new();
+    for part in parse_parts(input)? {
+        match part {
+            Part::Literal(value) => output.push_str(&value),
+            Part::Expression(Expression::Var(name)) => match context.vars.get(&name) {
+                Some(value) => output.push_str(value),
+                None => return Err(vars_unknown(format!("unknown vars name `{name}`"))),
+            },
+            Part::Expression(Expression::Port(name)) => {
+                output.push_str(context.functions.ports.get(&name).ok_or_else(|| {
+                    invalid(&format!(
+                        "port reference `ports.{name}` names an undeclared port"
+                    ))
+                })?)
+            }
+            Part::Expression(Expression::Call(call)) => {
+                output.push_str(&function_value(&call, context.functions)?)
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn function_value(call: &Call, values: &FunctionValues) -> Result<String, CoreError> {
+    match call {
+        Call::Simple(name) if FUNCTIONS.contains(&name.as_str()) => values
+            .simple
+            .get(name)
+            .cloned()
+            .ok_or_else(|| invalid(&format!("function `{}` has no value", call.display()))),
+        Call::Simple(_) => Err(invalid(&format!(
+            "unknown template function `{}`",
+            call.display()
+        ))),
+    }
+}
+
+pub fn resolve_vars(
+    declarations: &BTreeMap<String, String>,
+    functions: &FunctionValues,
+) -> Result<BTreeMap<String, String>, CoreError> {
+    fn visit(
+        key: &str,
+        declarations: &BTreeMap<String, String>,
+        functions: &FunctionValues,
+        resolved: &mut BTreeMap<String, String>,
+        active: &mut Vec<String>,
+    ) -> Result<String, CoreError> {
+        if let Some(value) = resolved.get(key) {
+            return Ok(value.clone());
+        }
+        if let Some(start) = active.iter().position(|candidate| candidate == key) {
+            let mut cycle = active[start..].to_vec();
+            cycle.push(key.to_owned());
+            cycle.sort();
+            cycle.dedup();
+            return Err(CoreError::new(
+                ExitClass::State,
+                "VARS_CYCLE",
+                format!("vars cycle involves {}", cycle.join(", ")),
+                "break the cycle in `vars`",
+            ));
+        }
+        let value = declarations
+            .get(key)
+            .ok_or_else(|| vars_unknown(format!("unknown vars name `{key}`")))?;
+        active.push(key.to_owned());
+        let mut dependencies = BTreeMap::new();
+        for dependency in references(value)? {
+            if !declarations.contains_key(&dependency) {
+                return Err(vars_unknown(format!(
+                    "vars `{key}` references unknown name `{dependency}`"
+                )));
+            }
+            dependencies.insert(
+                dependency.clone(),
+                visit(&dependency, declarations, functions, resolved, active)?,
+            );
+        }
+        let expanded = expand(
+            value,
+            &Context {
+                vars: &dependencies,
+                functions,
+            },
+        )?;
+        active.pop();
+        resolved.insert(key.to_owned(), expanded.clone());
+        Ok(expanded)
+    }
+
+    let mut resolved = BTreeMap::new();
+    for key in declarations.keys() {
+        visit(key, declarations, functions, &mut resolved, &mut Vec::new())?;
+    }
+    Ok(resolved)
+}
+
+/// Extracts shell variables used by legacy resource snapshots. Shell syntax is
+/// not template syntax, so parameter operators are deliberately ignored.
 pub fn shell_references(input: &str) -> BTreeSet<String> {
     let chars: Vec<char> = input.chars().collect();
     let mut references = BTreeSet::new();
@@ -113,7 +347,7 @@ pub fn shell_references(input: &str) -> BTreeSet<String> {
             };
             let close = index + 2 + relative_close;
             let name: String = chars[index + 2..close].iter().collect();
-            if valid_variable_name(&name) {
+            if valid_identifier(&name) {
                 references.insert(name);
             }
             index = close + 1;
@@ -137,7 +371,7 @@ pub fn shell_references(input: &str) -> BTreeSet<String> {
     references
 }
 
-fn valid_variable_name(name: &str) -> bool {
+fn valid_identifier(name: &str) -> bool {
     !name.is_empty()
         && name
             .chars()
@@ -148,48 +382,118 @@ fn valid_variable_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-pub fn expand(input: &str, context: &BTreeMap<String, String>) -> Result<String, CoreError> {
-    let mut output = String::new();
-    for part in parse_parts(input)? {
-        match part {
-            Part::Literal(value) => output.push_str(&value),
-            Part::Variable(name) => match context.get(&name) {
-                Some(value) => output.push_str(value),
-                None => {
-                    return Err(CoreError::new(
-                        ExitClass::State,
-                        "ENV_UNDEFINED",
-                        format!("template variable `{name}` is undefined"),
-                        format!("set `{name}` in the parent environment or remove the reference"),
-                    ))
-                }
-            },
-        }
-    }
-    Ok(output)
+fn valid_port_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn expands_names_braces_dollars_and_literal_dollar() {
-        let context = BTreeMap::from([("A".to_owned(), "one".to_owned())]);
-        assert_eq!(expand("$A/${A}/$$/$-", &context).unwrap(), "one/one/$/$-");
+    fn functions() -> FunctionValues {
+        FunctionValues {
+            simple: BTreeMap::from([
+                ("root".to_owned(), "/tree".to_owned()),
+                ("name".to_owned(), "feature".to_owned()),
+            ]),
+            ports: BTreeMap::from([("http".to_owned(), "20016".to_owned())]),
+        }
     }
 
     #[test]
-    fn rejects_unclosed_or_invalid_braces() {
-        assert!(validate("${A").is_err());
-        assert!(validate("${1}").is_err());
-    }
-
-    #[test]
-    fn shell_scanner_keeps_valid_references_and_ignores_shell_expansions() {
+    fn sole_evaluation_form_distinguishes_vars_functions_and_dollars() {
+        let vars = BTreeMap::from([("prefix".to_owned(), "one".to_owned())]);
+        let functions = functions();
+        let context = Context {
+            vars: &vars,
+            functions: &functions,
+        };
         assert_eq!(
-            shell_references("${h%??} $WT_ROOT ${WT_HOME} $$WT_BAD ${1} ${UNFINISHED"),
-            BTreeSet::from(["WT_HOME".to_owned(), "WT_ROOT".to_owned()])
+            expand("${prefix}/${root()}/${ports.http}/$$/$-", &context).unwrap(),
+            "one//tree/20016/$/$-"
         );
+    }
+
+    #[test]
+    fn a_bare_dollar_name_is_refused_rather_than_rendered_literally() {
+        // Every one of these once rendered as its own name, producing a wrong
+        // environment silently. The refusal is uniform: no spelling is special
+        // and none is guessed at on the caller's behalf.
+        for spelling in [
+            "$WT_PORT_HTTP",
+            "${WT_ROOT}",
+            "$WT_REPO",
+            "$HOME",
+            "$DATABASE_URL",
+            "$_private",
+        ] {
+            let error = validate(spelling).unwrap_err();
+            assert_eq!(error.code.0, "CONFIG_INVALID");
+            assert!(error.message.contains(spelling), "{}", error.message);
+            assert!(error.message.contains("$$"), "{}", error.message);
+            assert!(error.message.contains("${...}"), "{}", error.message);
+        }
+        assert_eq!(
+            expand(
+                "$$/$-",
+                &Context {
+                    vars: &BTreeMap::new(),
+                    functions: &functions()
+                }
+            )
+            .unwrap(),
+            "$/$-"
+        );
+    }
+
+    #[test]
+    fn dag_resolution_is_independent_of_declaration_order() {
+        let declarations = BTreeMap::from([
+            ("last".to_owned(), "${middle}/c".to_owned()),
+            ("first".to_owned(), "a".to_owned()),
+            ("middle".to_owned(), "${first}/b".to_owned()),
+        ]);
+        let resolved = resolve_vars(&declarations, &functions()).unwrap();
+        assert_eq!(resolved["last"], "a/b/c");
+    }
+
+    #[test]
+    fn cycles_unknown_names_and_closed_functions_are_distinct() {
+        let cycle = BTreeMap::from([
+            ("a".to_owned(), "${b}".to_owned()),
+            ("b".to_owned(), "${a}".to_owned()),
+        ]);
+        assert_eq!(
+            resolve_vars(&cycle, &functions()).unwrap_err().code.0,
+            "VARS_CYCLE"
+        );
+        let unknown = BTreeMap::from([("a".to_owned(), "${missing}".to_owned())]);
+        assert_eq!(
+            resolve_vars(&unknown, &functions()).unwrap_err().code.0,
+            "VARS_UNKNOWN"
+        );
+        assert!(validate_calls("${mystery()}", &BTreeSet::new()).is_err());
+        assert!(validate_calls("${ports.missing}", &BTreeSet::new()).is_err());
+    }
+
+    #[test]
+    fn dotted_ports_are_lookups_and_ports_is_not_a_var() {
+        let functions = functions();
+        let context = Context {
+            vars: &BTreeMap::new(),
+            functions: &functions,
+        };
+        assert_eq!(
+            expand("${ports.http}:${ports.http}", &context).unwrap(),
+            "20016:20016"
+        );
+        assert!(validate_calls("${ports.missing}", &BTreeSet::new()).is_err());
     }
 }

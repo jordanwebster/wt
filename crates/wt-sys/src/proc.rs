@@ -17,6 +17,258 @@ use crate::Result;
 
 const TERM_GRACE: Duration = Duration::from_secs(5);
 
+/// Handles an invocation through `<root>/.wt/shims/<name>` before the CLI can
+/// read configuration or acquire a lock. Returns `None` only for the ordinary
+/// `wt` executable name.
+pub fn owned_command_fast_path() -> Option<i32> {
+    let mut argv = std::env::args_os();
+    let argv0 = argv.next()?;
+    let raw_invoked = PathBuf::from(&argv0);
+    let name = raw_invoked.file_name()?.to_os_string();
+    if raw_invoked
+        .parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty())
+        && name == "wt"
+    {
+        return None;
+    }
+    let invoked = if raw_invoked
+        .parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty())
+    {
+        let Some(invoked) = matching_path_shim(&name) else {
+            return Some(shim_refusal(format!(
+                "SHIM_INVOCATION_INVALID: bare argv[0] `{}` has no matching <root>/.wt/shims symlink on PATH; restore the door PATH prefix before invoking owned commands",
+                raw_invoked.display()
+            )));
+        };
+        invoked
+    } else {
+        raw_invoked
+    };
+    let parent = invoked.parent();
+    let has_expected_parent = parent.is_some_and(|parent| {
+        parent.file_name().is_some_and(|part| part == "shims")
+            && parent
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|part| part == ".wt")
+    });
+    if !has_expected_parent {
+        if name == "wt" {
+            return None;
+        }
+        return Some(shim_refusal(format!(
+            "SHIM_INVOCATION_INVALID: `{}` is not an absolute <root>/.wt/shims/<name> path",
+            invoked.display()
+        )));
+    }
+    if !invoked.is_absolute() {
+        return Some(shim_refusal(format!(
+            "SHIM_INVOCATION_INVALID: relative shim path `{}` is not trusted",
+            invoked.display()
+        )));
+    }
+    let parent = parent.expect("expected shim path has a parent");
+    if !parent.is_dir() {
+        return Some(shim_refusal(format!(
+            "SHIM_INVOCATION_INVALID: shim parent `{}` is absent",
+            parent.display()
+        )));
+    }
+    let link_target = match std::fs::symlink_metadata(&invoked) {
+        Ok(metadata) if metadata.file_type().is_symlink() => match std::fs::read_link(&invoked) {
+            Ok(target) => target,
+            Err(error) => {
+                return Some(shim_refusal(format!(
+                    "SHIM_INVOCATION_INVALID: cannot read shim `{}`: {error}",
+                    invoked.display()
+                )))
+            }
+        },
+        Ok(_) => {
+            return Some(shim_refusal(format!(
+                "SHIM_INVOCATION_INVALID: copied shim `{}` is not a symlink",
+                invoked.display()
+            )))
+        }
+        Err(error) => {
+            return Some(shim_refusal(format!(
+                "SHIM_INVOCATION_INVALID: cannot inspect shim `{}`: {error}",
+                invoked.display()
+            )))
+        }
+    };
+    if !link_target.is_absolute()
+        || std::fs::symlink_metadata(&link_target)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+    {
+        return Some(shim_refusal(format!(
+            "SHIM_INVOCATION_INVALID: shim `{}` must point directly to an absolute wt binary",
+            invoked.display()
+        )));
+    }
+    let running = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            return Some(shim_refusal(format!(
+                "SHIM_INVOCATION_INVALID: cannot resolve the running binary: {error}"
+            )))
+        }
+    };
+    let target_matches = std::fs::canonicalize(&link_target)
+        .ok()
+        .zip(std::fs::canonicalize(&running).ok())
+        .is_some_and(|(target, running)| target == running);
+    if !target_matches {
+        return Some(shim_refusal(format!(
+            "SHIM_INVOCATION_INVALID: shim `{}` does not point to this wt binary",
+            invoked.display()
+        )));
+    }
+    let root = parent
+        .parent()
+        .and_then(Path::parent)
+        .expect("expected shim path has a root");
+    let wt_bin = std::env::var_os("WT_BIN").unwrap_or_default();
+    let bins = std::env::split_paths(&wt_bin).collect::<Vec<_>>();
+    if bins.iter().any(|bin| !contained_absolute(root, bin)) {
+        return Some(shim_refusal(format!(
+            "SHIM_INVOCATION_INVALID: WT_BIN does not describe directories inside `{}`",
+            root.display()
+        )));
+    }
+    for bin in &bins {
+        let candidate = bin.join(&name);
+        if executable(&candidate) {
+            let mut command = Command::new(&candidate);
+            command.arg0(&argv0).args(argv);
+            let error = command.exec();
+            return Some(shim_refusal(format!(
+                "COMMAND_EXEC_FAILED: could not execute `{}`: {error}",
+                candidate.display()
+            )));
+        }
+    }
+    let installed = find_installed_copy(&invoked, &name);
+    let target = std::env::var("WT_TARGET").unwrap_or_else(|_| root.display().to_string());
+    let searched = if bins.is_empty() {
+        "<none>".to_owned()
+    } else {
+        bins.iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let explicit = installed.map_or_else(
+        || "; no installed copy was found elsewhere on PATH".to_owned(),
+        |path| {
+            format!(
+                "; run the installed copy explicitly as `{}`",
+                path.display()
+            )
+        },
+    );
+    let progress = recorded_build_progress(root, &target).unwrap_or_default();
+    Some(shim_refusal(format!(
+        "COMMAND_NOT_BUILT: `{}` belongs to tree `{target}` but was not found; searched: {searched}; run `wt build {target}`{explicit}{progress}",
+        name.to_string_lossy()
+    )))
+}
+
+fn matching_path_shim(name: &std::ffi::OsStr) -> Option<PathBuf> {
+    let running = std::fs::canonicalize(std::env::current_exe().ok()?).ok()?;
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .filter(|directory| {
+            directory.is_absolute()
+                && directory.file_name().is_some_and(|part| part == "shims")
+                && directory
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|part| part == ".wt")
+        })
+        .map(|directory| directory.join(name))
+        .find(|candidate| {
+            let Ok(metadata) = std::fs::symlink_metadata(candidate) else {
+                return false;
+            };
+            if !metadata.file_type().is_symlink() {
+                return false;
+            }
+            let Ok(target) = std::fs::read_link(candidate) else {
+                return false;
+            };
+            target.is_absolute()
+                && std::fs::symlink_metadata(&target)
+                    .is_ok_and(|metadata| !metadata.file_type().is_symlink())
+                && std::fs::canonicalize(target).is_ok_and(|target| target == running)
+        })
+}
+
+fn recorded_build_progress(root: &Path, target: &str) -> Option<String> {
+    if std::fs::read_to_string(root.join(".wt/build.status"))
+        .ok()?
+        .trim()
+        != "running"
+    {
+        return None;
+    }
+    let home = PathBuf::from(std::env::var_os("WT_HOME")?);
+    let target_value = wt_core::model::Target::parse(target).ok()?;
+    let state_path = home.join(wt_core::model::tree_state_path(&target_value));
+    let state: serde_json::Value = serde_json::from_slice(&std::fs::read(state_path).ok()?).ok()?;
+    let build = state.get("build")?.as_object()?;
+    let log = build.get("log")?.as_str()?;
+    let window = build.get("window").and_then(serde_json::Value::as_str);
+    let location = window.map_or_else(
+        || format!("log `{log}`"),
+        |window| format!("window `{window}`; watch log `{log}`"),
+    );
+    Some(format!("; the build is in progress in {location}"))
+}
+
+fn shim_refusal(message: String) -> i32 {
+    eprintln!("wt: {message}");
+    5
+}
+
+fn contained_absolute(root: &Path, candidate: &Path) -> bool {
+    candidate.is_absolute()
+        && candidate.starts_with(root)
+        && !candidate.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+}
+
+fn executable(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+fn find_installed_copy(invoked: &Path, name: &std::ffi::OsStr) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| {
+            let directory = if directory.is_absolute() {
+                directory
+            } else {
+                cwd.join(directory)
+            };
+            directory.join(name)
+        })
+        .find(|candidate| candidate != invoked && executable(candidate))
+        .and_then(|path| std::fs::canonicalize(path).ok())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandRequest {
     pub program: OsString,
@@ -77,6 +329,7 @@ impl CommandRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessOutput {
+    pub pid: u32,
     pub child: ChildStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -208,6 +461,7 @@ pub fn pty_capture(
     let mut child = command
         .spawn()
         .map_err(|error| spawn_error(request, error))?;
+    let pid = child.id();
     if !input.is_empty() {
         master
             .write_all(input)
@@ -257,6 +511,7 @@ pub fn pty_capture(
             .map_err(io_error("wait for pseudoterminal child"))?,
     };
     Ok(ProcessOutput {
+        pid,
         child: ChildStatus {
             code: status.code(),
             signal: status.signal(),
@@ -390,6 +645,7 @@ fn wait_with_pipes(
     tee: Tee,
     process_group: bool,
 ) -> Result<ProcessOutput> {
+    let pid = child.id();
     let mut stdout = Some(child.stdout.take().ok_or_else(pipe_error)?);
     let mut stderr = Some(child.stderr.take().ok_or_else(pipe_error)?);
     set_nonblocking(stdout.as_ref().expect("stdout pipe exists").as_raw_fd())?;
@@ -430,6 +686,7 @@ fn wait_with_pipes(
         None => child.wait().map_err(io_error("wait for child"))?,
     };
     Ok(ProcessOutput {
+        pid,
         child: ChildStatus {
             code: status.code(),
             signal: status.signal(),

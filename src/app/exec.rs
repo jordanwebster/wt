@@ -19,7 +19,7 @@ pub(crate) fn run(context: &mut Context, args: Exec) -> Result<Output, CoreError
             "sessions are started by `wt open`",
         ));
     }
-    let mut door = door::enter(context, args.target.as_deref(), "exec", args.force_env)?;
+    let mut door = door::enter(context, args.target.as_deref(), "exec")?;
     door.emit_notices(context);
     let mut request = CommandRequest::new(&args.cmd[0]);
     request.args = args.cmd[1..].iter().map(OsString::from).collect();

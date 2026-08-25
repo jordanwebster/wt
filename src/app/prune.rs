@@ -34,7 +34,6 @@ pub(crate) fn run(context: &mut Context, args: Prune) -> Result<Output, CoreErro
             code: "CONFIRM_REQUIRED".to_owned(),
             subject: None,
             message: "prune plan was reported but not applied; re-run with --yes".to_owned(),
-            guidance: None,
         });
         return Ok(output);
     }
@@ -179,10 +178,12 @@ fn apply(
             context.phase(&tree, context.read_state(&target)?.as_ref())?,
             DerivedPhase::Replaced
         );
-        let records = context
-            .read_state(&target)?
-            .map(|state| state.resources.into_values().collect::<Vec<_>>())
-            .unwrap_or_default();
+        let records = executor::newest_resources_first(
+            context
+                .read_state(&target)?
+                .map(|state| state.resources.into_values().collect::<Vec<_>>())
+                .unwrap_or_default(),
+        );
         let total = records.len();
         for record in records {
             let holder = context.holder(target.to_string(), "prune")?;
@@ -242,10 +243,12 @@ fn apply(
                     context.phase(&tree, context.read_state(&target)?.as_ref())?,
                     DerivedPhase::Replaced
                 );
-                let records = context
-                    .read_state(&target)?
-                    .map(|state| state.resources.into_values().collect::<Vec<_>>())
-                    .unwrap_or_default();
+                let records = executor::newest_resources_first(
+                    context
+                        .read_state(&target)?
+                        .map(|state| state.resources.into_values().collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                );
                 let total = records.len();
                 for record in records {
                     let _ = executor::destroy_stored_resource(context, &target, record, replaced);

@@ -8,9 +8,9 @@ const COMPLETE: &str = r#"
 ports = ["http"]
 sync_inputs = ["README.md"]
 [env]
-APP_PORT = "$WT_PORT_HTTP"
+APP_PORT = "${ports.http}"
 [files.".wt/generated"]
-content = "port=$WT_PORT_HTTP"
+content = "port=${ports.http}"
 [task.hello]
 run = "true"
 [task.test]

@@ -2,8 +2,8 @@
 source: tests/session_flow.rs
 expression: "pane.replace(&private.harness.root.to_string_lossy().to_string(),\n\"<ROOT>\").trim_end()"
 ---
-TP"; printf '__TREE_ENV__\n'; printf 'ROOT=%s PORT=%s\n' "$WT_ROOT" "$WT_PORT_HT
+_PORT" "${WT_PORT_HTTP-unset}"; printf '__TREE_ENV__\n'AW=%s\n' "$WT_ROOT" "$APP
 <ROOT>/wt-home/trees/repo/work/bin/tree-tool
-ROOT=<ROOT>/wt-home/trees/repo/work PORT=20016
+ROOT=<ROOT>/wt-home/trees/repo/work PORT=20016 RAW=unset
 __TREE_ENV__
 sh-3.2$

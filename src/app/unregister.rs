@@ -88,14 +88,16 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
         });
         Ok(())
     })?;
-    let door = door::enter_held(context, tree.clone(), "unregister", false, false)?;
+    let door = door::enter_held(context, tree.clone(), "unregister", false)?;
     executor::refresh_all_declarations(context, &door)?;
     let mut destroyed = Vec::new();
     let mut teardown_errors = Vec::new();
-    let tree_records = context
-        .read_state(&target)?
-        .map(|state| state.resources.into_values().collect::<Vec<_>>())
-        .unwrap_or_default();
+    let tree_records = executor::newest_resources_first(
+        context
+            .read_state(&target)?
+            .map(|state| state.resources.into_values().collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
     for record in tree_records {
         let key = record.key.clone();
         match executor::destroy_resource(context, &door, &key, true) {
@@ -117,9 +119,11 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
         }
     }
     let repo_path = context.home.join(wt_core::model::repo_state_path(&label));
-    let repo_records = wt_sys::fsx::read_json::<RepoState>(&repo_path, "STATE_CORRUPT")?
-        .map(|state| state.resources.into_values().collect::<Vec<_>>())
-        .unwrap_or_default();
+    let repo_records = executor::newest_resources_first(
+        wt_sys::fsx::read_json::<RepoState>(&repo_path, "STATE_CORRUPT")?
+            .map(|state| state.resources.into_values().collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
     for record in repo_records {
         let key = record.key.clone();
         match executor::destroy_resource(context, &door, &key, true) {

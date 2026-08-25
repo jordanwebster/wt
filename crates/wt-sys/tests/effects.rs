@@ -44,6 +44,8 @@ fn committed_tmux_stub_records_argv_and_obeys_state() {
     tmux.new_session(
         "new",
         dir.path(),
+        dir.path(),
+        &dir.path().join("capture"),
         &[OsString::from("wt"), OsString::from("exec")],
     )
     .unwrap();
@@ -52,8 +54,9 @@ fn committed_tmux_stub_records_argv_and_obeys_state() {
     let record = fs::read_to_string(log).unwrap();
     assert!(record.contains("tmux\tnew-session\t-d\t-s\tnew\t-c"));
     assert!(record.contains("\t-c\t"));
-    assert!(record.contains("\t--\twt\texec"));
-    assert!(!record.contains("\t-e\t"));
+    assert!(record.contains("\t--\t/bin/sh\t-c\t"));
+    assert!(record.contains("\twt\texec\t;\tpipe-pane"));
+    assert!(record.contains("\t-e\tWT_HOME="));
     assert!(record.contains("tmux\tswitch-client\t-t\tnew"));
     assert!(record.contains("tmux\tkill-session\t-t\tnew"));
 }

@@ -1,6 +1,7 @@
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 
 use common::Harness;
 use predicates::prelude::*;
@@ -9,12 +10,22 @@ use std::collections::BTreeSet;
 const BASIC: &str = r#"
 ports = ["http"]
 [env]
-APP_PORT = "$WT_PORT_HTTP"
+APP_PORT = "${ports.http}"
 [files.".wt/generated"]
-content = "port=$WT_PORT_HTTP"
+content = "port=${ports.http}"
 [task.hello]
 run = "printf hello"
 "#;
+
+static NEXT_ISOLATED_PORT: AtomicU16 = AtomicU16::new(40_000);
+
+fn configure_backend_none(h: &Harness) {
+    let port = NEXT_ISOLATED_PORT.fetch_add(32, Ordering::Relaxed);
+    common::write(
+        &h.home.join("config.toml"),
+        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
+    );
+}
 
 const RESOURCE: &str = r#"
 [task.service]
@@ -66,19 +77,9 @@ fn env_and_exec_transport_the_same_coordinates() {
     let repo = h.repo("repo", BASIC);
     h.register(&repo);
     let env = h.json(&["env", "repo"]);
-    let expected = env["data"]["env"]["WT_PORT_HTTP"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let expected = env["data"]["env"]["APP_PORT"].as_str().unwrap().to_owned();
     h.wt()
-        .args([
-            "exec",
-            "repo",
-            "--",
-            "sh",
-            "-c",
-            "printf %s \"$WT_PORT_HTTP\"",
-        ])
+        .args(["exec", "repo", "--", "sh", "-c", "printf %s \"$APP_PORT\""])
         .assert()
         .success()
         .stdout(predicate::eq(expected));
@@ -122,6 +123,49 @@ fn run_json_keeps_one_envelope_on_stdout() {
 }
 
 #[test]
+fn shell_recipes_are_opaque_but_argv_and_rendered_scripts_are_templates() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        r#"
+ports = ["http"]
+[vars]
+private = "secret"
+[files."generated.sh"]
+marker = ""
+content = "printf '%s\\n' '$${h%??}' '${private}' '${ports.http}'"
+[task.shell]
+run = '''h=abcdef; printf '%s|%s|%s|%s' '${root()}' '$HOME' '$$' "${h%??}"'''
+[task.argv]
+run = ["printf", "%s|%s", "${private}", "${ports.http}"]
+"#,
+    );
+    h.register(&repo);
+
+    h.wt()
+        .args(["run", "shell", "repo"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("${root()}|$HOME|$$|abcd"));
+    h.wt()
+        .args(["run", "argv", "repo"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("secret|20000"));
+    assert_eq!(
+        std::fs::read_to_string(repo.join("generated.sh")).unwrap(),
+        "printf '%s\\n' '${h%??}' 'secret' '20000'"
+    );
+}
+
+#[test]
+fn ports_is_a_reserved_var_key() {
+    let error = wt_core::config::parse("[vars]\nports='mine'", "repo/.wt.toml").unwrap_err();
+    assert_eq!(error.code.0, "CONFIG_INVALID");
+    assert!(error.message.contains("reserved"));
+}
+
+#[test]
 fn new_run_and_remove_form_an_idempotent_lifecycle() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
@@ -132,6 +176,155 @@ fn new_run_and_remove_form_an_idempotent_lifecycle() {
     let removed = h.json(&["remove", "repo/work", "--yes"]);
     assert_eq!(removed["data"]["removed"], true);
     assert!(!Path::new(created["data"]["tree"]["path"].as_str().unwrap()).exists());
+}
+
+#[test]
+fn backend_none_runs_build_plan_after_ready_and_respects_suppression() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let events = h.root.join("build-events");
+    let config = format!(
+        r#"
+[task.prepare]
+run = ["sh", "-c", "printf 'prepare\\n' >> \"$$EVENTS\""]
+[task.prepare.env]
+EVENTS = "{}"
+[task.build]
+needs = ["prepare"]
+run = ["sh", "-c", "printf 'build:%s\\n' \"$$(cat \"$$WT_ROOT/.wt/build.status\")\" >> \"$$EVENTS\""]
+[task.build.env]
+EVENTS = "{}"
+"#,
+        events.display(),
+        events.display(),
+    );
+    let repo = h.repo("repo", &config);
+    h.register(&repo);
+
+    let created = h.json(&["new", "repo/work", "--no-sync"]);
+    assert_eq!(
+        std::fs::read_to_string(&events).unwrap(),
+        "prepare\nbuild:running\n"
+    );
+    let target = wt_core::model::Target::parse("repo/work").unwrap();
+    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
+        &h.home.join(wt_core::model::tree_state_path(&target)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    let build = state.build.unwrap();
+    assert!(build.window.is_none());
+    assert!(Path::new(&build.log).ends_with(".wt/logs/wt-setup.log"));
+    assert_eq!(created["data"]["tree"]["phase"], "ready");
+    let status =
+        Path::new(created["data"]["tree"]["path"].as_str().unwrap()).join(".wt/build.status");
+    assert_eq!(std::fs::read_to_string(&status).unwrap(), "ok\n");
+
+    common::write(&events, "");
+    h.json(&["build", "repo/work"]);
+    assert_eq!(
+        std::fs::read_to_string(&events).unwrap(),
+        "prepare\nbuild:running\n"
+    );
+    assert_eq!(std::fs::read_to_string(&status).unwrap(), "ok\n");
+
+    common::write(&events, "");
+    h.json(&["new", "repo/no-build", "--no-sync", "--no-build"]);
+    assert_eq!(std::fs::read_to_string(&events).unwrap(), "");
+    h.json(&["new", "repo/no-open", "--no-sync", "--no-open"]);
+    assert_eq!(std::fs::read_to_string(&events).unwrap(), "");
+}
+
+#[test]
+fn backend_none_build_failure_is_one_envelope_and_a_terminal_status() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo(
+        "repo",
+        r#"
+bin = ["bin"]
+commands = ["orbit"]
+[task.build]
+run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status\"; exit 9"]
+"#,
+    );
+    common::write_executable(&h.shims.join("orbit"), "#!/bin/sh\nprintf 'INSTALLED\\n'\n");
+    h.register(&repo);
+
+    let output = h
+        .wt()
+        .args(["new", "repo/work", "--no-sync", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(6));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "TASK_FAILED");
+    assert!(envelope["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "BUILD_FAILED"));
+    let root = PathBuf::from(envelope["data"]["tree"]["path"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(root.join("seen-status")).unwrap(),
+        "running\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".wt/build.status")).unwrap(),
+        "failed\n"
+    );
+
+    let refusal = h
+        .wt()
+        .args(["exec", "repo/work", "--", "orbit"])
+        .output()
+        .unwrap();
+    assert_eq!(refusal.status.code(), Some(5));
+    let refusal = String::from_utf8_lossy(&refusal.stderr);
+    assert!(refusal.contains("wt build repo/work"), "{refusal}");
+    assert!(refusal.contains(&h.shims.join("orbit").to_string_lossy().to_string()));
+    assert!(!refusal.contains("wt:setup"), "{refusal}");
+    assert!(!refusal.contains("build is in progress"), "{refusal}");
+    common::proof_capture(
+        "A1",
+        format!(
+            "recorded-tree terminal refusal:\n{}",
+            refusal
+                .replace(
+                    &std::fs::canonicalize(&h.root)
+                        .unwrap_or_else(|_| h.root.clone())
+                        .to_string_lossy()
+                        .to_string(),
+                    "<ROOT>",
+                )
+                .replace(&h.root.to_string_lossy().to_string(), "<ROOT>")
+        ),
+    );
+
+    common::write(
+        &root.join(".wt.toml"),
+        r#"
+bin = ["bin"]
+commands = ["orbit"]
+[task.build]
+run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status\""]
+"#,
+    );
+    h.json(&["build", "repo/work"]);
+    assert_eq!(
+        std::fs::read_to_string(root.join("seen-status")).unwrap(),
+        "running\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".wt/build.status")).unwrap(),
+        "ok\n"
+    );
+    common::proof_capture(
+        "D3",
+        "backend none observed running inside the task\nfirst terminal status: failed\nretry observed running inside the task\nretry terminal status: ok",
+    );
 }
 
 #[test]
@@ -302,7 +495,7 @@ fn old_format_is_rejected_before_current_state_is_written() {
 }
 
 #[test]
-fn register_declares_the_session_backend_once_and_legacy_agent_setting_is_rejected() {
+fn register_declares_the_session_backend_once() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
     let registered = h.register(&repo);
@@ -364,16 +557,6 @@ fn register_declares_the_session_backend_once_and_legacy_agent_setting_is_reject
             calls.lines().filter(|line| *line == "-V").count()
         ),
     );
-
-    let legacy = Harness::new();
-    common::write(&legacy.home.join("config.toml"), "default_agent='codex'\n");
-    legacy
-        .wt()
-        .arg("list")
-        .assert()
-        .code(5)
-        .stderr(predicate::str::contains("SETTINGS_INVALID"))
-        .stderr(predicate::str::contains("session.agent"));
 }
 
 #[test]
@@ -512,6 +695,65 @@ fn open_all_reports_each_tree_and_continues_after_a_failure() {
             .unwrap()
             .replace(&h.root.to_string_lossy().to_string(), "<ROOT>"),
     );
+
+    let redirected = h.wt().args(["open", "--all"]).output().unwrap();
+    assert_eq!(redirected.status.code(), Some(5));
+    assert!(
+        redirected.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&redirected.stderr)
+    );
+    assert!(String::from_utf8_lossy(&redirected.stdout).contains("failed (TREE_REPLACED)"));
+    common::proof_capture(
+        "G1",
+        format!(
+            "exit: {:?}\nstderr bytes: {}\nstdout:\n{}",
+            redirected.status.code(),
+            redirected.stderr.len(),
+            String::from_utf8_lossy(&redirected.stdout)
+                .replace(&h.root.to_string_lossy().to_string(), "<ROOT>")
+                .trim_end()
+        ),
+    );
+}
+
+#[test]
+fn inline_session_tables_refuse_backend_insertion_with_a_rewrite_remedy() {
+    let mut refusals = Vec::new();
+    for verb in ["register", "new", "open", "close"] {
+        let h = Harness::new();
+        let repo = h.repo("repo", BASIC);
+        if verb != "register" {
+            h.register(&repo);
+        }
+        common::write(
+            &h.home.join("config.toml"),
+            "session = { attach = false }\n",
+        );
+        let mut command = h.wt();
+        match verb {
+            "register" => {
+                command.args(["register", repo.to_str().unwrap()]);
+            }
+            "new" => {
+                command.args(["new", "repo/work", "--no-sync"]);
+            }
+            "open" | "close" => {
+                command.args([verb, "repo"]);
+            }
+            _ => unreachable!(),
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(5), "{verb}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("rewrite `session = { ... }`"),
+            "{verb}: {stderr}"
+        );
+        assert!(stderr.contains("[session]"), "{verb}: {stderr}");
+        refusals.push(format!("{verb}:\n{}", stderr.trim_end()));
+    }
+    common::proof_capture("G3", refusals.join("\n"));
 }
 
 #[test]
@@ -690,7 +932,7 @@ fn register_repair_restores_only_a_replaced_canonical_checkout() {
     let h = Harness::new();
     let repo = h.repo(
         "repo",
-        "[files.'.wt/generated']\ncontent='restored $WT_TARGET'\n[task.service]\nrun='true'\nexists='false'\ndestroy='true'\ntied_to='tree'\n",
+        "[files.'.wt/generated']\ncontent='restored ${target()}'\n[task.service]\nrun='true'\nexists='false'\ndestroy='true'\ntied_to='tree'\n",
     );
     let registered = h.register(&repo);
     let tree_id = registered["data"]["tree"]["tree_id"]
@@ -974,6 +1216,97 @@ fn refresh_recreates_a_present_resource() {
 }
 
 #[test]
+fn teardown_uses_frozen_instances_in_newest_first_order() {
+    let h = Harness::new();
+    let order = h.root.join("destroy-order");
+    let sentinel = h.root.join("changed-destroy-ran");
+    let config = format!(
+        r#"
+[task.older]
+run = 'touch "$WT_ROOT/.older"'
+exists = 'test -f "$WT_ROOT/.older"'
+destroy = 'printf "older\\n" >> "$ORDER"; rm -f "$WT_ROOT/.older"'
+tied_to = "tree"
+[task.older.env]
+ORDER = "{}"
+
+[task.newer]
+run = 'touch "$WT_ROOT/.newer"'
+exists = 'test -f "$WT_ROOT/.newer"'
+destroy = 'printf "newer\\n" >> "$ORDER"; rm -f "$WT_ROOT/.newer"'
+tied_to = "tree"
+[task.newer.env]
+ORDER = "{}"
+"#,
+        order.display(),
+        order.display(),
+    );
+    let repo = h.repo("repo", &config);
+    h.register(&repo);
+    let created = h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
+    let tree = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
+    h.json(&["run", "older", "repo/work"]);
+    h.json(&["run", "newer", "repo/work"]);
+
+    let target = wt_core::model::Target::parse("repo/work").unwrap();
+    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
+    let mut state =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    let sequences = state
+        .resources
+        .values()
+        .map(|record| {
+            (
+                record.key.task.clone(),
+                record.instance.as_ref().unwrap().recorded_sequence,
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert!(sequences["older"] < sequences["newer"]);
+    for record in state.resources.values_mut() {
+        record.instance.as_mut().unwrap().recorded_at = "same-time".to_owned();
+    }
+    wt_sys::fsx::write_json(&state_path, &state).unwrap();
+
+    let changed = format!(
+        r#"
+[task.older]
+exists = 'test -f "$WT_ROOT/.older"'
+destroy = 'touch "$SENTINEL"; rm -f "$WT_ROOT/.older"'
+tied_to = "tree"
+[task.older.env]
+SENTINEL = "{}"
+
+[task.newer]
+exists = 'test -f "$WT_ROOT/.newer"'
+destroy = 'touch "$SENTINEL"; rm -f "$WT_ROOT/.newer"'
+tied_to = "tree"
+[task.newer.env]
+SENTINEL = "{}"
+"#,
+        sentinel.display(),
+        sentinel.display(),
+    );
+    common::write(&tree.join(".wt.toml"), &changed);
+    h.json(&["remove", "repo/work", "--yes", "--force"]);
+
+    assert_eq!(std::fs::read_to_string(&order).unwrap(), "newer\nolder\n");
+    assert!(!sentinel.exists());
+    common::proof_capture(
+        "D4",
+        format!(
+            "recorded sequence: older={} newer={}\ndestroy order:\n{}changed recipe sentinel exists: {}",
+            sequences["older"],
+            sequences["newer"],
+            std::fs::read_to_string(&order).unwrap(),
+            sentinel.exists()
+        ),
+    );
+}
+
+#[test]
 fn shell_refuses_json_while_open_provisions_without_attaching() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
@@ -996,10 +1329,12 @@ fn acceptance_shaped_fixture_walks_register_new_run_open_remove() {
 ports=['http']
 bin=['bin']
 copy=['secret.txt']
+[vars]
+app_port="${ports.http}"
 [env]
-APP_PORT='$WT_PORT_HTTP'
+APP_PORT='${app_port}'
 [files.".wt/app.conf"]
-content='port=$APP_PORT'
+content='port=${app_port}'
 [task.service]
 run='touch "$WT_ROOT/.service"'
 exists='test -f "$WT_ROOT/.service"'
@@ -1276,11 +1611,16 @@ fn cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs() {
         .filter_map(|input| input["path"].as_str())
         .collect::<BTreeSet<_>>();
     assert_eq!(inputs, BTreeSet::from(["Cargo.lock", "Cargo.toml"]));
+
     common::proof_capture(
-        "A1",
+        "D1",
         format!(
-            "reflink supported: {reflink_supported}\nadapter seed present: {}\nSEED_SKIPPED_NO_REFLINK: {skipped}\nsync inputs: {}",
+            "reflink supported: {reflink_supported}\nseed present: {}\nseed materialized: {}\nSEED_SKIPPED_NO_REFLINK: {skipped}\nSEED_COPIED_NOT_CLONED: false\nsync inputs: {}",
             tree_root.join("target/cache.bin").exists(),
+            state.materialized.iter().any(|entry| {
+                entry.path == "target"
+                    && entry.kind == wt_core::lifecycle::MaterializedKind::Seeded
+            }),
             inputs.iter().copied().collect::<Vec<_>>().join(", ")
         ),
     );
@@ -1296,6 +1636,49 @@ fn cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs() {
     assert_eq!(
         status["data"]["sync"]["drift"],
         serde_json::json!(["Cargo.toml"])
+    );
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn seed_skip_notice_and_record_are_observed_at_the_new_boundary() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo("repo", "seed=['cache']\n");
+    wt_sys::fsx::create_private_dir(&repo.join("cache")).unwrap();
+    common::write(&repo.join("cache/value"), "seed\n");
+    h.register(&repo);
+    let output = h
+        .wt()
+        .env("WT_TEST_REFLINK_UNSUPPORTED", "1")
+        .args(["new", "repo/work", "--no-sync", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let created: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let root = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
+    let skipped = created["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "SEED_SKIPPED_NO_REFLINK");
+    assert!(skipped);
+    assert!(!root.join("cache").exists());
+    let target = wt_core::model::Target::parse("repo/work").unwrap();
+    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
+        &h.home.join(wt_core::model::tree_state_path(&target)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    let materialized = state.materialized.iter().any(|entry| entry.path == "cache");
+    assert!(!materialized);
+    common::proof_capture(
+        "D1",
+        format!(
+            "forced unavailable notice: {skipped}\nforced seed present: {}\nforced seed materialized: {materialized}",
+            root.join("cache").exists()
+        ),
     );
 }
 
@@ -1374,7 +1757,7 @@ fn truth_surfaces_report_descriptions_config_errors_and_live_locks() {
 }
 
 #[test]
-fn door_notices_stay_in_json_and_missing_bins_render_as_next_steps() {
+fn missing_bins_are_silent_at_doors_and_reported_by_doctor() {
     let h = Harness::new();
     let repo = h.repo("repo", "bin=['missing-bin']\n[task.fail]\nrun='exit 2'\n");
     h.register(&repo);
@@ -1382,20 +1765,21 @@ fn door_notices_stay_in_json_and_missing_bins_render_as_next_steps() {
         .args(["exec", "repo", "--", "true"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("next"))
-        .stderr(predicate::str::contains("create "))
-        .stderr(predicate::str::contains("wt build repo").not())
-        .stderr(predicate::str::contains("BIN_DIR_MISSING").not());
+        .stderr(predicate::str::is_empty());
     assert!(h.json(&["env", "repo"])["notices"]
         .as_array()
         .unwrap()
+        .is_empty());
+    assert!(h.json(&["doctor", "repo"])["data"]["findings"]
+        .as_array()
+        .unwrap()
         .iter()
-        .any(|notice| notice["code"] == "BIN_DIR_MISSING"));
+        .any(|finding| finding["code"] == "BIN_DIR_MISSING"));
     h.wt()
         .args(["run", "fail", "repo", "--json"])
         .assert()
         .code(6)
-        .stdout(predicate::str::contains("BIN_DIR_MISSING"));
+        .stdout(predicate::str::contains("BIN_DIR_MISSING").not());
 }
 
 #[test]
@@ -1411,8 +1795,7 @@ fn text_run_keeps_wt_guidance_off_the_child_stdout() {
         .assert()
         .success()
         .stdout("1.2.3")
-        .stderr(predicate::str::contains("next"))
-        .stderr(predicate::str::contains("missing-bin"));
+        .stderr(predicate::str::is_empty());
 }
 
 #[test]
@@ -1461,7 +1844,7 @@ run='touch "$WT_ROOT/.service"'
 exists='test -f "$WT_ROOT/.service"'
 destroy='rm -f "$WT_ROOT/.service"'
 tied_to='tree'
-name='$WT_NAME'
+name='${{name()}}'
 [task.long]
 exists='false'
 destroy='true'
@@ -1703,6 +2086,8 @@ fn doctor_condition_contracts_cover_every_documented_code() {
         "NO_COORDINATION",
         "SESSION_BACKEND",
         "BIN_DIR_MISSING",
+        "SHIM_BROKEN",
+        "SHIM_SHADOWED",
         "PATH_NOT_SHADOWED",
         "PORT_BOUND",
         "EXCLUDE_MISSING",
@@ -1845,6 +2230,79 @@ fn doctor_manufactures_git_environment_port_and_adapter_conditions() {
             "missing manufactured doctor code {code}"
         );
     }
+}
+
+#[test]
+fn doctor_reports_a_broken_path_prefix_once() {
+    let h = Harness::new();
+    let repo = h.repo("repo", "bin=['bin-a','bin-b']\ncommands=['orbit']\n");
+    common::write(&repo.join("bin-a/.keep"), "");
+    common::write(&repo.join("bin-b/.keep"), "");
+    h.register(&repo);
+
+    let report = h.json(&["doctor", "repo"]);
+    let findings = report["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["code"] == "PATH_NOT_SHADOWED")
+        .count();
+    assert_eq!(findings, 1);
+
+    let door = h.json(&["env", "repo"]);
+    let assembled_path = door["data"]["env"]["PATH"].as_str().unwrap();
+    let healthy = h
+        .wt()
+        .env("PATH", assembled_path)
+        .args(["doctor", "repo", "--json"])
+        .output()
+        .unwrap();
+    assert!(healthy.status.success());
+    let healthy: serde_json::Value = serde_json::from_slice(&healthy.stdout).unwrap();
+    assert!(healthy["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|finding| finding["code"] != "PATH_NOT_SHADOWED"));
+}
+
+#[test]
+fn doctor_accepts_a_registered_worktree_path_alias() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo("repo", "");
+    h.register(&repo);
+    let alias_parent = h.root.join("aliased-repos");
+    wt_sys::fsx::replace_symlink(&alias_parent, &h.repos).unwrap();
+    let alias = alias_parent.join("repo");
+    let registry_path = h.home.join("registry.json");
+    let mut registry =
+        wt_sys::fsx::read_json::<wt_core::model::Registry>(&registry_path, "REGISTRY_CORRUPT")
+            .unwrap()
+            .unwrap();
+    let alias = wt_core::model::AbsPath::new(alias.to_str().unwrap()).unwrap();
+    registry.trees[0].path = alias.clone();
+    registry
+        .labels
+        .get_mut(&wt_core::model::Label::new("repo").unwrap())
+        .unwrap()
+        .path = alias;
+    wt_sys::fsx::write_json(&registry_path, &registry).unwrap();
+
+    let report = h.json(&["doctor", "repo"]);
+    let unmanaged = report["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "UNMANAGED_WORKTREE");
+    assert!(!unmanaged);
+    common::proof_capture(
+        "G4",
+        format!(
+            "registered path uses alias: {}\nUNMANAGED_WORKTREE present: {unmanaged}",
+            registry.trees[0].path.as_str() != repo.to_string_lossy()
+        ),
+    );
 }
 
 #[cfg(feature = "failpoints")]
