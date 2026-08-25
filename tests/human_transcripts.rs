@@ -111,7 +111,7 @@ fn missing_bin_guidance_is_exclusive_to_doctor() {
     common::proof_capture(
         "F1",
         format!(
-            "door output:\n{}doctor finding:\n{}",
+            "door output:\n{}\ndoctor finding:\n{}",
             text.trim_end(),
             serde_json::to_string_pretty(finding).unwrap()
         ),
