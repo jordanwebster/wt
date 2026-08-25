@@ -3,7 +3,8 @@ use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use wt_core::{CoreError, ExitClass};
 
@@ -70,7 +71,14 @@ impl Tmux {
     }
 
     /// Creates a detached session; the inner wt door assembles its environment.
-    pub fn new_session(&self, session: &str, cwd: &Path, command: &[OsString]) -> Result<()> {
+    pub fn new_session(
+        &self,
+        session: &str,
+        cwd: &Path,
+        home: &Path,
+        capture: &Path,
+        command: &[OsString],
+    ) -> Result<()> {
         let Some((program, args)) = command.split_first() else {
             return Err(CoreError::new(
                 ExitClass::State,
@@ -83,11 +91,52 @@ impl Tmux {
         request.env = self.env.clone();
         request.args = proc::os_args(&["new-session", "-d", "-s", session, "-c"]);
         request.args.push(cwd.as_os_str().to_owned());
+        request.args.push(OsString::from("-e"));
+        request
+            .args
+            .push(OsString::from(format!("WT_HOME={}", home.display())));
+        let gate = capture.with_extension("gate");
         request.args.push(OsString::from("--"));
+        request.args.push(OsString::from("/bin/sh"));
+        request.args.extend(proc::os_args(&[
+            "-c",
+            "gate=$1; shift; i=0; while [ ! -f \"$gate\" ] && [ \"$i\" -lt 1000 ]; do i=$((i + 1)); sleep 0.01; done; [ -f \"$gate\" ] || { echo 'wt session bootstrap gate timed out' >&2; exit 125; }; exec \"$@\"",
+            "wt-session-bootstrap",
+        ]));
+        request.args.push(gate.as_os_str().to_owned());
         request.args.push(program.clone());
         request.args.extend(args.iter().cloned());
+        request.args.push(OsString::from(";"));
+        request.args.extend(proc::os_args(&[
+            "pipe-pane",
+            "-o",
+            "-t",
+            session,
+            &format!("cat > {}", shell_quote(capture)),
+        ]));
         let output = proc::capture(&request, self.deadline).map_err(tool_error)?;
-        success(output, "create tmux session").map(|_| ())
+        success(output, "create tmux session")?;
+        crate::fsx::write_store(&gate, b"ready\n")?;
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            if !self.has_session(session)? {
+                let reason = captured_reason(capture, self.deadline);
+                let _ = crate::fsx::remove_path(&gate);
+                let _ = crate::fsx::remove_path(capture);
+                return Err(CoreError::new(
+                    ExitClass::External,
+                    "SESSION_CREATE_FAILED",
+                    format!("tmux session `{session}` did not survive creation: {reason}"),
+                    "fix the session command or WT_HOME and retry",
+                ));
+            }
+            if Instant::now() >= deadline {
+                let _ = crate::fsx::remove_path(&gate);
+                let _ = crate::fsx::remove_path(capture);
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     pub fn new_window(
@@ -160,6 +209,26 @@ impl Tmux {
         request.args = proc::os_args(args);
         request.env = self.env.clone();
         proc::capture(&request, self.deadline).map_err(tool_error)
+    }
+}
+
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+fn captured_reason(path: &Path, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout.min(Duration::from_secs(1));
+    loop {
+        if let Ok(Some(text)) = crate::fsx::read_string(path) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return text.to_owned();
+            }
+        }
+        if Instant::now() >= deadline {
+            return "the pane exited without output".to_owned();
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -246,17 +315,20 @@ mod tests {
 
     #[test]
     fn new_session_records_cwd_env_and_child_argv() {
-        let script = "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/record\"\n";
-        let (_dir, tmux, record) = stub(script);
+        let script = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$(dirname \"$0\")/record\"\nexit 0\n";
+        let (dir, tmux, record) = stub(script);
         tmux.new_session(
             "wt_test",
             Path::new("/tmp/tree"),
+            Path::new("/tmp/wt-home"),
+            &dir.path().join("capture"),
             &["wt".into(), "exec".into()],
         )
         .unwrap();
         let args = fs::read_to_string(record).unwrap();
-        assert!(args.contains("-c\n/tmp/tree\n--\nwt\nexec\n"));
-        assert!(!args.contains("\n-e\n"));
+        assert!(args.contains("-c\n/tmp/tree\n-e\nWT_HOME=/tmp/wt-home\n"));
+        assert!(args.contains("/bin/sh\n-c\n"));
+        assert!(args.contains("\nwt\nexec\n;\npipe-pane\n"));
     }
 
     #[test]

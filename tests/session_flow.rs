@@ -59,9 +59,18 @@ impl PrivateTmux {
     }
 
     fn tmux(&self, args: &[&str]) -> ProcessOutput {
+        self.tmux_with_env(args, None)
+    }
+
+    fn tmux_with_env(&self, args: &[&str], wt_home: Option<&Path>) -> ProcessOutput {
         let mut request = CommandRequest::new(&self.binary);
         request.args = vec![OsString::from("-L"), OsString::from(&self.socket)];
         request.args.extend(proc::os_args(args));
+        if let Some(home) = wt_home {
+            request
+                .env
+                .insert("WT_HOME".to_owned(), home.to_string_lossy().into_owned());
+        }
         proc::capture(&request, Duration::from_secs(2)).expect("run private tmux")
     }
 
@@ -133,6 +142,96 @@ impl PrivateTmux {
             .map(str::to_owned)
             .collect()
     }
+}
+
+#[test]
+fn session_gets_resolved_home_even_when_server_captured_another_one() {
+    let Some(private) = PrivateTmux::new(false, false) else {
+        eprintln!("skipping private-tmux home test: tmux is not installed");
+        return;
+    };
+    let wrong_home = private.harness.root.join("server-home");
+    wt_sys::fsx::create_private_dir(&wrong_home).unwrap();
+    assert!(private
+        .tmux_with_env(&["new-session", "-d", "-s", "keeper"], Some(&wrong_home))
+        .success());
+
+    let observed = private.harness.root.join("observed-home");
+    let agent = private.harness.shims.join("home-agent");
+    write_executable(
+        &agent,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$WT_HOME\" > \"{}\"\nexec /bin/sh -i\n",
+            observed.display()
+        ),
+    );
+    write(
+        &private.harness.home.join("config.toml"),
+        &format!(
+            "[session]\nbackend='tmux'\nattach=false\n[agents.home]\nstart=['{}']\nresume=['{}']\n",
+            agent.display(),
+            agent.display()
+        ),
+    );
+    let repo = private.harness.repo("repo", "");
+    private.harness.register(&repo);
+    let opened = private
+        .harness
+        .json(&["open", "repo", "--agent", "home", "--no-attach"]);
+    assert_eq!(opened["data"]["sessions"][0]["created"], true);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !observed.exists() {
+        assert!(Instant::now() < deadline, "agent never recorded WT_HOME");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::read_to_string(&observed).unwrap().trim(),
+        private.harness.home.to_string_lossy()
+    );
+    assert_ne!(private.harness.home, wrong_home);
+    common::proof_capture(
+        "E1",
+        format!(
+            "tmux server WT_HOME: {}\nsession WT_HOME: {}",
+            wrong_home.display(),
+            std::fs::read_to_string(&observed).unwrap().trim()
+        ),
+    );
+}
+
+#[test]
+fn session_creation_is_confirmed_and_carries_dead_pane_output() {
+    let Some(private) = PrivateTmux::new(false, false) else {
+        eprintln!("skipping private-tmux confirmation test: tmux is not installed");
+        return;
+    };
+    let repo = private.harness.repo("repo", "");
+    private.harness.register(&repo);
+    let wrong_home = private.harness.root.join("wrong-home");
+    wt_sys::fsx::create_private_dir(&wrong_home).unwrap();
+    let capture = private.harness.root.join("dead-pane.log");
+    let target = wt_core::model::Target::canonical(wt_core::model::Label::new("repo").unwrap());
+    let tree = private.harness.json(&["status", "repo"]);
+    let cwd = Path::new(tree["data"]["path"].as_str().unwrap());
+    let command = vec![
+        OsString::from(env!("CARGO_BIN_EXE_wt")),
+        OsString::from("exec"),
+        OsString::from("--no-gate"),
+        OsString::from(target.to_string()),
+        OsString::from("--"),
+        OsString::from("/bin/sh"),
+        OsString::from("-i"),
+    ];
+    let tmux = wt_sys::tmux::Tmux::new(private.harness.shims.join("tmux"), Duration::from_secs(3));
+    let session = "wt-confirm-mismatch";
+    let error = tmux
+        .new_session(session, cwd, &wrong_home, &capture, &command)
+        .unwrap_err();
+    assert_eq!(error.code.0, "SESSION_CREATE_FAILED");
+    assert_eq!(error.exit(), 7);
+    assert!(error.message.contains("NOT_FOUND"), "{}", error.message);
+    assert!(!private.has_session(session));
+    common::proof_capture("E2", error.to_string());
 }
 
 impl Drop for PrivateTmux {

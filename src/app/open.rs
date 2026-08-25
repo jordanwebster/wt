@@ -305,9 +305,20 @@ fn open_tree(
             OsString::from("--"),
         ];
         inner.extend(launch.argv);
-        if let Err(error) =
-            tmux.new_session(&tree.session_name, Path::new(tree.path.as_str()), &inner)
-        {
+        let capture_dir = context.home.join("tmp");
+        wt_sys::fsx::create_private_dir(&capture_dir)?;
+        let capture = capture_dir.join(format!(
+            "session-{}-{}.log",
+            tree.session_name,
+            std::process::id()
+        ));
+        if let Err(error) = tmux.new_session(
+            &tree.session_name,
+            Path::new(tree.path.as_str()),
+            &context.home,
+            &capture,
+            &inner,
+        ) {
             if !tmux.has_session(&tree.session_name)? {
                 return Err(error);
             }
