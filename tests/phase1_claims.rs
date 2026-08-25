@@ -490,6 +490,16 @@ fn configuration_failures_are_captured_with_names_and_locations() {
 }
 
 #[test]
+fn legacy_template_spelling_is_rejected_at_its_source_location() {
+    let source = "ports=['http']\n[env]\nAPP_PORT = \"$WT_PORT_HTTP\"\nROOT = '$WT_ROOT'\n";
+    let error = wt_core::config::parse(source, "legacy.wt.toml").unwrap_err();
+    assert_eq!(error.code.0, "CONFIG_INVALID");
+    assert!(error.message.contains("legacy.wt.toml:3:13"));
+    assert!(error.message.contains("$WT_PORT_HTTP"));
+    assert!(error.message.contains("${ports.http}"));
+}
+
+#[test]
 fn shim_fast_path_has_no_door_effects_and_is_well_below_the_door_budget() {
     let harness = Harness::new();
     let repo = owned_fixture(&harness);

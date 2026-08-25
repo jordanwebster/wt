@@ -295,8 +295,7 @@ fn record_locations(config: &mut Config, source: &str, path: &str) {
             _ => None,
         };
         if let Some(logical) = logical {
-            let expression_col = line
-                .find("${")
+            let expression_col = first_template_dollar(line)
                 .map_or_else(|| line.len() - trimmed.len() + 1, |index| index + 1);
             scope.locations.insert(
                 logical,
@@ -308,6 +307,26 @@ fn record_locations(config: &mut Config, source: &str, path: &str) {
             );
         }
     }
+}
+
+fn first_template_dollar(line: &str) -> Option<usize> {
+    let mut characters = line.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        if character != '$' {
+            continue;
+        }
+        if characters.peek().is_some_and(|(_, next)| *next == '$') {
+            characters.next();
+            continue;
+        }
+        if characters
+            .peek()
+            .is_some_and(|(_, next)| *next == '{' || next.is_ascii_alphabetic() || *next == '_')
+        {
+            return Some(index);
+        }
+    }
+    None
 }
 
 fn split_toml_path(input: &str) -> Vec<String> {
@@ -637,7 +656,8 @@ fn validate_scope(scope: &Scope) -> Result<(), CoreError> {
             )));
         }
         if let Some(value) = value.value() {
-            template::validate(value)?;
+            template::validate(value)
+                .map_err(|error| located(error, scope.locations.get(&format!("var:{key}"))))?;
         }
     }
     for key in scope.env.keys() {
@@ -648,9 +668,10 @@ fn validate_scope(scope: &Scope) -> Result<(), CoreError> {
             ));
         }
     }
-    for value in scope.env.values() {
+    for (key, value) in &scope.env {
         if let Some(template_value) = value.value() {
-            template::validate(template_value)?;
+            template::validate(template_value)
+                .map_err(|error| located(error, scope.locations.get(&format!("env:{key}"))))?;
         }
     }
     for (path, file) in &scope.files {
@@ -663,14 +684,16 @@ fn validate_scope(scope: &Scope) -> Result<(), CoreError> {
                 return Err(invalid("file mode must be a four-digit octal string"));
             }
             if let Some(content) = &file.content {
-                template::validate(content)?;
+                template::validate(content).map_err(|error| {
+                    located(error, scope.locations.get(&format!("file:{path}")))
+                })?;
             }
         }
     }
     for (id, task) in &scope.task {
         TaskId::new(id)?;
         if let Some(task) = task.value() {
-            validate_task(task)?;
+            validate_task(id, task, &scope.locations)?;
         }
     }
     Ok(())
@@ -682,7 +705,11 @@ fn valid_var_key(key: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
-fn validate_task(task: &Task) -> Result<(), CoreError> {
+fn validate_task(
+    id: &str,
+    task: &Task,
+    locations: &BTreeMap<String, SourceLocation>,
+) -> Result<(), CoreError> {
     if task.run.is_none() && task.destroy.is_none() {
         return Err(invalid("a task needs run or destroy"));
     }
@@ -703,7 +730,8 @@ fn validate_task(task: &Task) -> Result<(), CoreError> {
         }
     }
     if let Some(name) = &task.name {
-        template::validate(name)?;
+        template::validate(name)
+            .map_err(|error| located(error, locations.get(&format!("task:{id}:name"))))?;
     }
     for key in &task.snapshot_env {
         EnvKey::new(key)?;
@@ -715,7 +743,8 @@ fn validate_task(task: &Task) -> Result<(), CoreError> {
                 "PATH is owned by wt and cannot be task environment",
             ));
         }
-        template::validate(value)?;
+        template::validate(value)
+            .map_err(|error| located(error, locations.get(&format!("task:{id}:env:{key}"))))?;
     }
     for command in [
         task.run.as_ref(),
@@ -727,7 +756,16 @@ fn validate_task(task: &Task) -> Result<(), CoreError> {
     {
         if let Command::Argv(argv) = command {
             for text in argv {
-                template::validate(text)?;
+                template::validate(text).map_err(|error| {
+                    let field = if task.run.as_ref() == Some(command) {
+                        "run"
+                    } else if task.exists.as_ref() == Some(command) {
+                        "exists"
+                    } else {
+                        "destroy"
+                    };
+                    located(error, locations.get(&format!("task:{id}:{field}")))
+                })?;
             }
         }
     }

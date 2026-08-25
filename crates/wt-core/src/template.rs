@@ -77,6 +77,15 @@ fn parse_parts(input: &str) -> Result<Vec<Part>, CoreError> {
             continue;
         }
         if chars[index + 1] != '{' {
+            if chars[index + 1].is_ascii_alphabetic() || chars[index + 1] == '_' {
+                let mut end = index + 2;
+                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
+                {
+                    end += 1;
+                }
+                let name = chars[index + 1..end].iter().collect::<String>();
+                return Err(legacy_spelling(&format!("${name}"), &name));
+            }
             literal.push('$');
             index += 1;
             continue;
@@ -101,6 +110,9 @@ fn parse_parts(input: &str) -> Result<Vec<Part>, CoreError> {
 
 fn parse_expression(input: &str) -> Result<Expression, CoreError> {
     let input = input.trim();
+    if input.starts_with("WT_") && valid_identifier(input) {
+        return Err(legacy_spelling(&format!("${{{input}}}"), input));
+    }
     if let Some(name) = input.strip_prefix("ports.") {
         if valid_port_name(name) {
             return Ok(Expression::Port(name.to_owned()));
@@ -125,6 +137,36 @@ fn parse_expression(input: &str) -> Result<Expression, CoreError> {
         return Err(invalid("template function takes no arguments"));
     }
     Ok(Expression::Call(Call::Simple(name.to_owned())))
+}
+
+fn legacy_spelling(spelling: &str, name: &str) -> CoreError {
+    let replacement = match name {
+        "WT_ROOT" => "`${root()}`".to_owned(),
+        "WT_REPO" => "`${repo()}`".to_owned(),
+        "WT_BRANCH" => "`${branch()}`".to_owned(),
+        "WT_LABEL" => "`${label()}`".to_owned(),
+        "WT_NAME" => "`${name()}`".to_owned(),
+        "WT_NAME_SNAKE" => "`${name_snake()}`".to_owned(),
+        "WT_NAME_SHORT" => "`${name_short()}`".to_owned(),
+        "WT_TARGET" => "`${target()}`".to_owned(),
+        "WT_PORT_BASE" => {
+            "a specific declared port reference such as `${ports.http}`".to_owned()
+        }
+        _ if name.starts_with("WT_PORT_") => format!(
+            "`${{ports.{}}}`",
+            name.trim_start_matches("WT_PORT_").to_ascii_lowercase()
+        ),
+        _ if name.starts_with("WT_") => format!(
+            "the corresponding runtime environment variable in a shell-form task; `{name}` has no template-language replacement"
+        ),
+        _ => format!(
+            "a declared vars reference such as `${{{}}}`",
+            name.to_ascii_lowercase()
+        ),
+    };
+    invalid(&format!(
+        "legacy template spelling `{spelling}` is no longer valid; replace it with {replacement}"
+    ))
 }
 
 fn invalid(message: &str) -> CoreError {
@@ -394,8 +436,39 @@ mod tests {
             functions: &functions,
         };
         assert_eq!(
-            expand("${prefix}/${root()}/${ports.http}/$$/$A/$-", &context).unwrap(),
-            "one//tree/20016/$/$A/$-"
+            expand("${prefix}/${root()}/${ports.http}/$$/$-", &context).unwrap(),
+            "one//tree/20016/$/$-"
+        );
+    }
+
+    #[test]
+    fn legacy_template_spellings_fail_with_migration_guidance() {
+        for (old, replacement) in [
+            ("$WT_PORT_HTTP", "${ports.http}"),
+            ("${WT_ROOT}", "${root()}"),
+            ("$WT_REPO", "${repo()}"),
+            ("$WT_BRANCH", "${branch()}"),
+            ("$WT_LABEL", "${label()}"),
+            ("$WT_NAME", "${name()}"),
+            ("$WT_NAME_SNAKE", "${name_snake()}"),
+            ("$WT_NAME_SHORT", "${name_short()}"),
+            ("$WT_TARGET", "${target()}"),
+        ] {
+            let error = validate(old).unwrap_err();
+            assert_eq!(error.code.0, "CONFIG_INVALID");
+            assert!(error.message.contains(old), "{}", error.message);
+            assert!(error.message.contains(replacement), "{}", error.message);
+        }
+        assert_eq!(
+            expand(
+                "$$/$-",
+                &Context {
+                    vars: &BTreeMap::new(),
+                    functions: &functions()
+                }
+            )
+            .unwrap(),
+            "$/$-"
         );
     }
 
