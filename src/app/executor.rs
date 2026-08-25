@@ -952,6 +952,17 @@ fn log_path(
     }
     let dir = Path::new(door.tree.path.as_str()).join(".wt/logs");
     wt_sys::fsx::create_private_dir(&dir)?;
+    if node.id == "build" {
+        if let Some(requested) = context.parent_env.get("WT_BUILD_LOG").map(PathBuf::from) {
+            if requested.parent() == Some(dir.as_path())
+                && requested
+                    .file_name()
+                    .is_some_and(|name| name == "wt-setup.log")
+            {
+                return Ok(Some(requested));
+            }
+        }
+    }
     wt_sys::fsx::retain_logs(
         &dir,
         node.scope.as_str(),

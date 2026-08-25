@@ -58,7 +58,11 @@ pub(crate) fn provision_new(context: &mut Context, target: &str) -> Result<Vec<N
     Ok(open_trees(context, vec![tree], None, false)?.notices)
 }
 
-pub(crate) fn open_new_after_summary(context: &mut Context, target: &str) -> Result<(), CoreError> {
+pub(crate) fn open_new_after_summary(
+    context: &mut Context,
+    target: &str,
+    build: bool,
+) -> Result<(), CoreError> {
     let target = context.resolve(Some(target))?;
     let tree = context.tree(&target)?;
     let batch = open_trees(context, vec![tree], None, false)?;
@@ -70,7 +74,98 @@ pub(crate) fn open_new_after_summary(context: &mut Context, target: &str) -> Res
             SessionReport::Closed(_) | SessionReport::Failed(_) => None,
         })
         .expect("opening one tree produces one session");
+    if build {
+        start_build(context, &target.to_string())?;
+    }
     attach(context, &session.name)
+}
+
+pub(crate) fn start_build(context: &mut Context, target: &str) -> Result<(), CoreError> {
+    let target = context.resolve(Some(target))?;
+    let tree = context.tree(&target)?;
+    let logs = Path::new(tree.path.as_str()).join(".wt/logs");
+    wt_sys::fsx::create_private_dir(&logs)?;
+    let log = logs.join("wt-setup.log");
+    let status = Path::new(tree.path.as_str()).join(".wt/build.status");
+    wt_sys::fsx::write_store(&status, b"running\n")?;
+    let window =
+        (context.settings.session.backend == SessionBackend::Tmux).then(|| "wt:setup".to_owned());
+    let holder = context.holder(target.to_string(), "build")?;
+    context.mutate_state(&target, &holder, |state| {
+        state.build = Some(wt_core::lifecycle::BuildState {
+            started: wt_sys::fsx::timestamp()?,
+            window: window.clone(),
+            log: log.to_string_lossy().into_owned(),
+        });
+        Ok(())
+    })?;
+
+    let running_binary = std::env::current_exe().map_err(|error| {
+        CoreError::new(
+            ExitClass::Internal,
+            "CURRENT_EXE_FAILED",
+            format!("could not resolve the running wt binary: {error}"),
+            "retry and report this wt bug if it repeats",
+        )
+    })?;
+    if context.settings.session.backend == SessionBackend::Tmux {
+        let inner = vec![
+            running_binary.clone().into_os_string(),
+            OsString::from("exec"),
+            OsString::from("--no-gate"),
+            OsString::from(target.to_string()),
+            OsString::from("--"),
+            running_binary.into_os_string(),
+            OsString::from("build"),
+            OsString::from(target.to_string()),
+        ];
+        let env = [
+            (
+                "WT_HOME".to_owned(),
+                context.home.to_string_lossy().into_owned(),
+            ),
+            (
+                "WT_BUILD_LOG".to_owned(),
+                log.to_string_lossy().into_owned(),
+            ),
+            (
+                "WT_BACKGROUND_BUILD_STATUS".to_owned(),
+                status.to_string_lossy().into_owned(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        tmux(context).new_window(
+            &tree.session_name,
+            "wt:setup",
+            Path::new(tree.path.as_str()),
+            &env,
+            &inner,
+        )?;
+        return Ok(());
+    }
+
+    let mut request = wt_sys::proc::CommandRequest::new(running_binary);
+    request.args = wt_sys::proc::os_args(&["build", &target.to_string()]);
+    request.env.insert(
+        "WT_BUILD_LOG".to_owned(),
+        log.to_string_lossy().into_owned(),
+    );
+    request.env.insert(
+        "WT_BACKGROUND_BUILD_STATUS".to_owned(),
+        status.to_string_lossy().into_owned(),
+    );
+    let output = wt_sys::proc::run(&request, None, None, wt_sys::proc::Tee::Inherit)?;
+    if output.success() {
+        Ok(())
+    } else {
+        Err(CoreError::new(
+            ExitClass::ChildFailed,
+            "TASK_FAILED",
+            format!("background build exited {}", output.mapped_exit()),
+            format!("inspect {}", log.display()),
+        ))
+    }
 }
 
 pub(crate) fn should_attach(context: &Context, no_attach: bool) -> bool {

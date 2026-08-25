@@ -90,6 +90,46 @@ impl Tmux {
         success(output, "create tmux session").map(|_| ())
     }
 
+    pub fn new_window(
+        &self,
+        session: &str,
+        name: &str,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        command: &[OsString],
+    ) -> Result<()> {
+        let Some((program, args)) = command.split_first() else {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "CONFIG_INVALID",
+                "tmux window command is empty",
+                "configure a build task",
+            ));
+        };
+        let mut request = CommandRequest::new(&self.program);
+        request.env = self.env.clone();
+        request.args = proc::os_args(&["new-window", "-d", "-t", session, "-n", name, "-c"]);
+        request.args.push(cwd.as_os_str().to_owned());
+        for (key, value) in env {
+            request.args.push(OsString::from("-e"));
+            request.args.push(OsString::from(format!("{key}={value}")));
+        }
+        request.args.push(OsString::from("--"));
+        request.args.push(program.clone());
+        request.args.extend(args.iter().cloned());
+        request.args.push(OsString::from(";"));
+        request.args.extend(proc::os_args(&[
+            "set-option",
+            "-w",
+            "-t",
+            &format!("{session}:{name}"),
+            "remain-on-exit",
+            "on",
+        ]));
+        let output = proc::capture(&request, self.deadline).map_err(tool_error)?;
+        success(output, "create tmux window").map(|_| ())
+    }
+
     /// Kills one session; callers use `has_session` for idempotence.
     pub fn kill_session(&self, session: &str) -> Result<()> {
         let output = self.status(&["kill-session", "-t", session])?;

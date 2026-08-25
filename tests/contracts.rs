@@ -168,6 +168,53 @@ fn new_run_and_remove_form_an_idempotent_lifecycle() {
 }
 
 #[test]
+fn backend_none_runs_build_plan_after_ready_and_respects_suppression() {
+    let h = Harness::new();
+    common::write(&h.home.join("config.toml"), "[session]\nbackend='none'\n");
+    let events = h.root.join("build-events");
+    let config = format!(
+        r#"
+[task.prepare]
+run = ["sh", "-c", "printf 'prepare\\n' >> \"$EVENTS\""]
+[task.prepare.env]
+EVENTS = "{}"
+[task.build]
+needs = ["prepare"]
+run = ["sh", "-c", "printf 'build\\n' >> \"$EVENTS\""]
+[task.build.env]
+EVENTS = "{}"
+"#,
+        events.display(),
+        events.display(),
+    );
+    let repo = h.repo("repo", &config);
+    h.register(&repo);
+
+    let created = h.json(&["new", "repo/work", "--no-sync"]);
+    assert_eq!(
+        std::fs::read_to_string(&events).unwrap(),
+        "prepare\nbuild\n"
+    );
+    let target = wt_core::model::Target::parse("repo/work").unwrap();
+    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
+        &h.home.join(wt_core::model::tree_state_path(&target)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    let build = state.build.unwrap();
+    assert!(build.window.is_none());
+    assert!(Path::new(&build.log).ends_with(".wt/logs/wt-setup.log"));
+    assert_eq!(created["data"]["tree"]["phase"], "ready");
+
+    common::write(&events, "");
+    h.json(&["new", "repo/no-build", "--no-sync", "--no-build"]);
+    assert_eq!(std::fs::read_to_string(&events).unwrap(), "");
+    h.json(&["new", "repo/no-open", "--no-sync", "--no-open"]);
+    assert_eq!(std::fs::read_to_string(&events).unwrap(), "");
+}
+
+#[test]
 fn from_resolution_fetches_prs_and_names_branch_holders() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);

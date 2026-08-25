@@ -50,7 +50,8 @@ pub(crate) struct Output {
 
 pub(crate) enum AfterRender {
     Attach { session: String },
-    NewSession { target: String },
+    NewSession { target: String, build: bool },
+    Build { target: String },
 }
 
 impl Output {
@@ -184,9 +185,14 @@ pub fn main(cli: Cli) -> i32 {
                     .as_mut()
                     .expect("deferred actions require an open context");
                 match action {
-                    AfterRender::NewSession { target } => {
-                        if let Err(error) = open::open_new_after_summary(context, &target) {
+                    AfterRender::NewSession { target, build } => {
+                        if let Err(error) = open::open_new_after_summary(context, &target, build) {
                             emit_session_warning(&target, &error);
+                        }
+                    }
+                    AfterRender::Build { target } => {
+                        if let Err(error) = open::start_build(context, &target) {
+                            return render_error(&command, json, color, error, Vec::new());
                         }
                     }
                     AfterRender::Attach { session } => {
@@ -304,7 +310,11 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Test(args) => run::run(context, args.into_run("test")),
         Command::Lint(args) => run::run(context, args.into_run("lint")),
         Command::Fmt(args) => run::run(context, args.into_run("fmt")),
-        Command::Build(args) => run::run(context, args.into_run("build")),
+        Command::Build(args) => {
+            let result = run::run(context, args.into_run("build"));
+            record_background_build_result(&result);
+            result
+        }
         Command::Exec(args) => exec::run(context, args),
         Command::Shell(args) => shell::run(context, args),
         Command::Env(args) => env::run(context, args),
@@ -321,6 +331,24 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Locks(args) => locks::run(context, args),
         Command::ShellInit(args) => shell_init::run(context, args),
         Command::Completions(args) => completions::run(context, args),
+    }
+}
+
+fn record_background_build_result(result: &Result<Output, CoreError>) {
+    let Some(path) = std::env::var_os("WT_BACKGROUND_BUILD_STATUS").map(std::path::PathBuf::from)
+    else {
+        return;
+    };
+    let valid = path.file_name().is_some_and(|name| name == "build.status")
+        && path
+            .parent()
+            .is_some_and(|parent| parent.file_name().is_some_and(|name| name == ".wt"))
+        && std::env::var_os("WT_ROOT")
+            .map(std::path::PathBuf::from)
+            .is_some_and(|root| path.parent() == Some(root.join(".wt").as_path()));
+    if valid {
+        let status = if result.is_ok() { "ok\n" } else { "failed\n" };
+        let _ = wt_sys::fsx::write_store(&path, status.as_bytes());
     }
 }
 

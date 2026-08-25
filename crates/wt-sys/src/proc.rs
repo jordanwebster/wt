@@ -172,10 +172,42 @@ pub fn owned_command_fast_path() -> Option<i32> {
             path.display()
         )
     });
+    if let Some(message) = recorded_build_refusal(root, &target, &name, &searched) {
+        return Some(shim_refusal(message));
+    }
     Some(shim_refusal(format!(
         "COMMAND_NOT_BUILT: `{}` belongs to tree `{target}` but was not found; searched: {searched}; run `wt build {target}`{explicit}",
         name.to_string_lossy()
     )))
+}
+
+fn recorded_build_refusal(
+    root: &Path,
+    target: &str,
+    name: &std::ffi::OsStr,
+    searched: &str,
+) -> Option<String> {
+    let home = PathBuf::from(std::env::var_os("WT_HOME")?);
+    let target_value = wt_core::model::Target::parse(target).ok()?;
+    let state_path = home.join(wt_core::model::tree_state_path(&target_value));
+    let state: serde_json::Value = serde_json::from_slice(&std::fs::read(state_path).ok()?).ok()?;
+    let build = state.get("build")?.as_object()?;
+    let log = build.get("log")?.as_str()?;
+    let window = build.get("window").and_then(serde_json::Value::as_str);
+    let status = std::fs::read_to_string(root.join(".wt/build.status")).unwrap_or_default();
+    let location = window.map_or_else(
+        || format!("log `{log}`"),
+        |window| format!("window `{window}`; watch log `{log}`"),
+    );
+    let state = match status.trim() {
+        "failed" => format!("the background build failed; inspect {location}"),
+        "ok" => format!("the completed build did not produce it; inspect {location}"),
+        _ => format!("the build is in progress in {location}"),
+    };
+    Some(format!(
+        "COMMAND_NOT_BUILT: `{}` belongs to tree `{target}` but was not found; searched: {searched}; {state}",
+        name.to_string_lossy()
+    ))
 }
 
 fn shim_refusal(message: String) -> i32 {

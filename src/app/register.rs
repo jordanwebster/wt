@@ -647,6 +647,7 @@ pub(crate) fn new_state(
         verify_pending: false,
         sync: None,
         verify: None,
+        build: None,
         resources: BTreeMap::new(),
         materialized: Vec::new(),
         last_error: None,

@@ -582,6 +582,148 @@ fn backend_none_never_invokes_tmux_for_truth_or_teardown() {
 }
 
 #[test]
+fn new_starts_build_in_setup_window_and_shims_report_progress_and_failure() {
+    let Some(private) = PrivateTmux::new(false, false) else {
+        eprintln!("skipping private-tmux build test: tmux is not installed");
+        return;
+    };
+    let worker = private.harness.shims.join("build-worker");
+    let events = private.harness.root.join("build-events");
+    let release = private.harness.root.join("release-build");
+    write_executable(
+        &worker,
+        r#"#!/bin/sh
+if [ "$1" = prepare ]; then
+  printf 'prepare\n' >> "$2"
+  exit 0
+fi
+printf 'build-start\n' >> "$2"
+i=0
+while [ ! -f "$3" ] && [ "$i" -lt 500 ]; do
+  i=$((i + 1))
+  sleep 0.02
+done
+[ -f "$3" ] || exit 98
+printf 'build-failed\n' >> "$2"
+exit 9
+"#,
+    );
+    let config = format!(
+        r#"
+bin = ["bin"]
+commands = ["orbit"]
+[task.prepare]
+run = ["{}", "prepare", "{}", "{}"]
+[task.build]
+needs = ["prepare"]
+run = ["{}", "build", "{}", "{}"]
+"#,
+        worker.display(),
+        events.display(),
+        release.display(),
+        worker.display(),
+        events.display(),
+        release.display(),
+    );
+    let repo = private.harness.repo("repo", &config);
+    private.harness.register(&repo);
+
+    let output = private
+        .harness
+        .wt()
+        .args(["new", "repo/work", "--no-sync", "--no-attach"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let observed = wt_sys::fsx::read_string(&events)
+            .unwrap()
+            .unwrap_or_default();
+        if observed.contains("build-start") {
+            assert_eq!(observed, "prepare\nbuild-start\n");
+            break;
+        }
+        assert!(Instant::now() < deadline, "build never started: {observed}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let progress = private
+        .harness
+        .wt()
+        .args(["exec", "repo/work", "--", "orbit"])
+        .output()
+        .unwrap();
+    assert_eq!(progress.status.code(), Some(5));
+    let progress_text = String::from_utf8_lossy(&progress.stderr);
+    assert!(
+        progress_text.contains("build is in progress"),
+        "{progress_text}"
+    );
+    assert!(progress_text.contains("wt:setup"), "{progress_text}");
+    assert!(progress_text.contains("wt-setup.log"), "{progress_text}");
+
+    write(&release, "go\n");
+    let status = private
+        .harness
+        .home
+        .join("trees/repo/work/.wt/build.status");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while wt_sys::fsx::read_string(&status).unwrap().as_deref() != Some("failed\n") {
+        assert!(
+            Instant::now() < deadline,
+            "build status never became failed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let failed = private
+        .harness
+        .wt()
+        .args(["exec", "repo/work", "--", "orbit"])
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(5));
+    let failed_text = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        failed_text.contains("background build failed"),
+        "{failed_text}"
+    );
+    assert!(failed_text.contains("wt-setup.log"), "{failed_text}");
+
+    let target = wt_core::model::Target::parse("repo/work").unwrap();
+    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
+        &private
+            .harness
+            .home
+            .join(wt_core::model::tree_state_path(&target)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    let build = state.build.unwrap();
+    assert_eq!(build.window.as_deref(), Some("wt:setup"));
+    assert!(Path::new(&build.log).exists());
+    assert_eq!(state.phase, wt_core::lifecycle::StatePhase::Ready);
+    common::proof_capture(
+        "D2",
+        format!(
+            "events:\n{}state window: {:?}\nstate log: {}",
+            std::fs::read_to_string(&events).unwrap(),
+            build.window,
+            build.log
+        ),
+    );
+    common::proof_capture(
+        "D3",
+        format!("running refusal:\n{progress_text}\nfailed refusal:\n{failed_text}"),
+    );
+}
+
+#[test]
 fn new_rejects_agent_while_open_agent_starts_the_requested_recipe() {
     let Some(private) = PrivateTmux::new(false, true) else {
         eprintln!("skipping private-tmux CLI test: tmux is not installed");

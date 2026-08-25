@@ -218,6 +218,8 @@ pub struct New {
     pub no_open: bool,
     #[arg(long)]
     pub no_attach: bool,
+    #[arg(long)]
+    pub no_build: bool,
 }
 
 #[derive(Debug, Args)]

@@ -24,6 +24,7 @@ pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError>
     let target = args.target.clone();
     let no_open = args.no_open;
     let no_attach = args.no_attach;
+    let no_build = args.no_build;
     let mut output = create_tree(context, args)?;
     if let Some(notice) = backend_notice {
         output = output.with_notices([notice]);
@@ -31,8 +32,9 @@ pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError>
     if no_open {
         return Ok(output);
     }
+    let build = !no_build && has_build_task(context, &target)?;
     if open::should_attach(context, no_attach) {
-        return Ok(output.after_render(AfterRender::NewSession { target }));
+        return Ok(output.after_render(AfterRender::NewSession { target, build }));
     }
     match open::provision_new(context, &target) {
         Ok(notices) => output = output.with_notices(notices),
@@ -49,7 +51,17 @@ pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError>
             .agent
             .map_or(serde_json::Value::Null, serde_json::Value::String);
     }
+    if build {
+        output = output.after_render(AfterRender::Build { target });
+    }
     Ok(output)
+}
+
+fn has_build_task(context: &Context, target: &str) -> Result<bool, CoreError> {
+    let target = context.resolve(Some(target))?;
+    let tree = context.tree(&target)?;
+    let config = context.load_config(&tree)?;
+    Ok(context.task_catalog(&tree, &config)?.contains_key("build"))
 }
 
 fn create_tree(context: &mut Context, args: New) -> Result<Output, CoreError> {
