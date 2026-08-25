@@ -997,6 +997,65 @@ fn refresh_recreates_a_present_resource() {
 }
 
 #[test]
+fn teardown_uses_frozen_instances_in_newest_first_order() {
+    let h = Harness::new();
+    let order = h.root.join("destroy-order");
+    let sentinel = h.root.join("changed-destroy-ran");
+    let config = format!(
+        r#"
+[task.older]
+run = 'touch "$WT_ROOT/.older"'
+exists = 'test -f "$WT_ROOT/.older"'
+destroy = 'printf "older\\n" >> "$ORDER"; rm -f "$WT_ROOT/.older"'
+tied_to = "tree"
+[task.older.env]
+ORDER = "{}"
+
+[task.newer]
+run = 'touch "$WT_ROOT/.newer"'
+exists = 'test -f "$WT_ROOT/.newer"'
+destroy = 'printf "newer\\n" >> "$ORDER"; rm -f "$WT_ROOT/.newer"'
+tied_to = "tree"
+[task.newer.env]
+ORDER = "{}"
+"#,
+        order.display(),
+        order.display(),
+    );
+    let repo = h.repo("repo", &config);
+    h.register(&repo);
+    let created = h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
+    let tree = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
+    h.json(&["run", "older", "repo/work"]);
+    h.json(&["run", "newer", "repo/work"]);
+
+    let changed = format!(
+        r#"
+[task.older]
+exists = 'test -f "$WT_ROOT/.older"'
+destroy = 'touch "$SENTINEL"; rm -f "$WT_ROOT/.older"'
+tied_to = "tree"
+[task.older.env]
+SENTINEL = "{}"
+
+[task.newer]
+exists = 'test -f "$WT_ROOT/.newer"'
+destroy = 'touch "$SENTINEL"; rm -f "$WT_ROOT/.newer"'
+tied_to = "tree"
+[task.newer.env]
+SENTINEL = "{}"
+"#,
+        sentinel.display(),
+        sentinel.display(),
+    );
+    common::write(&tree.join(".wt.toml"), &changed);
+    h.json(&["remove", "repo/work", "--yes", "--force"]);
+
+    assert_eq!(std::fs::read_to_string(&order).unwrap(), "newer\nolder\n");
+    assert!(!sentinel.exists());
+}
+
+#[test]
 fn shell_refuses_json_while_open_provisions_without_attaching() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);

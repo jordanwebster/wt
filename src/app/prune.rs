@@ -179,10 +179,12 @@ fn apply(
             context.phase(&tree, context.read_state(&target)?.as_ref())?,
             DerivedPhase::Replaced
         );
-        let records = context
-            .read_state(&target)?
-            .map(|state| state.resources.into_values().collect::<Vec<_>>())
-            .unwrap_or_default();
+        let records = executor::newest_resources_first(
+            context
+                .read_state(&target)?
+                .map(|state| state.resources.into_values().collect::<Vec<_>>())
+                .unwrap_or_default(),
+        );
         let total = records.len();
         for record in records {
             let holder = context.holder(target.to_string(), "prune")?;
@@ -242,10 +244,12 @@ fn apply(
                     context.phase(&tree, context.read_state(&target)?.as_ref())?,
                     DerivedPhase::Replaced
                 );
-                let records = context
-                    .read_state(&target)?
-                    .map(|state| state.resources.into_values().collect::<Vec<_>>())
-                    .unwrap_or_default();
+                let records = executor::newest_resources_first(
+                    context
+                        .read_state(&target)?
+                        .map(|state| state.resources.into_values().collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                );
                 let total = records.len();
                 for record in records {
                     let _ = executor::destroy_stored_resource(context, &target, record, replaced);

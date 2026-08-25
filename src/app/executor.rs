@@ -504,6 +504,17 @@ pub(crate) fn destroy_stored_resource(
     Ok((resource_status(&final_step), child))
 }
 
+pub(crate) fn newest_resources_first(mut records: Vec<ResourceRecord>) -> Vec<ResourceRecord> {
+    records.sort_by(|left, right| {
+        right
+            .effective_snapshot()
+            .recorded_at
+            .cmp(&left.effective_snapshot().recorded_at)
+            .then_with(|| scoped_id(&right.key).cmp(&scoped_id(&left.key)))
+    });
+    records
+}
+
 fn execute_stored_probe(
     context: &Context,
     record: &ResourceRecord,
