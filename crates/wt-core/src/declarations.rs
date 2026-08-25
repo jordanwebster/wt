@@ -81,6 +81,7 @@ mod tests {
                 tree: format!("/{tree}"),
                 home: "/home".to_owned(),
             },
+            recorded_sequence: 1,
             recorded_at: "T".to_owned(),
         }
     }

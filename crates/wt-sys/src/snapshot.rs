@@ -323,6 +323,7 @@ mod tests {
                 tree: tree.to_string_lossy().into_owned(),
                 home: "/tmp/wt-home".into(),
             },
+            recorded_sequence: 1,
             recorded_at: "now".into(),
         }
     }

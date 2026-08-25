@@ -507,8 +507,14 @@ pub(crate) fn newest_resources_first(mut records: Vec<ResourceRecord>) -> Vec<Re
     records.sort_by(|left, right| {
         right
             .effective_snapshot()
-            .recorded_at
-            .cmp(&left.effective_snapshot().recorded_at)
+            .recorded_sequence
+            .cmp(&left.effective_snapshot().recorded_sequence)
+            .then_with(|| {
+                right
+                    .effective_snapshot()
+                    .recorded_at
+                    .cmp(&left.effective_snapshot().recorded_at)
+            })
             .then_with(|| scoped_id(&right.key).cmp(&scoped_id(&left.key)))
     });
     records
@@ -738,6 +744,7 @@ fn refresh_node_declaration(context: &Context, door: &Door, node: &Node) -> Resu
             tree: door.tree.path.as_str().to_owned(),
             home: context.home.to_string_lossy().into_owned(),
         },
+        recorded_sequence: 0,
         recorded_at: wt_sys::fsx::timestamp()?,
     };
     store_declaration(context, door, key, snapshot)
@@ -752,6 +759,7 @@ fn store_declaration(
     let holder = context.holder(door.target.to_string(), "refresh")?;
     match key.tied_to {
         TiedTo::Tree => context.mutate_state(&door.target, &holder, |state| {
+            snapshot.recorded_sequence = next_recorded_sequence(state.resources.values());
             let id = scoped_id(key);
             let step = wt_core::resource::step(
                 state.resources.remove(&id),
@@ -777,6 +785,7 @@ fn store_declaration(
                     label: key.label.clone(),
                     resources: BTreeMap::new(),
                 });
+            snapshot.recorded_sequence = next_recorded_sequence(state.resources.values());
             let id = scoped_id(key);
             let step = wt_core::resource::step(
                 state.resources.remove(&id),
@@ -788,6 +797,15 @@ fn store_declaration(
             wt_sys::fsx::write_json(&path, &state)
         }
     }
+}
+
+fn next_recorded_sequence<'a>(records: impl Iterator<Item = &'a ResourceRecord>) -> u64 {
+    records
+        .flat_map(|record| std::iter::once(&record.declaration).chain(record.instance.iter()))
+        .map(|snapshot| snapshot.recorded_sequence)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
 }
 
 fn load_record(

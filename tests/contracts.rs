@@ -1218,6 +1218,28 @@ ORDER = "{}"
     h.json(&["run", "older", "repo/work"]);
     h.json(&["run", "newer", "repo/work"]);
 
+    let target = wt_core::model::Target::parse("repo/work").unwrap();
+    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
+    let mut state =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    let sequences = state
+        .resources
+        .values()
+        .map(|record| {
+            (
+                record.key.task.clone(),
+                record.instance.as_ref().unwrap().recorded_sequence,
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert!(sequences["older"] < sequences["newer"]);
+    for record in state.resources.values_mut() {
+        record.instance.as_mut().unwrap().recorded_at = "same-time".to_owned();
+    }
+    wt_sys::fsx::write_json(&state_path, &state).unwrap();
+
     let changed = format!(
         r#"
 [task.older]
@@ -1245,7 +1267,9 @@ SENTINEL = "{}"
     common::proof_capture(
         "D4",
         format!(
-            "destroy order:\n{}changed recipe sentinel exists: {}",
+            "recorded sequence: older={} newer={}\ndestroy order:\n{}changed recipe sentinel exists: {}",
+            sequences["older"],
+            sequences["newer"],
             std::fs::read_to_string(&order).unwrap(),
             sentinel.exists()
         ),
