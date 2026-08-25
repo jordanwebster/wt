@@ -589,8 +589,11 @@ that wt can develop itself.
 
 ## A50. Expected states leave the door entirely
 
-`BIN_DIR_MISSING` is no longer emitted by a door, and no command renders a
-`next` line. A missing declared `bin` directory is reported by `doctor`.
+`BIN_DIR_MISSING` is no longer emitted by a door, and no command summary
+carries a `next` line of guidance. A missing declared `bin` directory is
+reported by `doctor`. `doctor` continues to print each finding's own remedy on
+a `next` line: that is the verb whose entire purpose is to say what to do, and
+the line is per finding rather than appended to an unrelated summary.
 Rationale: A41 prevents the harm the notice existed to warn about, so the
 notice became advice about a condition that is true of every freshly created
 tree — a warning that fires every time trains its reader to ignore the one
