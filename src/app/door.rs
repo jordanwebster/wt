@@ -305,12 +305,23 @@ fn materialize_shims(root: &Path, commands: &[String]) -> Result<(), CoreError> 
         wt_sys::fsx::remove_empty_dir(&directory)?;
         return Ok(());
     }
-    let binary = std::env::current_exe().map_err(|error| {
+    let invoked_binary = std::env::current_exe().map_err(|error| {
         CoreError::new(
             ExitClass::Internal,
             "SELF_UNRESOLVED",
             format!("cannot resolve the running wt binary: {error}"),
             "invoke wt through an absolute executable path and retry",
+        )
+    })?;
+    let binary = std::fs::canonicalize(&invoked_binary).map_err(|error| {
+        CoreError::new(
+            ExitClass::Internal,
+            "SELF_UNRESOLVED",
+            format!(
+                "cannot resolve the running wt binary `{}`: {error}",
+                invoked_binary.display()
+            ),
+            "repair the installed wt executable and retry",
         )
     })?;
     if !binary.is_absolute() {

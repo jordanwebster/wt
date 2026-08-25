@@ -2051,6 +2051,40 @@ fn doctor_manufactures_git_environment_port_and_adapter_conditions() {
     }
 }
 
+#[test]
+fn doctor_reports_a_broken_path_prefix_once() {
+    let h = Harness::new();
+    let repo = h.repo("repo", "bin=['bin-a','bin-b']\ncommands=['orbit']\n");
+    common::write(&repo.join("bin-a/.keep"), "");
+    common::write(&repo.join("bin-b/.keep"), "");
+    h.register(&repo);
+
+    let report = h.json(&["doctor", "repo"]);
+    let findings = report["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["code"] == "PATH_NOT_SHADOWED")
+        .count();
+    assert_eq!(findings, 1);
+
+    let door = h.json(&["env", "repo"]);
+    let assembled_path = door["data"]["env"]["PATH"].as_str().unwrap();
+    let healthy = h
+        .wt()
+        .env("PATH", assembled_path)
+        .args(["doctor", "repo", "--json"])
+        .output()
+        .unwrap();
+    assert!(healthy.status.success());
+    let healthy: serde_json::Value = serde_json::from_slice(&healthy.stdout).unwrap();
+    assert!(healthy["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|finding| finding["code"] != "PATH_NOT_SHADOWED"));
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn new_g_failpoint_resumes() {

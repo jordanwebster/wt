@@ -32,10 +32,11 @@ fn owned_fixture(harness: &Harness) -> PathBuf {
         &harness.shims.join("galaxy"),
         "#!/bin/sh\nprintf 'GALAXY %s\\n' \"$*\"\n",
     );
-    write_executable(
+    wt_sys::fsx::replace_symlink(
         &harness.shims.join("wt"),
-        &format!("#!/bin/sh\nexec '{}' \"$@\"\n", env!("CARGO_BIN_EXE_wt")),
-    );
+        Path::new(env!("CARGO_BIN_EXE_wt")),
+    )
+    .unwrap();
     harness.register(&repo);
     repo
 }
@@ -83,6 +84,30 @@ fn owned_command_refuses_then_executes_and_unclaimed_names_resolve_normally() {
     assert!(refusal.contains(&harness.shims.join("orbit").to_string_lossy().to_string()));
     assert!(!harness.shim_state.join("installed.log").exists());
 
+    let bare_wt = harness
+        .wt()
+        .args(["exec", "repo", "--", "sh", "-c", "wt list --json"])
+        .output()
+        .unwrap();
+    assert!(
+        bare_wt.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&bare_wt.stdout),
+        String::from_utf8_lossy(&bare_wt.stderr)
+    );
+    let _: serde_json::Value = serde_json::from_slice(&bare_wt.stdout).unwrap();
+
+    let prepended = harness.root.join("prepended");
+    wt_sys::fsx::create_private_dir(&prepended).unwrap();
+    let mut prepended_env = env.clone();
+    prepended_env.insert(
+        "PATH".to_owned(),
+        format!("{}:{}", prepended.display(), prepended_env["PATH"]),
+    );
+    let still_owned = capture_program("orbit", &["after-prepend"], prepended_env);
+    assert_eq!(still_owned.child.code, Some(5));
+    assert!(String::from_utf8_lossy(&still_owned.stderr).contains("COMMAND_NOT_BUILT"));
+
     let unclaimed = capture_program("galaxy", &["untouched"], env.clone());
     assert_eq!(unclaimed.child.code, Some(0));
     assert_eq!(
@@ -102,6 +127,48 @@ fn owned_command_refuses_then_executes_and_unclaimed_names_resolve_normally() {
     proof_capture("A1", text(&refused));
     proof_capture("A2", text(&built));
     proof_capture("A4", text(&unclaimed));
+}
+
+#[test]
+fn shell_init_restores_the_complete_door_prefix() {
+    let harness = Harness::new();
+    owned_fixture(&harness);
+    let mut env = assembled(&harness, "repo");
+    let expected = env["WT_PATH_PREFIX"].clone();
+    env.insert(
+        "PATH".to_owned(),
+        format!(
+            "{}:{}",
+            harness.root.join("prepended").display(),
+            env["PATH"]
+        ),
+    );
+    env.insert(
+        "WT_INIT".to_owned(),
+        harness.json(&["shell-init", "zsh"])["data"]["script"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    );
+    let output = capture_program(
+        "/bin/bash",
+        &[
+            "--noprofile",
+            "--norc",
+            "-c",
+            "eval \"$WT_INIT\"; printf '%s\\n' \"${PATH%%:*}\"; orbit before",
+        ],
+        env,
+    );
+    assert_eq!(output.child.code, Some(5));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        expected.split(':').next().unwrap()
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("PATH_NOT_SHADOWED"));
+    assert!(stderr.contains("COMMAND_NOT_BUILT"));
+    assert!(!stderr.contains("SHIM_INVOCATION_INVALID"));
 }
 
 #[test]

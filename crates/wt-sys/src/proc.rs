@@ -25,29 +25,24 @@ pub fn owned_command_fast_path() -> Option<i32> {
     let argv0 = argv.next()?;
     let raw_invoked = PathBuf::from(&argv0);
     let name = raw_invoked.file_name()?.to_os_string();
+    if raw_invoked
+        .parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty())
+        && name == "wt"
+    {
+        return None;
+    }
     let invoked = if raw_invoked
         .parent()
         .is_none_or(|parent| parent.as_os_str().is_empty())
     {
-        let first = std::env::var_os("PATH")
-            .and_then(|path| std::env::split_paths(&path).next())
-            .unwrap_or_default();
-        if first.is_absolute()
-            && first.file_name().is_some_and(|part| part == "shims")
-            && first
-                .parent()
-                .and_then(Path::file_name)
-                .is_some_and(|part| part == ".wt")
-        {
-            first.join(&name)
-        } else if name == "wt" {
-            return None;
-        } else {
+        let Some(invoked) = matching_path_shim(&name) else {
             return Some(shim_refusal(format!(
-                "SHIM_INVOCATION_INVALID: bare argv[0] `{}` has no trusted shim PATH prefix",
+                "SHIM_INVOCATION_INVALID: bare argv[0] `{}` has no matching <root>/.wt/shims symlink on PATH; restore the door PATH prefix before invoking owned commands",
                 raw_invoked.display()
             )));
-        }
+        };
+        invoked
     } else {
         raw_invoked
     };
@@ -179,6 +174,37 @@ pub fn owned_command_fast_path() -> Option<i32> {
         "COMMAND_NOT_BUILT: `{}` belongs to tree `{target}` but was not found; searched: {searched}; run `wt build {target}`{explicit}",
         name.to_string_lossy()
     )))
+}
+
+fn matching_path_shim(name: &std::ffi::OsStr) -> Option<PathBuf> {
+    let running = std::fs::canonicalize(std::env::current_exe().ok()?).ok()?;
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .filter(|directory| {
+            directory.is_absolute()
+                && directory.file_name().is_some_and(|part| part == "shims")
+                && directory
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|part| part == ".wt")
+        })
+        .map(|directory| directory.join(name))
+        .find(|candidate| {
+            let Ok(metadata) = std::fs::symlink_metadata(candidate) else {
+                return false;
+            };
+            if !metadata.file_type().is_symlink() {
+                return false;
+            }
+            let Ok(target) = std::fs::read_link(candidate) else {
+                return false;
+            };
+            target.is_absolute()
+                && std::fs::symlink_metadata(&target)
+                    .is_ok_and(|metadata| !metadata.file_type().is_symlink())
+                && std::fs::canonicalize(target).is_ok_and(|target| target == running)
+        })
 }
 
 fn recorded_build_refusal(

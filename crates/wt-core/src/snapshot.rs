@@ -11,6 +11,7 @@ const TREE_SPECIFIC_KEYS: &[&str] = &[
     "WT_SLOT",
     "WT_SESSION",
     "WT_BIN",
+    "WT_PATH_PREFIX",
     "PATH",
 ];
 

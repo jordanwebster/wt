@@ -274,15 +274,21 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
     let parent_path = state.clean.get("PATH").cloned().unwrap_or_default();
     let shims = (!input.cfg.commands.is_empty())
         .then(|| format!("{}/.wt/shims", input.tree.root.trim_end_matches('/')));
-    let path = shims
+    let path_prefix = shims
         .into_iter()
         .chain(bins.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(":");
+    let path = (!path_prefix.is_empty())
+        .then_some(path_prefix.clone())
+        .into_iter()
         .chain((!parent_path.is_empty()).then_some(parent_path))
         .collect::<Vec<_>>()
         .join(":");
     let wt_bin = bins.join(":");
     state.set("PATH", path);
     state.set("WT_BIN", wt_bin);
+    state.set("WT_PATH_PREFIX", path_prefix);
 
     let mut contributed = input.contributed;
     contributed.sort_by(|left, right| left.0.cmp(&right.0));
@@ -589,7 +595,7 @@ mod tests {
         let output = output(&EnvMap::new(), "a", None);
         assert_eq!(
             output.activation_json,
-            r#"{"applied":{"PATH":"/trees/a/bin","PORT":"20016","WT_BIN":"/trees/a/bin","WT_BRANCH":"a","WT_HOME":"/home","WT_LABEL":"repo","WT_NAME":"a","WT_NAME_SHORT":"repo_a_12345678","WT_NAME_SNAKE":"a","WT_REPO":"/repo","WT_ROOT":"/trees/a","WT_SESSION":"wt_repo_a_12345678","WT_SLOT":"1","WT_TARGET":"repo/a"},"home":"/home","prior":{"PATH":null,"PORT":null,"WT_BIN":null,"WT_BRANCH":null,"WT_HOME":null,"WT_LABEL":null,"WT_NAME":null,"WT_NAME_SHORT":null,"WT_NAME_SNAKE":null,"WT_REPO":null,"WT_ROOT":null,"WT_SESSION":null,"WT_SLOT":null,"WT_TARGET":null},"target":"repo/a","v":1}"#
+            r#"{"applied":{"PATH":"/trees/a/bin","PORT":"20016","WT_BIN":"/trees/a/bin","WT_BRANCH":"a","WT_HOME":"/home","WT_LABEL":"repo","WT_NAME":"a","WT_NAME_SHORT":"repo_a_12345678","WT_NAME_SNAKE":"a","WT_PATH_PREFIX":"/trees/a/bin","WT_REPO":"/repo","WT_ROOT":"/trees/a","WT_SESSION":"wt_repo_a_12345678","WT_SLOT":"1","WT_TARGET":"repo/a"},"home":"/home","prior":{"PATH":null,"PORT":null,"WT_BIN":null,"WT_BRANCH":null,"WT_HOME":null,"WT_LABEL":null,"WT_NAME":null,"WT_NAME_SHORT":null,"WT_NAME_SNAKE":null,"WT_PATH_PREFIX":null,"WT_REPO":null,"WT_ROOT":null,"WT_SESSION":null,"WT_SLOT":null,"WT_TARGET":null},"target":"repo/a","v":1}"#
         );
         assert_eq!(output.env[ACTIVATION_KEY], output.activation_json);
     }

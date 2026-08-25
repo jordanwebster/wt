@@ -355,15 +355,18 @@ fn config_findings(
                 format!("declared bin directory {} is missing", path.display()),
                 "create the directory by running the build task",
             ));
-        } else if !path_prefix_is_assembled(context, root, &effective) {
-            findings.push(finding(
-                Severity::Warn,
-                "PATH_NOT_SHADOWED",
-                &subject,
-                "declared bin directory is not first on PATH",
-                "enter through a wt door or install the shell-init PATH guard",
-            ));
         }
+    }
+    if (!effective.bin.is_empty() || !effective.commands.is_empty())
+        && !path_prefix_is_assembled(context, root, &effective)
+    {
+        findings.push(finding(
+            Severity::Warn,
+            "PATH_NOT_SHADOWED",
+            &subject,
+            "the expected door prefix is not first on PATH",
+            "enter through a wt door or install the shell-init PATH guard",
+        ));
     }
     if config
         .root
