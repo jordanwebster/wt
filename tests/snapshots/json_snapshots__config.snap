@@ -13,6 +13,7 @@ expression: "normalize(value, &h.root)"
         "value": {
           "adapters": {},
           "bin": [],
+          "commands": [],
           "copy": [],
           "detect": {
             "depth": null,
@@ -20,11 +21,11 @@ expression: "normalize(value, &h.root)"
           },
           "dirs": {},
           "env": {
-            "APP_PORT": "$WT_PORT_HTTP"
+            "APP_PORT": "${port('http')}"
           },
           "files": {
             ".wt/generated": {
-              "content": "port=$WT_PORT_HTTP",
+              "content": "port=${port('http')}",
               "marker": "#",
               "mode": "0644",
               "source": null
@@ -158,7 +159,8 @@ expression: "normalize(value, &h.root)"
               "tied_to": null,
               "timeout": null
             }
-          }
+          },
+          "vars": {}
         }
       }
     ],

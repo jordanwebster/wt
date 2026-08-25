@@ -9,9 +9,9 @@ use std::collections::BTreeSet;
 const BASIC: &str = r#"
 ports = ["http"]
 [env]
-APP_PORT = "$WT_PORT_HTTP"
+APP_PORT = "${port('http')}"
 [files.".wt/generated"]
-content = "port=$WT_PORT_HTTP"
+content = "port=${port('http')}"
 [task.hello]
 run = "printf hello"
 "#;
@@ -66,19 +66,9 @@ fn env_and_exec_transport_the_same_coordinates() {
     let repo = h.repo("repo", BASIC);
     h.register(&repo);
     let env = h.json(&["env", "repo"]);
-    let expected = env["data"]["env"]["WT_PORT_HTTP"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let expected = env["data"]["env"]["APP_PORT"].as_str().unwrap().to_owned();
     h.wt()
-        .args([
-            "exec",
-            "repo",
-            "--",
-            "sh",
-            "-c",
-            "printf %s \"$WT_PORT_HTTP\"",
-        ])
+        .args(["exec", "repo", "--", "sh", "-c", "printf %s \"$APP_PORT\""])
         .assert()
         .success()
         .stdout(predicate::eq(expected));
@@ -302,7 +292,7 @@ fn old_format_is_rejected_before_current_state_is_written() {
 }
 
 #[test]
-fn register_declares_the_session_backend_once_and_legacy_agent_setting_is_rejected() {
+fn register_declares_the_session_backend_once() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
     let registered = h.register(&repo);
@@ -364,16 +354,6 @@ fn register_declares_the_session_backend_once_and_legacy_agent_setting_is_reject
             calls.lines().filter(|line| *line == "-V").count()
         ),
     );
-
-    let legacy = Harness::new();
-    common::write(&legacy.home.join("config.toml"), "default_agent='codex'\n");
-    legacy
-        .wt()
-        .arg("list")
-        .assert()
-        .code(5)
-        .stderr(predicate::str::contains("SETTINGS_INVALID"))
-        .stderr(predicate::str::contains("session.agent"));
 }
 
 #[test]
@@ -690,7 +670,7 @@ fn register_repair_restores_only_a_replaced_canonical_checkout() {
     let h = Harness::new();
     let repo = h.repo(
         "repo",
-        "[files.'.wt/generated']\ncontent='restored $WT_TARGET'\n[task.service]\nrun='true'\nexists='false'\ndestroy='true'\ntied_to='tree'\n",
+        "[files.'.wt/generated']\ncontent='restored ${target()}'\n[task.service]\nrun='true'\nexists='false'\ndestroy='true'\ntied_to='tree'\n",
     );
     let registered = h.register(&repo);
     let tree_id = registered["data"]["tree"]["tree_id"]
@@ -996,10 +976,12 @@ fn acceptance_shaped_fixture_walks_register_new_run_open_remove() {
 ports=['http']
 bin=['bin']
 copy=['secret.txt']
+[vars]
+app_port="${port('http')}"
 [env]
-APP_PORT='$WT_PORT_HTTP'
+APP_PORT='${app_port}'
 [files.".wt/app.conf"]
-content='port=$APP_PORT'
+content='port=${app_port}'
 [task.service]
 run='touch "$WT_ROOT/.service"'
 exists='test -f "$WT_ROOT/.service"'
@@ -1374,7 +1356,7 @@ fn truth_surfaces_report_descriptions_config_errors_and_live_locks() {
 }
 
 #[test]
-fn door_notices_stay_in_json_and_missing_bins_render_as_next_steps() {
+fn missing_bins_are_silent_at_doors_and_reported_by_doctor() {
     let h = Harness::new();
     let repo = h.repo("repo", "bin=['missing-bin']\n[task.fail]\nrun='exit 2'\n");
     h.register(&repo);
@@ -1382,20 +1364,21 @@ fn door_notices_stay_in_json_and_missing_bins_render_as_next_steps() {
         .args(["exec", "repo", "--", "true"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("next"))
-        .stderr(predicate::str::contains("create "))
-        .stderr(predicate::str::contains("wt build repo").not())
-        .stderr(predicate::str::contains("BIN_DIR_MISSING").not());
+        .stderr(predicate::str::is_empty());
     assert!(h.json(&["env", "repo"])["notices"]
         .as_array()
         .unwrap()
+        .is_empty());
+    assert!(h.json(&["doctor", "repo"])["data"]["findings"]
+        .as_array()
+        .unwrap()
         .iter()
-        .any(|notice| notice["code"] == "BIN_DIR_MISSING"));
+        .any(|finding| finding["code"] == "BIN_DIR_MISSING"));
     h.wt()
         .args(["run", "fail", "repo", "--json"])
         .assert()
         .code(6)
-        .stdout(predicate::str::contains("BIN_DIR_MISSING"));
+        .stdout(predicate::str::contains("BIN_DIR_MISSING").not());
 }
 
 #[test]
@@ -1411,8 +1394,7 @@ fn text_run_keeps_wt_guidance_off_the_child_stdout() {
         .assert()
         .success()
         .stdout("1.2.3")
-        .stderr(predicate::str::contains("next"))
-        .stderr(predicate::str::contains("missing-bin"));
+        .stderr(predicate::str::is_empty());
 }
 
 #[test]
@@ -1461,7 +1443,7 @@ run='touch "$WT_ROOT/.service"'
 exists='test -f "$WT_ROOT/.service"'
 destroy='rm -f "$WT_ROOT/.service"'
 tied_to='tree'
-name='$WT_NAME'
+name='${{name()}}'
 [task.long]
 exists='false'
 destroy='true'
@@ -1703,6 +1685,8 @@ fn doctor_condition_contracts_cover_every_documented_code() {
         "NO_COORDINATION",
         "SESSION_BACKEND",
         "BIN_DIR_MISSING",
+        "SHIM_BROKEN",
+        "SHIM_SHADOWED",
         "PATH_NOT_SHADOWED",
         "PORT_BOUND",
         "EXCLUDE_MISSING",

@@ -91,7 +91,7 @@ fn redirected_output_matches_the_terminal_text() {
 }
 
 #[test]
-fn bin_directory_guidance_is_a_summary_fact_even_when_quiet() {
+fn missing_bin_guidance_is_exclusive_to_doctor() {
     let h = Harness::new();
     let repo = h.repo("repo", HUMAN_FIXTURE);
     h.register(&repo);
@@ -99,12 +99,16 @@ fn bin_directory_guidance_is_a_summary_fact_even_when_quiet() {
     assert_eq!(output.child.code, Some(0));
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(!text.contains("wt: BIN_DIR_MISSING"));
-    assert!(text.contains("  next"));
-    assert!(text.contains("wt build repo/work"));
-    common::proof_capture(
-        "A3",
-        text.replace(&h.root.to_string_lossy().to_string(), "<ROOT>"),
-    );
+    assert!(!text.contains("  next"));
+    assert!(!text.contains("wt build repo/work"));
+    let doctor = h.json(&["doctor", "repo"]);
+    assert!(doctor["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| {
+            finding["code"] == "BIN_DIR_MISSING" && finding["subject"] == "repo/work"
+        }));
 }
 
 #[test]
@@ -127,7 +131,7 @@ fn canonical_repair_transcript() {
     let h = Harness::new();
     let repo = h.repo(
         "repo",
-        "[files.'.wt/generated']\ncontent='generated for $WT_TARGET'\n",
+        "[files.'.wt/generated']\ncontent='generated for ${target()}'\n",
     );
     h.register(&repo);
     wt_sys::fsx::remove_path(&repo.join(".wt/tree_id")).unwrap();

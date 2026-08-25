@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use common::{write, write_executable, Harness};
 use wt_sys::proc::{self, CommandRequest, ProcessOutput};
 
-const SESSION_CONFIG: &str = "bin=['bin']\nports=['http']\n";
+const SESSION_CONFIG: &str = "bin=['bin']\nports=['http']\n[env]\nAPP_PORT=\"${port('http')}\"\n";
 
 struct PrivateTmux {
     harness: Harness,
@@ -174,7 +174,7 @@ fn new_attaches_and_the_live_pane_has_the_tree_environment() {
 
     private.send_line(
         &session,
-        "command -v tree-tool; printf 'ROOT=%s PORT=%s\\n' \"$WT_ROOT\" \"$WT_PORT_HTTP\"; printf '__TREE_ENV__\\n'",
+        "command -v tree-tool; printf 'ROOT=%s PORT=%s RAW=%s\\n' \"$WT_ROOT\" \"$APP_PORT\" \"${WT_PORT_HTTP-unset}\"; printf '__TREE_ENV__\\n'",
     );
     let pane = private.wait_for_pane(&session, "__TREE_ENV__");
     let tree = private.harness.home.join("trees/repo/work");
@@ -189,6 +189,10 @@ fn new_attaches_and_the_live_pane_has_the_tree_environment() {
     assert!(
         pane.contains("PORT=20016"),
         "pane did not contain the port:\n{pane}"
+    );
+    assert!(
+        pane.contains("RAW=unset"),
+        "pane exported WT_PORT_HTTP:\n{pane}"
     );
     insta::assert_snapshot!(
         "session_tree_environment",

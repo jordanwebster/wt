@@ -16,8 +16,6 @@ expression: "normalize(value, &h.root)"
         "WT_NAME": "canonical",
         "WT_NAME_SHORT": "repo_canonical_87657c73",
         "WT_NAME_SNAKE": "canonical",
-        "WT_PORT_BASE": "20000",
-        "WT_PORT_HTTP": "20000",
         "WT_REPO": "$ROOT/repos/repo",
         "WT_ROOT": "$ROOT/repos/repo",
         "WT_SESSION": "wt_repo_canonical_be9ff5d9",
@@ -35,8 +33,6 @@ expression: "normalize(value, &h.root)"
         "WT_NAME": null,
         "WT_NAME_SHORT": null,
         "WT_NAME_SNAKE": null,
-        "WT_PORT_BASE": null,
-        "WT_PORT_HTTP": null,
         "WT_REPO": null,
         "WT_ROOT": null,
         "WT_SESSION": null,
@@ -55,7 +51,7 @@ expression: "normalize(value, &h.root)"
       "LC_ALL": "C",
       "PATH": "$ROOT/shims:/usr/bin:/bin:/usr/sbin:/sbin",
       "TERM": "xterm-256color",
-      "WT_ACTIVATION": "{\"applied\":{\"APP_PORT\":\"20000\",\"PATH\":\"$ROOT/shims:/usr/bin:/bin:/usr/sbin:/sbin\",\"WT_BIN\":\"\",\"WT_BRANCH\":\"main\",\"WT_HOME\":\"$ROOT/wt-home\",\"WT_LABEL\":\"repo\",\"WT_NAME\":\"canonical\",\"WT_NAME_SHORT\":\"repo_canonical_87657c73\",\"WT_NAME_SNAKE\":\"canonical\",\"WT_PORT_BASE\":\"20000\",\"WT_PORT_HTTP\":\"20000\",\"WT_REPO\":\"$ROOT/repos/repo\",\"WT_ROOT\":\"$ROOT/repos/repo\",\"WT_SESSION\":\"wt_repo_canonical_be9ff5d9\",\"WT_SLOT\":\"0\",\"WT_TARGET\":\"repo\"},\"home\":\"$ROOT/wt-home\",\"prior\":{\"APP_PORT\":null,\"PATH\":\"$ROOT/shims:/usr/bin:/bin:/usr/sbin:/sbin\",\"WT_BIN\":null,\"WT_BRANCH\":null,\"WT_HOME\":\"$ROOT/wt-home\",\"WT_LABEL\":null,\"WT_NAME\":null,\"WT_NAME_SHORT\":null,\"WT_NAME_SNAKE\":null,\"WT_PORT_BASE\":null,\"WT_PORT_HTTP\":null,\"WT_REPO\":null,\"WT_ROOT\":null,\"WT_SESSION\":null,\"WT_SLOT\":null,\"WT_TARGET\":null},\"target\":\"repo\",\"v\":1}",
+      "WT_ACTIVATION": "{\"applied\":{\"APP_PORT\":\"20000\",\"PATH\":\"$ROOT/shims:/usr/bin:/bin:/usr/sbin:/sbin\",\"WT_BIN\":\"\",\"WT_BRANCH\":\"main\",\"WT_HOME\":\"$ROOT/wt-home\",\"WT_LABEL\":\"repo\",\"WT_NAME\":\"canonical\",\"WT_NAME_SHORT\":\"repo_canonical_87657c73\",\"WT_NAME_SNAKE\":\"canonical\",\"WT_REPO\":\"$ROOT/repos/repo\",\"WT_ROOT\":\"$ROOT/repos/repo\",\"WT_SESSION\":\"wt_repo_canonical_be9ff5d9\",\"WT_SLOT\":\"0\",\"WT_TARGET\":\"repo\"},\"home\":\"$ROOT/wt-home\",\"prior\":{\"APP_PORT\":null,\"PATH\":\"$ROOT/shims:/usr/bin:/bin:/usr/sbin:/sbin\",\"WT_BIN\":null,\"WT_BRANCH\":null,\"WT_HOME\":\"$ROOT/wt-home\",\"WT_LABEL\":null,\"WT_NAME\":null,\"WT_NAME_SHORT\":null,\"WT_NAME_SNAKE\":null,\"WT_REPO\":null,\"WT_ROOT\":null,\"WT_SESSION\":null,\"WT_SLOT\":null,\"WT_TARGET\":null},\"target\":\"repo\",\"v\":1}",
       "WT_BIN": "",
       "WT_BRANCH": "main",
       "WT_HOME": "$ROOT/wt-home",
@@ -63,8 +59,6 @@ expression: "normalize(value, &h.root)"
       "WT_NAME": "canonical",
       "WT_NAME_SHORT": "repo_canonical_87657c73",
       "WT_NAME_SNAKE": "canonical",
-      "WT_PORT_BASE": "20000",
-      "WT_PORT_HTTP": "20000",
       "WT_REPO": "$ROOT/repos/repo",
       "WT_ROOT": "$ROOT/repos/repo",
       "WT_SESSION": "wt_repo_canonical_be9ff5d9",
@@ -72,9 +66,15 @@ expression: "normalize(value, &h.root)"
       "WT_SLOT": "0",
       "WT_TARGET": "repo"
     },
-    "kept": [],
     "missing_bins": [],
     "overrode": [],
+    "ports": [
+      {
+        "bound": null,
+        "name": "http",
+        "port": 20000
+      }
+    ],
     "rendered": [
       ".wt/generated"
     ],

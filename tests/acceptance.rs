@@ -3,7 +3,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::{git, write, write_executable, Harness};
+use common::{git, proof_capture, write, write_executable, Harness};
 use predicates::prelude::*;
 use wt_sys::proc::{self, CommandRequest};
 
@@ -202,6 +202,17 @@ fn orbit_acceptance_walk_covers_rendered_config_daemon_and_safe_missing_tree_tea
     assert!(canonical.contains(&format!(
         "socket_path: {canonical_root}/.wt/orbit/orbit.sock"
     )));
+    let canonical_env = h.json(&["env", "orbit"]);
+    proof_capture(
+        "C4",
+        format!(
+            "orbit effective environment:\nORBIT_CONFIG={}\nORBIT_LOG={}\nORBIT_INVARIANT_FATAL={}\norbit rendered file:\n{}",
+            canonical_env["data"]["env"]["ORBIT_CONFIG"],
+            canonical_env["data"]["env"]["ORBIT_LOG"],
+            canonical_env["data"]["env"]["ORBIT_INVARIANT_FATAL"],
+            canonical.trim_end()
+        ),
+    );
     h.json(&["run", "daemon", "orbit"]);
     assert!(repo.join(".wt/orbit/state/stub.state").exists());
 
@@ -262,9 +273,16 @@ fn orbitapp_acceptance_walk_covers_port_alias_sibling_link_and_path_occupied() {
     let created = h.json(&["new", "orbitapp/feature"]);
     let tree = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
     let env = h.json(&["env", "orbitapp/feature"]);
-    assert_eq!(
-        env["data"]["env"]["RCT_METRO_PORT"],
-        env["data"]["env"]["WT_PORT_METRO"]
+    assert_eq!(env["data"]["env"]["RCT_METRO_PORT"], "20016");
+    assert_eq!(env["data"]["ports"][0]["name"], "metro");
+    assert_eq!(env["data"]["ports"][0]["port"], 20016);
+    assert!(env["data"]["env"].get("WT_PORT_METRO").is_none());
+    proof_capture(
+        "C4",
+        format!(
+            "orbitapp effective environment and ports:\nRCT_METRO_PORT={}\nmetro={}",
+            env["data"]["env"]["RCT_METRO_PORT"], env["data"]["ports"][0]["port"]
+        ),
     );
 
     let run = h.json(&["run", "ios", "orbitapp/feature"]);
@@ -322,17 +340,48 @@ fn orbitcloud_acceptance_walk_covers_composition_copy_no_run_resource_and_probe_
     assert!(npm_log.contains("npm\t--prefix\twebsite\tci"));
 
     let env = h.json(&["env", "orbitcloud/feature"]);
+    let ports = env["data"]["ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|port| {
+            (
+                port["name"].as_str().unwrap(),
+                port["port"].as_u64().unwrap().to_string(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     for (alias, port) in [
-        ("Local__Ports__Postgres", "WT_PORT_POSTGRES"),
-        ("Local__Ports__Server", "WT_PORT_SERVER"),
-        ("Local__Ports__ServerHttps", "WT_PORT_SERVER_HTTPS"),
-        ("Local__Ports__Frontend", "WT_PORT_FRONTEND"),
-        ("Local__Ports__Website", "WT_PORT_WEBSITE"),
-        ("Local__Ports__Dashboard", "WT_PORT_DASHBOARD"),
-        ("Local__Ports__DashboardOtlp", "WT_PORT_OTLP"),
+        ("Local__Ports__Postgres", "postgres"),
+        ("Local__Ports__Server", "server"),
+        ("Local__Ports__ServerHttps", "server_https"),
+        ("Local__Ports__Frontend", "frontend"),
+        ("Local__Ports__Website", "website"),
+        ("Local__Ports__Dashboard", "dashboard"),
+        ("Local__Ports__DashboardOtlp", "otlp"),
     ] {
-        assert_eq!(env["data"]["env"][alias], env["data"]["env"][port]);
+        assert_eq!(env["data"]["env"][alias], ports[port]);
     }
+    assert!(env["data"]["env"].get("WT_PORT_BASE").is_none());
+    proof_capture(
+        "C4",
+        format!(
+            "orbitcloud effective ports and environment:\nports={}\nPostgres={}\nServer={}\nServerHttps={}\nFrontend={}\nWebsite={}\nDashboard={}\nDashboardOtlp={}\nrendered copies:\n.mcp.json={}\n.claude/settings.local.json={}",
+            serde_json::to_string(&env["data"]["ports"]).unwrap(),
+            env["data"]["env"]["Local__Ports__Postgres"],
+            env["data"]["env"]["Local__Ports__Server"],
+            env["data"]["env"]["Local__Ports__ServerHttps"],
+            env["data"]["env"]["Local__Ports__Frontend"],
+            env["data"]["env"]["Local__Ports__Website"],
+            env["data"]["env"]["Local__Ports__Dashboard"],
+            env["data"]["env"]["Local__Ports__DashboardOtlp"],
+            String::from_utf8_lossy(&std::fs::read(tree.join(".mcp.json")).unwrap()).trim_end(),
+            String::from_utf8_lossy(
+                &std::fs::read(tree.join(".claude/settings.local.json")).unwrap()
+            )
+            .trim_end()
+        ),
+    );
     let pgdata = h.json(&["run", "pgdata", "orbitcloud/feature"]);
     assert_eq!(pgdata["data"]["child"], serde_json::Value::Null);
     assert!(pgdata["notices"]
