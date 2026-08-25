@@ -29,17 +29,13 @@ Every system call lives in `wt-sys`, about 4,700 lines:
 
 | File | Lines | What Windows needs |
 |---|---|---|
-| `fsx.rs` | 1,468 | The hardest. Around 38 call sites of `openat`, `fstatat`, `unlinkat` and `O_NOFOLLOW`. Windows can open without following a reparse point (`FILE_FLAG_OPEN_REPARSE_POINT`, plus `FILE_FLAG_BACKUP_SEMANTICS` for directories), but this is a rewrite, not a shim. The `0600` privacy of the state store needs ACLs; there is no umask. `fclonefileat`/`FICLONE` has no NTFS equivalent, and the read-write fallback already exists. |
+| `fsx.rs` | 1,348 | The hardest. Around 38 call sites of `openat`, `fstatat`, `unlinkat` and `O_NOFOLLOW`. Windows can open without following a reparse point (`FILE_FLAG_OPEN_REPARSE_POINT`, plus `FILE_FLAG_BACKUP_SEMANTICS` for directories), but this is a rewrite, not a shim. The `0600` privacy of the state store needs ACLs; there is no umask. |
 | `proc.rs` | 668 | See "Doors are an exec" below. |
 | `lock.rs` | 567 | The cleanest port. `flock` becomes `LockFileEx`, and the central idea survives intact: a handle released by process death is the liveness test, so a crashed holder never wedges a lock (SPEC §13.1). |
 | `snapshot.rs` | 508 | The executable inventory that stops a teardown recipe reaching an installed binary (SPEC §10.3) asks whether a mode bit is set. On Windows it must consider `PATHEXT`, and record both `tool.exe` and the stem `tool`, because recipes name the bare word. Small, and it is the guard that protects real daemons and containers on a developer's machine — worth getting right first, not last. |
 | `tmux.rs` | 234 | Out of scope by assumption. |
 
-Note that the only platform seam in the codebase today is a pair of `cfg`
-attributes selecting between two implementations of `reflink_at`, one using
-`fclonefileat` and one `FICLONE`. There is no third arm, so the crate does
-not compile at all on a target that is neither macOS nor Linux. There is
-also no platform abstraction to implement against: the first task is
+There is no platform abstraction to implement against: the first task is
 introducing one inside `wt-sys` and re-expressing the existing POSIX path
 through it, before any Windows code is written.
 
@@ -75,7 +71,7 @@ to delete an inherited entry (SPEC §5.1–5.3). A platform variant fits as an
 overlay *within* a layer, which needs no new merge machinery:
 
 ```
-Config     := Scope & { ports?, dirs?, seed?, sync_inputs?, detect?,
+Config     := Scope & { ports?, dirs?, sync_inputs?, detect?,
                         platform?: Map<PlatformId, Config> }
 PlatformId := "windows" | "macos" | "linux" | "unix"
 Scope      := { bin?, env?, copy?, files?, task?, adapters?, shell?: Cmd }

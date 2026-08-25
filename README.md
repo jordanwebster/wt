@@ -98,6 +98,7 @@ with parentheses is a function `wt` provides.
 | `${name_short()}` | a short unique name, stable for the worktree's life |
 | `${target()}` | `label/name`, how you address it |
 | `${branch()}` | the branch checked out when the process started |
+| `${home()}` | the resolved wt home |
 | `${root()}` | the worktree's absolute path |
 | `${repo()}` | the registered checkout's absolute path |
 | `${ports.http}` | the port you named `http` |
@@ -278,14 +279,7 @@ Top-level keys:
   `source`; `marker` sets the provenance-comment prefix (empty disables it),
   and `mode` defaults to `0644`.
 - `copy`: paths that **must** be present — a local secret, an editor setting.
-  Populated from the registered checkout at creation, by clone where possible
-  and by copy where not.
-- `seed`: paths worth having **only if they are cheap** — a build cache.
-  Cloned when the filesystem supports it, and skipped with a note when it does
-  not, so creating a worktree never turns into a multi-gigabyte copy. Cloning
-  is free per byte but costs a syscall per file, so weigh it by file count:
-  a Rust `target` directory is a bad seed, and no built-in adapter declares
-  one.
+  Populated from the registered checkout at creation by a recursive byte copy.
 - `task`: declared tasks and resources.
 - `dirs."path"`: a directory scope for monorepos. Nearer settings win; root
   tasks compose subproject tasks.
@@ -373,12 +367,13 @@ any default.
 | Go | `go.mod` | download/build/test/vet/gofmt |
 | Git submodules | `.gitmodules` | recursive initialization |
 
-A fresh worktree is made cheap **in that ecosystem's own terms**, not by
-copying build output around: for Rust that is `sccache`, a compilation cache
-every worktree shares with no copying and no collision between their binaries.
-`wt doctor` reports which accelerators are active and which are available but
-unused; it never switches tools for you. `seed` remains available when you
-have something genuinely cheap to clone.
+A fresh worktree starts warm **in that ecosystem's own terms**, not by copying
+build output around. Cargo 1.91+ puts intermediates in the per-repository
+`${home()}/cache/cargo-build/${label()}` build directory contributed by the
+adapter, while each tree keeps its binaries in its own `target/`. pnpm
+hard-links packages from its content-addressed store, and uv hard-links from
+its global cache into `.venv`. `wt doctor` reports whether the relevant cache
+or accelerator is in use; it never switches tools for you.
 
 And a cold first build is not a wait: the `build` task runs in the background
 after `wt new`, so you are working in the worktree while it compiles.

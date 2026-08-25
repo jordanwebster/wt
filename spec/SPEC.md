@@ -28,7 +28,7 @@ Owning sections (the only place each mechanism is defined):
 | resource snapshot and `execute` | §10.3 |
 | resource state machine | §10.4 |
 | declaration refresh; repo-tied declarations | §10.5 |
-| `new` / `sync` / `remove` / `unregister` / `register` / `adopt` / `copy`/`seed` | §11.2–11.7 |
+| `new` / `sync` / `remove` / `unregister` / `register` / `adopt` / `copy` | §11.2–11.7 |
 | `list` drift, `prune`, doctor codes, log retention | §12 |
 | lock families, order, deadlines | §13 |
 
@@ -129,7 +129,7 @@ Teardown reads no layer (§10.3).
 
 ### 5.2 `.wt.toml` grammar (A15; ★ new keys)
 ```
-Config  := Scope & { ports?: [PortName], dirs?: Map<RelDir, Scope>, seed?: [RelPath] ★, sync_inputs?: [RelPath] ★, detect?: Detect ★ }
+Config  := Scope & { ports?: [PortName], dirs?: Map<RelDir, Scope>, sync_inputs?: [RelPath] ★, detect?: Detect ★ }
 Scope   := { bin?: [RelPath], commands?: [CommandName] | Map<CommandName,bool> ★, vars?: Map<VarKey, Template|false> ★,
              env?: Map<EnvKey, Template|false>, copy?: [RelPath], files?: Map<RelPath, File|false>,
              task?: Map<TaskId, Task|false>, adapters?: Map<AdapterId, { tool?: ToolId, disabled?: bool }> }
@@ -151,8 +151,9 @@ declare names the tree owns and are enforced per §9.2; `vars` are private and
 never exported. `CommandName` is a non-empty basename with no `/` or NUL;
 `wt`, `.` and `..` are reserved.
 `VarKey` matches `[a-z_][a-z0-9_]*` and may not collide with a function name.
-Template functions are exactly `root()`, `repo()`, `branch()`, `label()`,
-`name()`, `name_snake()`, `name_short()` and `target()`. A declared port is a
+Template functions are exactly `home()`, `root()`, `repo()`, `branch()`, `label()`,
+`name()`, `name_snake()`, `name_short()` and `target()`. `home()` returns the
+resolved wt home. A declared port is a
 dotted constant, `ports.<name>` — a lookup, not an allocation: the value is
 fixed when the name is first declared and repeats identically. `ports` is a
 reserved `VarKey`. Any other call, or `ports.<name>` for a name absent from
@@ -175,7 +176,7 @@ Scopes are declared by `[dirs."d"]` (layers 1–3) or detected (§6). The scope 
 | `bin` | concatenated root-first then nearer, deduplicated, nearer first on PATH |
 | `commands` | union of claims across scopes, deduplicated and sorted; within one scope, higher-layer `false` deletes a lower-layer claim |
 | `adapters` | per scope, merged by id across layers |
-| `ports`, `seed`, `sync_inputs`, `detect` | root only |
+| `ports`, `sync_inputs`, `detect` | root only |
 
 A resource's scope is the scope at which its effective task was declared.
 
@@ -195,38 +196,38 @@ Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ bas
 ### 5.6 Validation: static vs late-bound
 | Check | When | Error |
 |---|---|---|
-| grammar, unknown keys, identifiers, lexical paths (§5.7), durations, modes, template syntax; every `${…}` names a declared `vars` key or a permitted function with a declared port argument (§5.2); `destroy ⇒ exists ∧ tied_to`; `ready_within ⇒ exists`; `run ∨ destroy`; one of `content`/`source`; port names unique; `ports.len() ≤ stride`; `commands` entries unique and basenames; a `copy`/`seed` entry that is also a `files` key; `copy` and `seed` disjoint | parse/validate | `CONFIG_INVALID` (5) with `path:line:col` |
+| grammar, unknown keys, identifiers, lexical paths (§5.7), durations, modes, template syntax; every `${…}` names a declared `vars` key or a permitted function with a declared port argument (§5.2); `destroy ⇒ exists ∧ tied_to`; `ready_within ⇒ exists`; `run ∨ destroy`; one of `content`/`source`; port names unique; `ports.len() ≤ stride`; `commands` entries unique and basenames; a `copy` entry that is also a `files` key | parse/validate | `CONFIG_INVALID` (5) with `path:line:col` |
 | `vars` DAG acyclic and fully resolvable within the effective scope → `VARS_CYCLE` / `VARS_UNKNOWN` naming every key involved; `${NAME}` in a task `env` map naming another key of the same map → `TASK_ENV_SELF_REFERENCE` | resolve | `CONFIG_INVALID` |
 | `needs` resolvable/acyclic; `tied_to = repo` templates reference no tree-specific key (§5.5) | resolve | `CONFIG_INVALID` |
 | `bin`/`cwd` existence, `source` readability | door (`bin`: doctor, A50) | `BIN_DIR_MISSING` (doctor finding), `CWD_MISSING` (5), `FILE_SOURCE_MISSING` (5) |
 
 ### 5.7 Path containment and no-follow I/O
-Lexical: non-empty, no leading `/`, no `..`, no `.` component (except the whole `"."`), no NUL; normalised. The tree root is canonicalised once at registration (`ROOT_IS_SYMLINK` 5 if a symlink). Writes into a tree: parent directories created with `mkdir -p` semantics; the target inspected with `fstatat(AT_SYMLINK_NOFOLLOW)` and opened `O_NOFOLLOW` (a symlink target → `RENDER_ONTO_SYMLINK`/`COPY_EXISTS` per caller). Render: `tmp` beside the target (`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`) → write → `fsync` → `rename`. `copy` and `seed`: source walked with `fstatat(AT_SYMLINK_NOFOLLOW)`, symlinks recreated, and directories created. `copy` attempts a reflink per file and falls back to a read/write copy on `EXDEV`/`ENOTSUP`; `seed` requires reflinks for every file, removing the partial destination and skipping the entry if any file cannot be cloned (§11.7). `bin`: lexical join (PATH semantics). `cwd`: lexical containment; `chdir` follows symlinks (documented). `source`: the same rules from the canonical root.
+Lexical: non-empty, no leading `/`, no `..`, no `.` component (except the whole `"."`), no NUL; normalised. The tree root is canonicalised once at registration (`ROOT_IS_SYMLINK` 5 if a symlink). Writes into a tree: parent directories created with `mkdir -p` semantics; the target inspected with `fstatat(AT_SYMLINK_NOFOLLOW)` and opened `O_NOFOLLOW` (a symlink target → `RENDER_ONTO_SYMLINK`/`COPY_EXISTS` per caller). Render: `tmp` beside the target (`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`) → write → `fsync` → `rename`. `copy`: source walked with `fstatat(AT_SYMLINK_NOFOLLOW)`, regular files copied byte-for-byte, symlinks recreated, and directories created. `bin`: lexical join (PATH semantics). `cwd`: lexical containment; `chdir` follows symlinks (documented). `source`: the same rules from the canonical root.
 
 ## 6. Adapters
 ### 6.1 Tables
 ```
 Adapter := { name, detect: [Glob], default_tool, nudge?: [ { if_tool?, want, hint, used_if_env? } ], tools: Map<ToolId, Tool> }
-Tool    := { lockfile?: [FileName], sniff?: [ { file, toml_key?, contains? } ], requires?: Binary, sync_inputs?: [FileName], seed?: [RelPath], env?, task? }
+Tool    := { lockfile?: [FileName], sniff?: [ { file, toml_key?, contains? } ], requires?: Binary, sync_inputs?: [FileName], env?, task? }
 ```
 Selection per scanned dir: user/repo `adapters.<id>.tool` > lockfile > sniff > `default_tool`; first adapter in fixed order (`cargo, node, dotnet, python, go`) wins per dir; `submodules` is root-only and independent. Detection is pure over a `DirSnapshot` (names at depth ≤ `detect.depth`; contents of `package.json` and files named by `sniff`). Default ignore: `.git .wt node_modules target bin obj dist build .venv vendor .next .expo` and dotdirs.
 
-| Adapter/tool | Selected by | sync | build | test | lint | fmt | sync inputs | seed |
-|---|---|---|---|---|---|---|---|---|
-| cargo/cargo | `Cargo.toml` | `cargo fetch` | `cargo build --all-targets` | `cargo test` | `cargo clippy --all-targets -- -D warnings` | `cargo fmt` | `Cargo.lock`, `Cargo.toml` | — (A52) |
-| cargo/cargo-nightly-fmt | `rustfmt.toml`/`.rustfmt.toml` parsed as TOML with top-level `unstable_features`/`group_imports`/`imports_granularity` | same | same | same | same | `cargo +nightly fmt` | same | same |
-| node/npm | `package-lock.json`/`npm-shrinkwrap.json`; default with `NO_LOCKFILE` (then `npm install`) | `npm ci` | `npm run build`† | `npm test` | `npm run lint`† | `npm run format`† | lockfile, `package.json` | `node_modules` |
-| node/pnpm | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` | † | † | † | † | idem | `node_modules` |
-| node/yarn | `yarn.lock` | `yarn install --immutable` (`.yarnrc.yml`) / `--frozen-lockfile` | † | † | † | † | idem | `node_modules` |
-| node/bun | `bun.lock(b)` | `bun install --frozen-lockfile` | † | † | † | † | idem | `node_modules` |
-| dotnet/dotnet | `*.sln`, `*.slnx`, `*.csproj`, `*.fsproj` | `dotnet restore` | `dotnet build --no-restore` | `dotnet test` | `dotnet format --verify-no-changes` | `dotnet format` | `*.csproj`, `packages.lock.json`, `Directory.Packages.props` | — |
-| python/uv | `uv.lock` | `uv sync --frozen` | `uv build` | `uv run pytest` | `uv run ruff check .` | `uv run ruff format .` | `uv.lock`, `pyproject.toml` | `.venv` (reflink only) |
-| python/poetry | `poetry.lock` | `poetry install` | `poetry build` | `poetry run pytest` | `poetry run ruff check .` | `poetry run ruff format .` | `poetry.lock`, `pyproject.toml` | — |
-| python/pip | `requirements.txt`/`setup.py`/`pyproject.toml` without lockfile | venv + `pip install -r requirements.txt` (or `-e .`) | — | `.venv/bin/pytest` | `.venv/bin/ruff check .` | `.venv/bin/ruff format .` | `requirements*.txt`, `pyproject.toml` | `.venv` (reflink only) |
-| go/go | `go.mod` | `go mod download` | `go build ./...` | `go test ./...` | `go vet ./...` | `gofmt -l -w .` | `go.sum`, `go.mod` | — |
-| submodules | `.gitmodules` | `git submodule update --init --recursive` (`sys_locks: [RepoGit]`, git class `submodule`) | — | — | — | — | `.gitmodules` | — |
+| Adapter/tool | Selected by | sync | build | test | lint | fmt | sync inputs |
+|---|---|---|---|---|---|---|---|
+| cargo/cargo | `Cargo.toml` | `cargo fetch` | `cargo build --all-targets` | `cargo test` | `cargo clippy --all-targets -- -D warnings` | `cargo fmt` | `Cargo.lock`, `Cargo.toml` |
+| cargo/cargo-nightly-fmt | `rustfmt.toml`/`.rustfmt.toml` parsed as TOML with top-level `unstable_features`/`group_imports`/`imports_granularity` | same | same | same | same | `cargo +nightly fmt` | same |
+| node/npm | `package-lock.json`/`npm-shrinkwrap.json`; default with `NO_LOCKFILE` (then `npm install`) | `npm ci` | `npm run build`† | `npm test` | `npm run lint`† | `npm run format`† | lockfile, `package.json` |
+| node/pnpm | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` | † | † | † | † | idem |
+| node/yarn | `yarn.lock` | `yarn install --immutable` (`.yarnrc.yml`) / `--frozen-lockfile` | † | † | † | † | idem |
+| node/bun | `bun.lock(b)` | `bun install --frozen-lockfile` | † | † | † | † | idem |
+| dotnet/dotnet | `*.sln`, `*.slnx`, `*.csproj`, `*.fsproj` | `dotnet restore` | `dotnet build --no-restore` | `dotnet test` | `dotnet format --verify-no-changes` | `dotnet format` | `*.csproj`, `packages.lock.json`, `Directory.Packages.props` |
+| python/uv | `uv.lock` | `uv sync --frozen` | `uv build` | `uv run pytest` | `uv run ruff check .` | `uv run ruff format .` | `uv.lock`, `pyproject.toml` |
+| python/poetry | `poetry.lock` | `poetry install` | `poetry build` | `poetry run pytest` | `poetry run ruff check .` | `poetry run ruff format .` | `poetry.lock`, `pyproject.toml` |
+| python/pip | `requirements.txt`/`setup.py`/`pyproject.toml` without lockfile | venv + `pip install -r requirements.txt` (or `-e .`) | — | `.venv/bin/pytest` | `.venv/bin/ruff check .` | `.venv/bin/ruff format .` | `requirements*.txt`, `pyproject.toml` |
+| go/go | `go.mod` | `go mod download` | `go build ./...` | `go test ./...` | `go vet ./...` | `gofmt -l -w .` | `go.sum`, `go.mod` |
+| submodules | `.gitmodules` | `git submodule update --init --recursive` (`sys_locks: [RepoGit]`, git class `submodule`) | — | — | — | — | `.gitmodules` |
 
-† only when `package.json` declares the script. Nudges: `node: if npm → pnpm`; `python: if pip|poetry → uv`; `cargo: sccache, used_if_env = ["RUSTC_WRAPPER=sccache"]`; doctor evaluates `used_if_env` against the effective door env → `ACCELERATOR_INACTIVE` (warn) / `ACCELERATOR_AVAILABLE` / `ACCELERATOR_MISSING` (info); never applied (R7). R7 mechanisms applied: worktree object sharing; `seed` reflink-only per §11.7; `wt list --disk`. **Adapters own per-ecosystem cheapness (A46)** and express it as ordinary layer-0 configuration — a shared compilation cache for cargo (`RUSTC_WRAPPER`), a content-addressed store for node, a shared wheel cache for python. An adapter must never point two trees at one build *output* directory: that would make one tree's binary answer to every tree's name and defeat §9.2a. An adapter *may* contribute `commands`, and the merge and delete rules treat such a contribution like any other layer-0 key; no built-in adapter declares any today, because the names live in a manifest rather than in the static catalog, so a repository declares its own. `wt` is never a legal claim (§5.6): a name that refuses until built would make `wt build` unrunnable.
+† only when `package.json` declares the script. Nudges: `node: if npm → pnpm`; `python: if pip|poetry → uv`; `cargo: sccache, used_if_env = ["RUSTC_WRAPPER=sccache"]`; doctor evaluates `used_if_env` against the effective door env → `ACCELERATOR_INACTIVE` (warn) / `ACCELERATOR_AVAILABLE` / `ACCELERATOR_MISSING` (info); never applied (R7). R7 mechanisms applied: worktree object sharing and `wt list --disk`. **Adapters own per-ecosystem cheapness (A46, A53)** and express it as ordinary layer-0 configuration. Both cargo tools set `CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}"`, sharing intermediates per repository while leaving `CARGO_TARGET_DIR` unset so each tree owns its binaries under its own `target/` (§9.2a). pnpm uses its content-addressed store and uv its global cache. Repository and user `env` layers override the cargo value by the ordinary merge rule, and the door reports inherited values it displaces. An adapter *may* contribute `commands`, and the merge and delete rules treat such a contribution like any other layer-0 key; no built-in adapter declares any today, because the names live in a manifest rather than in the static catalog, so a repository declares its own. `wt` is never a legal claim (§5.6): a name that refuses until built would make `wt build` unrunnable.
 
 ### 6.2 Composition and private ids
 Every adapter hit at scope `d` contributes private nodes `@<adapter>/<tool>@<d>/<k>` (`cwd = d`, origin `adapter`), never overridden by layers, addressable by `needs` and `wt tasks --private`. Public: at a non-root scope `d`, `d/k` is the layer task if declared there, else an alias of the private node; at root, `k` is the layer task if declared at root, else the composite `{ needs: [@submodules/git@./k?, @<root adapter>@./k?, d1/k, d2/k …] }` over sorted scopes with an effective `d/k`; an empty composite does not exist. `verify` = `test` else `build` else absent (`NO_VERIFY`). orbitcloud before the repo layer: `sync` = composite over `@dotnet/dotnet@./sync`, `frontend/sync`, `website/sync`; after `[task.sync]`, `sync` is the repo task and all others remain addressable.
@@ -280,7 +281,7 @@ EnvOutput  := { env, activation, activation_json, render: [Render], report }
 Every assignment is owned (in `applied`), including task env and contributed env (the A5 exception: they are tool-set and replaced by nested doors). `report.kept` and `force_env` are withdrawn (A42): a declared alias is a claim, so it always wins, and `overrode` names every inherited value it displaced. `wt env` shows both the applied and the prior value for an overridden key so the displacement is visible rather than silent.
 
 ### 8.3 Rendering and ownership (A30.1, A31)
-Tree state records `materialized: [ { path, kind: rendered|copied|seeded, hash|null, tracked_checked_at } ]`. Rendering runs **inside the tree-state RMW hold** (level 6): observe → decide → write → record, with no subprocess inside the hold. The tracked check (`git ls-files --error-unmatch -- <paths>`, one call) runs **before** the hold, only for paths without a record and at every `new`/`register`/`adopt`/`sync`; doors otherwise trust the record. Decision `render::decide(observed, record, new_bytes)`:
+Tree state records `materialized: [ { path, kind: rendered|copied, hash|null, tracked_checked_at } ]`. Rendering runs **inside the tree-state RMW hold** (level 6): observe → decide → write → record, with no subprocess inside the hold. The tracked check (`git ls-files --error-unmatch -- <paths>`, one call) runs **before** the hold, only for paths without a record and at every `new`/`register`/`adopt`/`sync`; doors otherwise trust the record. Decision `render::decide(observed, record, new_bytes)`:
 
 | Target | Record | Decision |
 |---|---|---|
@@ -484,7 +485,7 @@ Decision (inside the registry transaction, under the exclusive tree lock):
 | G | fetch (class `fetch`); porcelain list: branch held elsewhere → `BRANCH_IN_USE` (4); **path check**: `<path>` exists and is not a worktree git lists at that path → `PATH_OCCUPIED` (5), remedy "move or delete `<path>` (a non-wt object is there)"; `worktree add` | 2 |
 | S1 | state `{bootstrapping, op}` (confirmed); write `.wt/tree_id` | 6 |
 | S2 | exclude block | 5 |
-| S3 | `copy`, `seed` (§11.7); record `materialized`; exclude | 6, 5 |
+| S3 | `copy` (§11.7); record `materialized`; exclude | 6, 5 |
 | S4 | `PORTS` (§7); assemble + declaration refresh (§10.5) + render (§8.3) | 5, 6 |
 | S5 | `sync` through §10.1 under the held lock (unless `--no-sync`) | 2,3,4,6 |
 | S6 | state: `sync.inputs`, phase `ready`, `op = null`, `verify_pending = --verify` | 6 |
@@ -540,8 +541,8 @@ Classification (pure over git results): "unpushed" = upstream present ∧ `rev-l
 
 `register <path> --label L --repair` recovers a canonical checkout in derived phase `replaced` because its `.wt/tree_id` marker is absent or wrong. It succeeds only when `path` is label `L`'s recorded canonical path, its common gitdir still matches the label, and the phase is `replaced`; otherwise `REPAIR_REFUSED` (5). Under the exclusive tree lock it rewrites the marker from the registry entry, recomputes the exclude block, and re-renders hash-owned files. It does not allocate or append coordinates, refresh resource declarations, alter resource/sync/verify state, or touch tombstones. `doctor`'s `TREE_REPLACED` remedy for a canonical tree names this command.
 
-### 11.7 `copy` and `seed`
-Run exactly once per incarnation at `new` S3 (never for canonical or adopted trees). Source root = the canonical checkout. Per entry: source absent → `COPY_ABSENT` info; tracked by git → `COPY_TRACKED` (5), `new` aborts at S3 (`incomplete`, resumable); destination exists → `COPY_EXISTS` info, never overwritten; otherwise copied via §5.7 (files byte-for-byte with mode, directories recursively, symlinks recreated); record `materialized {kind: copied|seeded, hash: null}`. The two express different guarantees (A45), not two mechanisms. **`copy` is required**: it prefers a reflink per file and falls back to a byte copy, so a declared path is present whatever the filesystem supports. **`seed` is opportunistic and reflink-only**, whoever declared it: if any file cannot be cloned, remove any partial destination, skip the entry without a materialized record, and emit `SEED_SKIPPED_NO_REFLINK` info naming the path and reason. `SEED_COPIED_NOT_CLONED` is withdrawn. Rationale: a local secret must arrive on a filesystem that cannot clone, and a build cache must not turn tree creation into a multi-gigabyte copy on that same filesystem. `copy` and `seed` are disjoint (§5.6). Copied/seeded paths are not hash-owned and are never re-rendered or individually deleted; they are excluded while the tree or its tombstone exists. Task side effects outside the tree are never tracked; a side effect that occupies a future tree path surfaces as `PATH_OCCUPIED` at that tree's `new` (§11.2 G).
+### 11.7 `copy`
+Run exactly once per incarnation at `new` S3 (never for canonical or adopted trees). Source root = the canonical checkout. Per entry: source absent → `COPY_ABSENT` info; tracked by git → `COPY_TRACKED` (5), `new` aborts at S3 (`incomplete`, resumable); destination exists → `COPY_EXISTS` info, never overwritten; otherwise copied via §5.7 (files byte-for-byte with mode, directories recursively, symlinks recreated); record `materialized {kind: copied, hash: null}`. Copied paths are not hash-owned and are never re-rendered or individually deleted; they are excluded while the tree or its tombstone exists. Task side effects outside the tree are never tracked; a side effect that occupies a future tree path surfaces as `PATH_OCCUPIED` at that tree's `new` (§11.2 G).
 
 ## 12. Truth: `list`, `status`, `doctor`, `prune`, logs
 `wt list [label] [--probe] [--fast] [--disk]`, `wt status [target] [--probe]`: address, phase (§11.1), branch/detached, dirty counts, upstream ahead/behind, behind default, sync state (`ok | stale (<files>) | failed | never`, `behind <default> by N`, **`drift (<files>)`** = sync inputs changed on the default branch since the merge-base: one bounded `git diff --name-only HEAD...origin/<default> -- <sync_inputs>` per tree, S3/A31; `--fast` skips it), session `yes|no|unknown`, agent, resources `{scope, task, state, external, undeclared, last_probe, last_error}`, slot/ports (+`bound` from one bind probe per declared port, skipped by `--fast`), path. `--probe` refreshes declarations (§10.5) and runs `exists` per record under its resource lock.
@@ -556,7 +557,7 @@ Run exactly once per incarnation at `new` S3 (never for canonical or adopted tre
 | `TREE_MISSING_PENDING`, `GEOMETRY_CHANGED` (info), `SLOT_SQUATTED`, `PORT_SQUATTED` (warn: bound with no session and no running task), `PORTS_EXHAUSTED` | §7 |
 | `ADAPTER_TOOL_MISSING`, `ACCELERATOR_*`, `NO_LOCKFILE`, `NO_ADAPTER`, `NO_VERIFY` | §6 |
 | `NO_COORDINATION` (info: the label's effective root config declares no `ports`, no `env` alias and no resource, so parallel trees share the application's default coordinates; remedy "declare `ports`/`env` in `.wt.toml` or `$WT_HOME/config.toml [repos.<label>]`"; A13); `SESSION_BACKEND` (info: the effective session backend) | §12, §5.4 |
-| `BIN_DIR_MISSING` (doctor only, A50), `PATH_NOT_SHADOWED`, `PORT_BOUND`, `SEED_SKIPPED_NO_REFLINK`, `SHIM_SHADOWED` (info); `SHIM_BROKEN` (warn); `EXCLUDE_MISSING`, `EXCLUDE_REPAIRED`, `ACTIVATION_IGNORED` | §9, §12, §4.2, §8.1 |
+| `BIN_DIR_MISSING` (doctor only, A50), `PATH_NOT_SHADOWED`, `PORT_BOUND`, `SHIM_SHADOWED` (info); `SHIM_BROKEN` (warn); `EXCLUDE_MISSING`, `EXCLUDE_REPAIRED`, `ACTIVATION_IGNORED` | §9, §12, §4.2, §8.1 |
 | `IDENTIFIER_LONG` (resource name > 63); `TREE_IN_USE` (info, holders), `GIT_TOO_OLD` (< 2.31) | §5, §13, tooling |
 
 `wt prune [label] [--yes] [--merged] [--gone] [--records <target>]`: retries orphaned destroys (`Destroy` on `orphaned`); runs §11.4's missing-directory path for `missing` trees (ending in a tombstone); `git worktree prune`; deletes `STATE_ORPHAN` files; `--merged`/`--gone` remove clean trees so classified (dirty ⇒ `keep`). Before any step that creates a tombstone, `prune` `kill-session`s the address's session if tmux reports it (consented by the same prompt). `--records <target>` applies to **live entries** in phase `missing`, `replaced` or `remove-interrupted`: it drives that entry's records with `Destroy{teardown}` from their own snapshots (§10.3, `tree_missing = true` for `missing`/`replaced`) and never acts on any directory; it creates no tombstone (the entry stays live until `wt remove`/`wt new`). **Tombstone collection**: for each tombstone of the label, after the session check, delete the tombstone and recompute the exclude block in one registry RMW (5). Consent: TTY without `--yes` → prompt; **non-TTY without `--yes` → print the plan, exit 0 with `data.applied = false` and notice `CONFIRM_REQUIRED`** (prune is a report-then-act verb; §14.2).
@@ -738,7 +739,7 @@ crates/wt-core   pure: model, config (grammar/merge/scopes/validate/template), a
                  task (graph/plan/lock_plan), resource::step, declarations::reconcile, lifecycle (derive_phase, new::decide, init::decide,
                  remove::plan/revalidate/classify, from_ref, drift), session::name, doctor, report
 crates/wt-sys    effects as plain modules, each public function wrapping one syscall, subprocess or file format:
-                 git, fsx (store protocol, no-follow open, reflink, exclude splice), lock (six levels, holders, deadlines), proc (execvp door,
+                 git, fsx (store protocol, no-follow open, recursive byte copy, exclude splice), lock (six levels, holders, deadlines), proc (execvp door,
                  `run` parent with tee and timeouts), net (bind+connect probe), tmux, snapshot
 crates/wt        binary: cli/ + app/ (door, executor, commands)
 ```

@@ -157,7 +157,7 @@ New verbs may be added (`adopt`, `forget`, `which`, `tasks`, `config`,
 `copy`, `files` with `content`/`source`/`marker`, `task.*` with
 `run`/`exists`/`destroy`/`needs`/`lock`/`name`/`tied_to`/`env`/`cwd`/
 `timeout`/`description`, `dirs."sub"`, `adapters`); new keys may be
-added (`seed`, `ready_within`, `scope` is NOT introduced — `tied_to`
+added (`ready_within`; `scope` is NOT introduced — `tied_to`
 stays). Variables stay: `WT_LABEL`, `WT_NAME`, `WT_NAME_SNAKE`,
 `WT_NAME_SHORT`, `WT_TARGET`, `WT_BRANCH`, `WT_ROOT`, `WT_REPO`
 (canonical path), `WT_HOME`, `WT_PORT_BASE`, `WT_PORT_<NAME>`,
@@ -448,6 +448,8 @@ without a composition design is not acceptable.
 
 ## A39. Adapter seeds never become byte copies
 
+**Seed-related parts superseded by A53.**
+
 Repository-declared seeds continue to prefer reflinks and fall back to copying.
 Adapter-contributed defaults such as Cargo's `target` and Python's `.venv` are
 reflink-only: when cloning is unavailable, wt removes any partial destination,
@@ -516,7 +518,7 @@ exported because they are typed by hand in a shell.
 
 `${…}` is the sole evaluation form; `$$` is a literal dollar and a bare `$` is
 literal text. Inside it, a bare name reads a `vars` constant and a
-parenthesised name calls a wt-provided function: `root()`, `repo()`,
+parenthesised name calls a wt-provided function: `home()`, `root()`, `repo()`,
 `branch()`, `target()`, `name_snake()`, `name_short()`, and the dotted constant `ports.<name>`.
 Rationale: the previous spelling gave tool-provided values and user-defined
 values one syntax and one namespace, so a reader could not tell which was
@@ -531,6 +533,8 @@ templated per element.
 
 ## A45. `copy` and `seed` express required and opportunistic population
 
+**Seed-related parts superseded by A53.**
+
 Supersedes A39: the reflink-only rule now follows from what a seed *is*, not
 from who declared it. `copy` names paths that must be present in a new tree and are populated
 whatever the filesystem supports. `seed` names paths worth having only if
@@ -544,10 +548,9 @@ rather than by mechanism.
 ## A46. Adapters own per-ecosystem cheapness
 
 Making a fresh tree cheap is adapter knowledge expressed as ordinary
-configuration at the adapter layer — a shared compilation cache for Rust, a
-content-addressed store for Node, a shared wheel cache for Python. `seed`
-remains the generic fallback for ecosystems offering nothing better. An
-adapter must never share a build *output* directory across trees: doing so
+configuration at the adapter layer — a shared build directory for Cargo
+intermediates, a content-addressed store for Node, and a global cache for
+Python. An adapter must never share a build *output* directory across trees: doing so
 would make one tree's binary answer to every tree's name and would defeat A41.
 Rationale: cloning build output is a filesystem-level answer to a question the
 ecosystem usually answers better, and the ecosystem's answer is both cheaper
@@ -614,6 +617,8 @@ exist, and the settings parser already refuses unknown keys.
 
 ## A52. Cargo seeds nothing; the ecosystem's own cache is the answer
 
+**Seed-related parts and the sccache-only answer are superseded by A53.**
+
 The cargo adapter contributes no `seed`. Rationale: a reflink costs nothing
 per byte but one syscall per file, and a Rust build directory is hundreds of
 thousands of files — a real 74 GB `target` took over a minute to reach 0.3%
@@ -636,3 +641,35 @@ background, so a cold first build is not a wait. The same reasoning applies to
 `node_modules` and `.venv`, which are also file-count heavy and also have
 ecosystem-native shared stores; those defaults are left in place pending the
 same measurement.
+
+## A53. Build output is never copied; ecosystem caches make trees warm
+
+`seed` is removed from the configuration grammar, adapter schema, merge
+rules, execution, notices, and persisted materialization kinds. The ordinary
+unknown-key rule refuses a configuration that still declares it; there is no
+compatibility shim or migration path. `copy` remains for small, required,
+gitignored developer files and is a contained recursive byte copy: regular
+files are copied with their mode, directories are walked, and symlinks are
+recreated without following them outside either root.
+
+The measurement that retires the primitive is file-count dominated. wt's
+per-file cloning of a 74 GB Rust `target` containing 252,767 files projected
+at seven hours. A whole-subtree filesystem clone copied 73,034 files in 12.6
+seconds. Optimising the per-file loop would preserve the wrong ownership
+model, so wt no longer copies build output at all.
+
+Each ecosystem supplies the sharing mechanism. Cargo 1.91+ separates
+`target-dir` outputs from `build-dir` intermediates. Both cargo adapter tools
+set `CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}"`, one
+path per repository. `CARGO_TARGET_DIR` remains unset so each tree's binary
+stays in its own `target/`, preserving A41. Repository and user `env` layers
+may override the adapter value by the ordinary merge rule. The split was
+verified with Cargo 1.94: intermediates went to the shared directory, the
+binary stayed in `./target/debug/`, concurrent warm rebuilds in two crates
+blocked zero times, and only the cold dependency build serialised. pnpm uses
+its content-addressed store and hard-links into `node_modules`; uv uses its
+global cache and hard-links into `.venv`.
+
+The closed template function set adds `home()`, which resolves to the same wt
+home exposed as `WT_HOME`. A cold first build remains non-blocking because A47
+runs `build` in the background.
