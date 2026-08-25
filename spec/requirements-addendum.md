@@ -453,3 +453,147 @@ reflink-only: when cloning is unavailable, wt removes any partial destination,
 skips the entry, and reports `SEED_SKIPPED_NO_REFLINK`. Rationale: an adapter
 default must not turn routine tree creation into an implicit multi-gigabyte
 copy on a filesystem that lacks cloning.
+
+## A40. Every declaration is a claim, and each kind is enforced differently
+
+`commands`, `env`, `ports` and `files` all declare names a tree owns. Each is
+enforced by the mechanism that matches how it fails: a command name refuses
+rather than resolving elsewhere, an environment name overrides what was
+inherited, a port is allocated from the tree's own slot, and a file path is
+rendered and re-rendered. `vars` are deliberately not a claim: they never
+leave the configuration. Rationale: one noun the user learns once explains
+four behaviours, and the differences stop looking arbitrary once they are
+read as remedies matched to failure modes — a missing command fails silently
+and wrongly, while a missing variable fails loudly at first use.
+
+## A41. A tree owns command names, not merely binary directories
+
+`bin` declares where a tree's executables are; `commands` declares which names
+it provides. A declared-but-unbuilt name resolves to a wt-owned entry under
+`<tree>/.wt/shims/` that refuses with the reason and the remedy, naming the
+installed path it declined to run, and offering it as an explicit absolute
+path. Names the tree does not claim resolve normally.
+
+Claims are declared, never sniffed: deriving them from a build directory's
+contents yields build-script and hashed test binaries, and yields nothing at
+all before the first build, which is exactly when the guarantee is needed.
+Adapters may contribute `commands` at the adapter layer, where it is a
+declaration like any other and is overridable.
+
+Shims interpose on every invocation rather than being bypassed once the real
+binary exists. Rationale: interactive shells cache the resolved path of a
+command and re-resolve only when the cached path fails. A shim ordered after
+the build directory would be cached on first use, keep succeeding as a
+refusal, and so continue refusing after a successful build — replacing a
+silent wrong answer with a persistent false one.
+
+The guarantee is scoped to `PATH` resolution. A shell alias or function
+outranks `PATH` and cannot be displaced; `doctor` reports one shadowing an
+owned name rather than the promise pretending to cover it.
+
+## A42. A declared environment value wins over an inherited one
+
+`[env]` aliases override the parent environment by default; the prior value is
+recorded and restored on deactivation, and the override is visible in `wt env`.
+`--force-env` is no longer required for this and the "kept" outcome disappears
+for declared keys. Rationale: the previous default let a value exported by a
+login shell — a production `DATABASE_URL` is the motivating case — silently
+defeat the repository's declaration, which is the precise hazard the
+declaration exists to remove. This is a behaviour change for anyone relying on
+inheritance reaching a tree, and is announced as one.
+
+## A43. Ports are configuration inputs, not environment variables
+
+`WT_PORT_<NAME>` and `WT_PORT_BASE` are no longer exported into a door. Ports
+remain addressable in configuration and are reported by `status`, `list` and
+`env`. Rationale: an application reads the name the repository declared for
+it, so exporting wt's own spelling puts wt's vocabulary into the application's
+environment — the thing `.wt.toml` exists to prevent. Identity values remain
+exported because they are typed by hand in a shell.
+
+## A44. Templates evaluate constants and functions
+
+`${…}` is the sole evaluation form; `$$` is a literal dollar and a bare `$` is
+literal text. Inside it, a bare name reads a `vars` constant and a
+parenthesised name calls a wt-provided function: `root()`, `repo()`,
+`branch()`, `target()`, `name_snake()`, `name_short()`, and `port('name')`.
+Rationale: the previous spelling gave tool-provided values and user-defined
+values one syntax and one namespace, so a reader could not tell which was
+which. Function syntax marks the one member of the set that acts rather than
+reports — `port()` reserves a contended resource — and the remaining
+distinction is answered by whether the name appears in `[vars]`.
+
+## A45. `copy` and `seed` express required and opportunistic population
+
+Supersedes A39: the reflink-only rule now follows from what a seed *is*, not
+from who declared it. `copy` names paths that must be present in a new tree and are populated
+whatever the filesystem supports. `seed` names paths worth having only if
+cloning is available, and is skipped with a notice otherwise. Rationale: the
+two look like one primitive differing only in mechanism, but the guarantee
+differs: a local secret must arrive on a filesystem that cannot clone, while a
+build cache must not turn tree creation into a multi-gigabyte copy on exactly
+that filesystem. Documentation describes them as required versus opportunistic
+rather than by mechanism.
+
+## A46. Adapters own per-ecosystem cheapness
+
+Making a fresh tree cheap is adapter knowledge expressed as ordinary
+configuration at the adapter layer — a shared compilation cache for Rust, a
+content-addressed store for Node, a shared wheel cache for Python. `seed`
+remains the generic fallback for ecosystems offering nothing better. An
+adapter must never share a build *output* directory across trees: doing so
+would make one tree's binary answer to every tree's name and would defeat A41.
+Rationale: cloning build output is a filesystem-level answer to a question the
+ecosystem usually answers better, and the ecosystem's answer is both cheaper
+and portable to filesystems without cloning.
+
+## A47. The task named `build` runs after creation, in the background
+
+`wt new` starts the effective `build` task once the tree is ready, in a second
+window of the tree's session, and returns immediately; `--no-build` opts out.
+Setup that is more than compilation is expressed by giving `build` a `needs`
+list, not by a separate hook mechanism. Rationale: the task graph already
+carries dependencies, ordering, composition and a closed verb set that wt can
+reason about; a parallel array of opaque commands would duplicate it while
+telling wt nothing about what each command is for. Because wt knows a build is
+running, a shim can say so instead of reporting the binary as merely absent.
+
+## A48. Teardown runs the plan that created the resources
+
+Removal destroys the resource instances recorded for the tree, newest first,
+rather than re-reading the current configuration to decide what to destroy.
+Rationale: only recorded instances describe what was actually created, so a
+partially created tree tears down correctly and a branch that has since edited
+its own recipes cannot direct teardown at something it never made. Reversing
+the declared dependency graph would achieve neither. This makes an explicit
+approval gate for lifecycle recipes unnecessary: the dangerous case was
+teardown obeying an unreviewed revision, and it no longer can.
+
+## A49. A session carries the bootstrap home and is confirmed to exist
+
+`wt` creates a session with the resolved wt home passed explicitly, and reports
+a created session only after confirming it. Rationale: tmux copies no arbitrary
+variable from client to session on an existing server, so an inner `wt` would
+otherwise inherit whatever home the server captured when it started, resolve
+the wrong state, exit, and have its session destroyed — while wt reported
+success, because `new-session` had itself succeeded. Two homes are legitimate
+and distinct: the bootstrap home says where the tree is defined, and a
+tree-local home set by repository configuration says what commands *inside*
+the tree address. The reserved `WT_*` namespace admits this one exception so
+that wt can develop itself.
+
+## A50. Expected states leave the door entirely
+
+`BIN_DIR_MISSING` is no longer emitted by a door, and no command renders a
+`next` line. A missing declared `bin` directory is reported by `doctor`.
+Rationale: A41 prevents the harm the notice existed to warn about, so the
+notice became advice about a condition that is true of every freshly created
+tree — a warning that fires every time trains its reader to ignore the one
+that matters. The door enforces; `doctor` reports.
+
+## A51. The removed agent setting is no longer named
+
+A configuration carrying the former top-level agent key is rejected by the
+ordinary unknown-key rule rather than by a bespoke check naming its
+replacement. Rationale: the bespoke check defends configurations that do not
+exist, and the settings parser already refuses unknown keys.
