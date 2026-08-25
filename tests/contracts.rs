@@ -1543,10 +1543,12 @@ fn copy_reporting_distinguishes_absent_and_tracked_sources() {
 }
 
 #[test]
-fn cargo_adapter_seeds_new_trees_and_tracks_adapter_sync_inputs() {
+fn a_declared_seed_is_reflink_only_and_cargo_tracks_its_sync_inputs() {
     let h = Harness::new();
     common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
-    let repo = h.repo("repo", "");
+    // cargo contributes sync inputs but no seed (A46): the repository declares
+    // one here, which is the route that still has to be reflink-only.
+    let repo = h.repo("repo", "seed = [\"target\"]\n");
     common::write(
         &repo.join("Cargo.toml"),
         "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",

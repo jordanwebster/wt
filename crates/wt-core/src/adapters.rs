@@ -542,7 +542,10 @@ mod tests {
         let hits = detect(&snapshot, &BTreeMap::new()).unwrap();
         let contribution = contribution(&hits).unwrap();
         assert!(contribution.sync_inputs.contains(&"Cargo.toml".to_owned()));
-        assert!(contribution.seed.contains(&"target".to_owned()));
+        // cargo contributes no seed: cloning `target` costs one syscall per
+        // file, and a Rust build directory is hundreds of thousands of them.
+        // A shared compilation cache is the ecosystem's own answer (A46).
+        assert!(contribution.seed.is_empty());
         assert!(contribution
             .nudges
             .iter()

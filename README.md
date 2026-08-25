@@ -282,7 +282,10 @@ Top-level keys:
   and by copy where not.
 - `seed`: paths worth having **only if they are cheap** — a build cache.
   Cloned when the filesystem supports it, and skipped with a note when it does
-  not, so creating a worktree never turns into a multi-gigabyte copy.
+  not, so creating a worktree never turns into a multi-gigabyte copy. Cloning
+  is free per byte but costs a syscall per file, so weigh it by file count:
+  a Rust `target` directory is a bad seed, and no built-in adapter declares
+  one.
 - `task`: declared tasks and resources.
 - `dirs."path"`: a directory scope for monorepos. Nearer settings win; root
   tasks compose subproject tasks.
@@ -370,12 +373,15 @@ any default.
 | Go | `go.mod` | download/build/test/vet/gofmt |
 | Git submodules | `.gitmodules` | recursive initialization |
 
-Adapters also know how to make a fresh worktree cheap **in that ecosystem's
-own terms** — a shared compilation cache for Rust, a content-addressed store
-for Node, a shared wheel cache for Python — which beats copying build output
-around. `seed` remains the generic fallback for ecosystems with nothing
-better. `wt doctor` reports which accelerators are active and which are
-available but unused; it never switches tools for you.
+A fresh worktree is made cheap **in that ecosystem's own terms**, not by
+copying build output around: for Rust that is `sccache`, a compilation cache
+every worktree shares with no copying and no collision between their binaries.
+`wt doctor` reports which accelerators are active and which are available but
+unused; it never switches tools for you. `seed` remains available when you
+have something genuinely cheap to clone.
+
+And a cold first build is not a wait: the `build` task runs in the background
+after `wt new`, so you are working in the worktree while it compiles.
 
 ## Automation, JSON, and exit codes
 

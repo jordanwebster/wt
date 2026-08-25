@@ -611,3 +611,28 @@ A configuration carrying the former top-level agent key is rejected by the
 ordinary unknown-key rule rather than by a bespoke check naming its
 replacement. Rationale: the bespoke check defends configurations that do not
 exist, and the settings parser already refuses unknown keys.
+
+## A52. Cargo seeds nothing; the ecosystem's own cache is the answer
+
+The cargo adapter contributes no `seed`. Rationale: a reflink costs nothing
+per byte but one syscall per file, and a Rust build directory is hundreds of
+thousands of files — a real 74 GB `target` took over a minute to reach 0.3%
+of itself, on a filesystem where cloning works. "Free per byte" is not the
+same as cheap, and the adapter default turned every `wt new` on a mature Rust
+repository into a multi-hour operation with no output.
+
+Rust's own answer is a shared compilation cache: `sccache` caches individual
+crate compilations across trees with no copying and no output collision, and
+the existing accelerator nudge already points at it. A repository may still
+declare `seed` itself — the reflink-only rule of A45 continues to apply to it
+— but a default that is catastrophic on large repositories is not a default.
+
+This does not extend to sharing a build *output* directory across trees: that
+would make one tree's binary answer to every tree's name and defeat A41. Only
+the compilation cache is shared.
+
+Creation stays cheap without the seed because A47 moved `build` into the
+background, so a cold first build is not a wait. The same reasoning applies to
+`node_modules` and `.venv`, which are also file-count heavy and also have
+ecosystem-native shared stores; those defaults are left in place pending the
+same measurement.

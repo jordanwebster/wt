@@ -213,7 +213,7 @@ Selection per scanned dir: user/repo `adapters.<id>.tool` > lockfile > sniff > `
 
 | Adapter/tool | Selected by | sync | build | test | lint | fmt | sync inputs | seed |
 |---|---|---|---|---|---|---|---|---|
-| cargo/cargo | `Cargo.toml` | `cargo fetch` | `cargo build --all-targets` | `cargo test` | `cargo clippy --all-targets -- -D warnings` | `cargo fmt` | `Cargo.lock`, `Cargo.toml` | `target` (reflink only) |
+| cargo/cargo | `Cargo.toml` | `cargo fetch` | `cargo build --all-targets` | `cargo test` | `cargo clippy --all-targets -- -D warnings` | `cargo fmt` | `Cargo.lock`, `Cargo.toml` | — (A52) |
 | cargo/cargo-nightly-fmt | `rustfmt.toml`/`.rustfmt.toml` parsed as TOML with top-level `unstable_features`/`group_imports`/`imports_granularity` | same | same | same | same | `cargo +nightly fmt` | same | same |
 | node/npm | `package-lock.json`/`npm-shrinkwrap.json`; default with `NO_LOCKFILE` (then `npm install`) | `npm ci` | `npm run build`† | `npm test` | `npm run lint`† | `npm run format`† | lockfile, `package.json` | `node_modules` |
 | node/pnpm | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` | † | † | † | † | idem | `node_modules` |
