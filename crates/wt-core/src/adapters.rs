@@ -216,7 +216,9 @@ pub fn apply_contribution(
             .env
             .insert(key.clone(), ValueOrFalse::Value(value.clone()));
     }
-    append_unique(&mut config.root.commands, &contribution.commands);
+    for command in &contribution.commands {
+        config.root.commands.insert(command.clone(), true);
+    }
     for path in &contribution.seed {
         let path = RelPath::new(path)?;
         append_unique(&mut config.seed, std::slice::from_ref(&path));

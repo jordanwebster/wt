@@ -127,7 +127,12 @@ pub struct AdapterChoice {
 #[serde(default, deny_unknown_fields)]
 pub struct Scope {
     pub bin: Vec<RelPath>,
-    pub commands: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_commands",
+        serialize_with = "serialize_commands"
+    )]
+    pub commands: IndexMap<String, bool>,
     pub vars: IndexMap<String, ValueOrFalse<String>>,
     pub env: IndexMap<String, ValueOrFalse<String>>,
     pub copy: Vec<RelPath>,
@@ -136,6 +141,43 @@ pub struct Scope {
     pub adapters: IndexMap<String, AdapterChoice>,
     #[serde(skip)]
     pub locations: BTreeMap<String, SourceLocation>,
+}
+
+fn deserialize_commands<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<IndexMap<String, bool>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Commands {
+        Names(Vec<String>),
+        Overrides(IndexMap<String, bool>),
+    }
+
+    match Commands::deserialize(deserializer)? {
+        Commands::Names(names) => {
+            let mut commands = IndexMap::new();
+            for name in names {
+                if commands.insert(name.clone(), true).is_some() {
+                    return Err(D::Error::custom(format!(
+                        "duplicate commands entry `{name}`"
+                    )));
+                }
+            }
+            Ok(commands)
+        }
+        Commands::Overrides(commands) => Ok(commands),
+    }
+}
+
+fn serialize_commands<S: Serializer>(
+    commands: &IndexMap<String, bool>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if commands.values().all(|claimed| *claimed) {
+        commands.keys().collect::<Vec<_>>().serialize(serializer)
+    } else {
+        commands.serialize(serializer)
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -572,16 +614,15 @@ fn located(mut error: CoreError, location: Option<&SourceLocation>) -> CoreError
 }
 
 fn validate_scope(scope: &Scope) -> Result<(), CoreError> {
-    let mut commands = BTreeSet::new();
-    for command in &scope.commands {
+    for command in scope.commands.keys() {
         if command.is_empty()
+            || matches!(command.as_str(), "wt" | "." | "..")
             || command.contains('/')
             || command.contains('\0')
-            || !commands.insert(command)
         {
-            return Err(invalid(
-                "commands entries must be unique, non-empty basenames without NUL",
-            ));
+            return Err(invalid(format!(
+                "commands entry `{command}` is invalid: names must be non-empty basenames without `/` or NUL, and `wt`, `.`, and `..` are reserved"
+            )));
         }
     }
     for (key, value) in &scope.vars {
@@ -761,8 +802,9 @@ pub fn merge(layers: &[(Layer, Config)]) -> Config {
 
 fn merge_scope(target: &mut Scope, source: &Scope) {
     merge_bins(&mut target.bin, &source.bin);
-    append_unique(&mut target.commands, &source.commands);
-    target.commands.sort();
+    for (name, claimed) in &source.commands {
+        target.commands.insert(name.clone(), *claimed);
+    }
     append_unique(&mut target.copy, &source.copy);
     merge_deletable(&mut target.vars, &source.vars);
     merge_deletable(&mut target.env, &source.env);
@@ -831,7 +873,13 @@ pub fn effective_scope(config: &Config, cwd: &str) -> Result<EffectiveScope, Cor
         dir: cwd.to_owned(),
         commands: std::iter::once(&config.root)
             .chain(config.dirs.values())
-            .flat_map(|scope| scope.commands.iter().cloned())
+            .flat_map(|scope| {
+                scope
+                    .commands
+                    .iter()
+                    .filter(|(_, claimed)| **claimed)
+                    .map(|(name, _)| name.clone())
+            })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect(),
@@ -1086,6 +1134,23 @@ mod tests {
             effective_scope(&merged, "sub").unwrap().commands,
             ["alpha", "beta", "nested", "zeta"]
         );
+    }
+
+    #[test]
+    fn commands_can_delete_adapter_claims_and_reserve_dispatch_names() {
+        let adapter = parse("commands=['orbit','helper']", "adapter.toml").unwrap();
+        let repo = parse("commands={orbit=false, local=true}", "repo/.wt.toml").unwrap();
+        let merged = merge(&[(Layer::Adapter, adapter), (Layer::Repo, repo)]);
+        assert_eq!(
+            effective_scope(&merged, ".").unwrap().commands,
+            ["helper", "local"]
+        );
+
+        for name in ["wt", ".", "..", "path/name"] {
+            let error = parse(&format!("commands={{'{name}'=true}}"), "repo/.wt.toml").unwrap_err();
+            assert_eq!(error.code.0, "CONFIG_INVALID");
+            assert!(error.message.contains("reserved") || error.message.contains("basename"));
+        }
     }
 
     #[test]
