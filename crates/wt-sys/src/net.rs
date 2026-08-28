@@ -12,6 +12,21 @@ pub fn squat_probe(port: u16, connect_timeout: Duration) -> Result<bool> {
         drop(stream);
         return Ok(true);
     }
+    match bind_probe(address, port)? {
+        // A port that refuses a connection but will not accept a bind is as
+        // likely to be another allocator's probe holding it for its own
+        // microsecond as it is a squatter, and two `wt new` runs in parallel
+        // must not each read the other as one. A squatter is still there on
+        // the second look; a probe is long gone.
+        true => {
+            std::thread::sleep(Duration::from_millis(20));
+            bind_probe(address, port)
+        }
+        false => Ok(false),
+    }
+}
+
+fn bind_probe(address: SocketAddrV4, port: u16) -> Result<bool> {
     match TcpListener::bind(address) {
         Ok(listener) => {
             drop(listener);
