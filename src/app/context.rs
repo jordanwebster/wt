@@ -457,14 +457,28 @@ impl Context {
                 "re-run with --yes after reviewing the plan",
             ));
         }
-        eprint!("{action}? [y/N] ");
+        self.ask(None, &format!("{action}?"))
+    }
+
+    /// Consent for an operation that destroys work. `--yes` does not answer it:
+    /// it is a global flag that lands in aliases and agent command lines where
+    /// this tree was never examined, and only `--force` says otherwise (A54).
+    pub fn confirm_loss(&self, plan: &str, question: &str) -> Result<bool, CoreError> {
+        self.ask(Some(plan), question)
+    }
+
+    fn ask(&self, plan: Option<&str>, question: &str) -> Result<bool, CoreError> {
+        if let Some(plan) = plan {
+            eprintln!("{plan}");
+        }
+        eprint!("{question} [y/N] ");
         let mut answer = String::new();
         std::io::stdin().read_line(&mut answer).map_err(|error| {
             CoreError::new(
                 ExitClass::Internal,
                 "INPUT_FAILED",
                 error.to_string(),
-                "retry with --yes",
+                "retry with --force",
             )
         })?;
         Ok(answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes"))

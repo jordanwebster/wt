@@ -509,14 +509,14 @@ Classification (pure over git results): "unpushed" = upstream present ∧ `rev-l
 |---|---|---|---|
 | 1 | resolve; canonical → `USE_UNREGISTER` (2) (this refusal applies to `wt remove` only; `unregister` skips it, §11.5) | — | no |
 | 2 | observe: dir exists?, identity (§4.1), dirty, unpushed, `has-session`, live door holders, tree-tied records with fresh probes | 3 | no |
-| 3 | build `RemovePlan`; dirty/unpushed without `--force` → `TREE_DIRTY` (5) | — | no |
-| 4 | consent for every removal (clean, forced, missing or replaced directory): TTY without `--yes` → prompt with the plan (it lists the session and the door holders); non-TTY without `--yes` → `CONFIRM_REQUIRED` (2); `n` → exit 0, `removed: false` | — | no |
+| 3 | build `RemovePlan`, resolving step 10's branch decision; a work-losing plan (dirty, or unpushed commits on a branch this run deletes) without `--force` → TTY: consent at step 4; non-TTY: `TREE_DIRTY` (5) (A54) | — | no |
+| 4 | consent for a work-losing plan on a TTY without `--force`: prompt with the plan (it lists the session and the door holders); `n` → exit 0, `removed: false`. Clean, forced, missing and replaced removals do not prompt, and `--yes` does not unlock a work-losing one (A54) | — | no |
 | 5 | `kill-session` if `has-session` (consented); then tree lock exclusive with deadline `locks.tree_exclusive` (`--wait d`); timeout → `TREE_IN_USE` (4) naming the holders, remedy "wait for or stop them" | 1 | session only |
 | 6 | revalidate under the lock: identity check (§4.1) (mismatch → `TREE_REPLACED`, nothing destroyed); dirty/unpushed re-observed (newly dirty without `--force` → `TREE_DIRTY`, nothing changed) | — | no |
 | 7 | state `removing`, `op{remove}` | 6 | yes |
 | 8 | declaration refresh if the dir exists (§10.5); every tree-tied record: §10.4 `Destroy{teardown}`, newest record first; all attempted | 3, 6 | yes |
 | 9 | any record not dropped → without `--keep-orphans`: `DESTROY_FAILED` (6), tree stays `removing` → `remove-interrupted` with its records, nothing below runs (remedy: fix, then `wt remove` again, or `--keep-orphans`, or `wt prune --records <target>`); with `--keep-orphans`: state `op = null`, continue; the entry stays live after step 10 (derived phase `missing` with records; `TREE_MISSING_PENDING` protects the name) and step 11 is skipped | — | |
-| 10 | `git worktree remove --force <entry.path>`; `--delete-branch` if merged or `--force`; missing dir → `git worktree prune` | 2 | yes |
+| 10 | `git worktree remove --force <entry.path>`; the branch per step 3's decision — deleted when its commits are on a remote, kept when they are not, kept for an adopted tree, always deleted with `--delete-branch` (`-D`), never with `--keep-branch` (A54); missing dir → `git worktree prune` | 2 | yes |
 | 11 | registry: entry → tombstone (record-free; carries `materialized` paths); delete the state file; exclude block | 5 | yes |
 | 12 | release | — | |
 
@@ -614,7 +614,7 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 | `wt clone <url> [--label L] [--path P]` | yes | `git clone` (class `clone`) to `P` (default `$PWD/<stem>`), then §11.6 |
 | `wt new <label>/<name> [--branch B] [--from REF] [--detach] [--no-sync] [--verify] [--no-fetch] [--no-open] [--no-attach] [--no-build]` | yes (phase-aware) | §11.2 |
 | `wt adopt <path> [--label L] [--name N]` ★ | yes | §11.6 |
-| `wt remove <target> [--yes] [--force] [--delete-branch] [--keep-orphans] [--wait d]` | yes | §11.4 |
+| `wt remove <target> [--yes] [--force] [--delete-branch] [--keep-branch] [--keep-orphans] [--wait d]` | yes | §11.4 |
 | `wt sync [target] [--force]` | yes | §11.3 |
 | `wt list [label] [--probe] [--fast] [--disk]`, `wt status [target] [--probe]` ★ | — | §12 |
 | `wt prune [label] [--yes] [--merged] [--gone] [--records T]` | yes | §12 |
@@ -627,7 +627,7 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 | `wt doctor [label] [--probe]` | — | §12 |
 | `wt shell-init <zsh\|bash\|fish>` ★, `wt completions <shell>` ★ | — | §14.6 |
 
-Global: `--json`, `--yes`, `--quiet`, `--verbose`, `--color auto|always|never`, `--home DIR`. Unknown subcommand → exit 2 with the three closest names; every `--help` carries one example.
+Global: `--json`, `--yes`, `--quiet`, `--verbose`, `--color auto|always|never`, `--home DIR`. Unknown subcommand → exit 2 with the three closest names; every `--help` carries one example. `rm` and `ls` are accepted spellings of `remove` and `list`, hidden from help (A55).
 
 Text mode is the default and every verb has an intentional human rendering; JSON is emitted only with `--json` (passthrough exceptions: A20). There is no generic JSON-to-text fallback. Summaries use:
 
@@ -640,7 +640,7 @@ Text mode is the default and every verb has an intentional human rendering; JSON
 The headline comes first. Fact keys are lower case and aligned within the block. Empty optional sections are omitted, but failures, orphaned resources and pending verification remain visible. `status`, `doctor` and `config` summarise rather than restating their JSON payloads. `path` prints only the root and `which` prints only the resolved executable (or `not found`). `list`, `tasks`, `config` and `locks` use aligned columns with a header where it aids reading; `tasks` is the effective task table, `config` shows effective keys with scope and layer, and `locks` is the coordination lock table. Output is plain ASCII apart from optional ANSI colour on existing diagnostic codes.
 
 ### 14.2 TTY and bounded-runtime rules (A14)
-Control-plane deadlines per §13.3; user children run as long as they run. Idempotent re-run applies to `register`, `unregister`, `clone`, `new`, `adopt`, `sync`, `remove`, `prune`, `open --no-attach`, `close`. stdin not a TTY ⇒ never prompt. Human stdout has the same format when redirected as it has on a terminal; only ANSI colour is omitted according to `--color`. `--json` selects the envelope instead. Every destructive lifecycle verb whose only purpose is destruction (`remove`, `unregister`, `destroy`, `refresh`) prompts on a TTY without `--yes` and requires `--yes` otherwise (`CONFIRM_REQUIRED` 2); a declined prompt exits 0 with `*: false` and mutates nothing. **Exception**: `prune` is a report-then-act verb; without `--yes` on a non-TTY it prints its plan and exits 0 with `data.applied = false` and the notice `CONFIRM_REQUIRED` (§12).
+Control-plane deadlines per §13.3; user children run as long as they run. Idempotent re-run applies to `register`, `unregister`, `clone`, `new`, `adopt`, `sync`, `remove`, `prune`, `open --no-attach`, `close`. stdin not a TTY ⇒ never prompt. Human stdout has the same format when redirected as it has on a terminal; only ANSI colour is omitted according to `--color`. `--json` selects the envelope instead. `unregister`, `destroy` and `refresh` prompt on a TTY without `--yes` and require `--yes` otherwise (`CONFIRM_REQUIRED` 2); a declined prompt exits 0 with `*: false` and mutates nothing. **`remove` is gated on loss, not on the verb** (A54): it prompts only when the plan discards uncommitted work or deletes a branch carrying unpushed commits, `--force` both permits such a removal and consents to it, `--yes` never unlocks one, and without a TTY it is refused with `TREE_DIRTY` (5) rather than `CONFIRM_REQUIRED`. **Exception**: `prune` is a report-then-act verb; without `--yes` on a non-TTY it prints its plan and exits 0 with `data.applied = false` and the notice `CONFIRM_REQUIRED` (§12).
 
 ### 14.3 Exit classes and error type
 | Code | Class | Examples |
@@ -681,7 +681,7 @@ shapes — open, closed, and failed — even though `open` emits open/failed and
 | `clone` | `{ url, path, cloned } & register.data` |
 | `unregister` | `{ label, unregistered, destroyed: [ {scope, task, state, child|null} ], artifacts: [ {path, action: "deleted"|"kept"} ] }` |
 | `new` / `adopt` | `{ tree, created, resumed, sync: StepRep[]|null, verify: {ok, steps: StepRep[]}|null }` / `{ tree, adopted, resumed }` |
-| `remove` | `{ target, removed, destroyed: [ {scope, task, state, child|null} ], orphans_kept: [ScopedTask], branch_deleted, session_closed }` |
+| `remove` | `{ target, removed, destroyed: [ {scope, task, state, child|null} ], orphans_kept: [ScopedTask], branch_deleted, branch_kept: string|null, session_closed }` |
 | `sync` | `{ target, ran, steps: StepRep[], inputs: [ {path, hash} ] }` |
 | `run` | `{ target, task, child|null, log|null, steps: StepRep[] }`; `--dry-run`: `{ task, steps: [ {id, scope, origin, cwd, run, exists, lock, sys_locks, resource, tied_to} ] }` |
 | `destroy` / `refresh` | `{ target, scope, task, before, after, child|null }` |
@@ -770,7 +770,7 @@ Levels **U** (wt-core), **I** (wt-sys/app on temp repos with shims: tmux, docker
 | §10.5 | instance frozen after `needs`, later config edit does not change it; no refresh on a plain door; repo-tied: the invoking tree's stripped declaration is used until an instance exists, then the instance governs | I, C |
 | §11.1 | `derive_phase` exhaustive over the table incl. `replaced`, `claimed`, `missing` with records | U |
 | §11.2 | `new.G` failpoint → `wt new` resumes once (`resumed: true`); two `new` same address → one `TREE_IN_USE`; crash during V → `--verify` resumes V; `remove` then `new` same name → inherits slot/ports/identities with a fresh `tree_id`; `rm -rf` a tree with a present resource then `new` → `TREE_MISSING_PENDING`; after `prune --records` → fresh incarnation; a foreign directory at the path → `PATH_OCCUPIED`; `sync.mid` failpoint → `interrupted`, `wt sync` resumes, unchanged inputs → no-op (§11.3) | I, C |
-| §11.4 | `n` / `TREE_DIRTY` / non-TTY without `--yes` leave phase, op, session untouched; clean, missing and replaced trees prompt; `remove.8` failpoint → `remove-interrupted`, re-run completes; probe exit 2 → `DESTROY_FAILED`; `--keep-orphans` removes the worktree and leaves a `missing` entry with records; repo-tied instance survives tree removal | C, I |
+| §11.4 | `n` / `TREE_DIRTY` leave phase, op, session untouched; clean, missing and replaced trees do not prompt; a dirty tree prompts on a TTY and is `TREE_DIRTY` without one; `--force` never prompts; a pushed branch is deleted and an unpushed one kept; `remove.8` failpoint → `remove-interrupted`, re-run completes; probe exit 2 → `DESTROY_FAILED`; `--keep-orphans` removes the worktree and leaves a `missing` entry with records; repo-tied instance survives tree removal | C, I |
 | §11.5–11.6 | `unregister` runs the canonical teardown inline, closes the canonical session, one tree-tied pass then the repo-tied pass, stops at the failure barrier; `register` → `list` ready/`sync: never`; `register` → doors before any `new`; interrupted init resumes; duplicate path/gitdir refused; §11.7: `COPY_ABSENT`/`COPY_TRACKED`/`COPY_EXISTS`, copied file never re-rendered/deleted, excluded from `git status` | I, C |
 | §7 | disjoint ranges (proptest over geometry incl. `stride 0`/overflow rejection); tombstone ranges avoided; `IDENTITY_COLLISION`; appended port seen by the allocating door's child; reordered `ports` changes nothing; removed name keeps its index; `PORTS_EXHAUSTED`; settings change leaves live `wt env` unchanged | U, I, C |
 | §4.1–4.4 | invariants incl. path uniqueness and no live/tombstone coexistence; `register` twice same label → `registered: false`; other label → `PATH_REGISTERED`; store crash at the rename boundary leaves the old file; `HOME_OLD_FORMAT` before any write; `TREE_REPLACED` on every verb for a replaced directory; `STATE_ORPHAN` collected by `prune` | U, I, C |

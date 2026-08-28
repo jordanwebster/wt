@@ -230,6 +230,7 @@ fn apply(
                         target: item.target.clone(),
                         force: true,
                         delete_branch: false,
+                        keep_branch: true,
                         keep_orphans: false,
                         wait: None,
                     },

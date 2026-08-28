@@ -59,6 +59,7 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
                     target: super::context::target_of(&tree).to_string(),
                     force: true,
                     delete_branch: false,
+                    keep_branch: true,
                     keep_orphans: false,
                     wait: None,
                 },

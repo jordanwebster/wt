@@ -376,6 +376,9 @@ fn render_remove(data: RemoveData, notices: &[Notice]) -> String {
     if data.branch_deleted {
         facts.push(("branch", "deleted".to_owned()));
     }
+    if let Some(branch) = data.branch_kept {
+        facts.push(("kept", format!("branch {branch}")));
+    }
     if data.session_closed {
         facts.push(("session", "closed".to_owned()));
     }
@@ -627,6 +630,14 @@ fn summarize_value(value: &Value) -> String {
 
 fn compact(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
+}
+
+/// A plan rendered for a consent prompt, in the summary shape of §14.1.
+pub(crate) fn consent_block(
+    headline: impl Into<String>,
+    facts: Vec<(&'static str, String)>,
+) -> String {
+    block(headline, facts, &[])
 }
 
 fn block(

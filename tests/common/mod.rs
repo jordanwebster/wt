@@ -255,3 +255,21 @@ pub fn git(path: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+pub fn branches(repo: &Path) -> Vec<String> {
+    let mut request = CommandRequest::new("git");
+    request.cwd = Some(repo.to_path_buf());
+    request.args = proc::os_args(&["branch", "--format=%(refname:short)"]);
+    let output = proc::capture(&request, Duration::from_secs(10)).unwrap();
+    assert!(
+        output.success(),
+        "git stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}

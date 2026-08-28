@@ -761,12 +761,49 @@ fn non_tty_destruction_requires_confirmation() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
     h.register(&repo);
-    h.json(&["new", "repo/work", "--no-sync"]);
     h.wt()
-        .args(["remove", "repo/work"])
+        .args(["unregister", "repo"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("CONFIRM_REQUIRED"));
+}
+
+#[test]
+fn remove_asks_only_where_work_dies() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+
+    // Clean and pushed: nothing is lost, so nothing is asked, on a terminal or
+    // off one, with or without --yes.
+    let clean = h.json(&["new", "repo/clean", "--no-sync"]);
+    let clean_path = Path::new(clean["data"]["tree"]["path"].as_str().unwrap()).to_owned();
+    h.wt().args(["remove", "repo/clean"]).assert().code(0);
+    assert!(!clean_path.exists());
+
+    // Uncommitted work: refused without a terminal, named by its own remedy.
+    let dirty = h.json(&["new", "repo/dirty", "--no-sync"]);
+    let dirty_path = Path::new(dirty["data"]["tree"]["path"].as_str().unwrap()).to_owned();
+    common::write(&dirty_path.join("untracked"), "keep\n");
+    h.wt()
+        .args(["remove", "repo/dirty"])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("TREE_DIRTY"));
+    assert!(dirty_path.exists());
+
+    // --yes is not consent to lose work; --force is.
+    h.wt()
+        .args(["remove", "repo/dirty", "--yes"])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("TREE_DIRTY"));
+    assert!(dirty_path.exists());
+    assert_eq!(
+        h.json(&["remove", "repo/dirty", "--force"])["data"]["removed"],
+        true
+    );
+    assert!(!dirty_path.exists());
 }
 
 #[test]
@@ -775,11 +812,90 @@ fn tty_consent_accepts_and_declines_through_a_pseudoterminal() {
     let repo = h.repo("repo", BASIC);
     h.register(&repo);
     let created = h.json(&["new", "repo/work", "--no-sync"]);
-    let path = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
-    assert_eq!(h.pty_status(&["remove", "repo/work"], b"n\n").code, Some(0));
+    let path = Path::new(created["data"]["tree"]["path"].as_str().unwrap()).to_owned();
+    common::write(&path.join("untracked"), "keep\n");
+
+    let output = h.pty_output(&["remove", "repo/work"], b"n\n");
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert!(shown.contains("discards uncommitted work"), "{shown}");
+    assert!(shown.contains("1 file (1 untracked)"), "{shown}");
+    assert!(shown.contains("Remove it? [y/N]"), "{shown}");
     assert!(path.exists());
+
     assert_eq!(h.pty_status(&["remove", "repo/work"], b"y\n").code, Some(0));
     assert!(!path.exists());
+
+    // --force answers the question in advance and never asks it.
+    let second = h.json(&["new", "repo/second", "--no-sync"]);
+    let second_path = Path::new(second["data"]["tree"]["path"].as_str().unwrap()).to_owned();
+    common::write(&second_path.join("untracked"), "keep\n");
+    assert_eq!(
+        h.pty_status(&["remove", "repo/second", "--force"], b"")
+            .code,
+        Some(0)
+    );
+    assert!(!second_path.exists());
+}
+
+#[test]
+fn removal_deletes_a_branch_a_remote_can_restore_and_keeps_one_it_cannot() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+
+    h.json(&["new", "repo/pushed", "--no-sync"]);
+    let removed = h.json(&["remove", "repo/pushed"]);
+    assert_eq!(removed["data"]["branch_deleted"], true);
+    assert_eq!(removed["data"]["branch_kept"], serde_json::Value::Null);
+    assert!(!common::branches(&repo).contains(&"pushed".to_owned()));
+
+    let ahead = h.json(&["new", "repo/ahead", "--no-sync"]);
+    let ahead_path = Path::new(ahead["data"]["tree"]["path"].as_str().unwrap()).to_owned();
+    common::write(&ahead_path.join("local.txt"), "local\n");
+    common::git(&ahead_path, &["add", "-A"]);
+    common::git(&ahead_path, &["commit", "-qm", "local only"]);
+    let kept = h.json(&["remove", "repo/ahead"]);
+    assert_eq!(kept["data"]["branch_deleted"], false);
+    assert_eq!(kept["data"]["branch_kept"], "ahead");
+    assert!(common::branches(&repo).contains(&"ahead".to_owned()));
+
+    // The commits are unreachable only once the branch goes too, so that is the
+    // removal that has to ask.
+    let asked = h.json(&["new", "repo/asked", "--no-sync"]);
+    let asked_path = Path::new(asked["data"]["tree"]["path"].as_str().unwrap()).to_owned();
+    common::write(&asked_path.join("local.txt"), "local\n");
+    common::git(&asked_path, &["add", "-A"]);
+    common::git(&asked_path, &["commit", "-qm", "local only"]);
+    h.wt()
+        .args(["remove", "repo/asked", "--delete-branch"])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("TREE_DIRTY"));
+    assert_eq!(
+        h.json(&["remove", "repo/asked", "--delete-branch", "--force"])["data"]["branch_deleted"],
+        true
+    );
+    assert!(!common::branches(&repo).contains(&"asked".to_owned()));
+
+    // --keep-branch keeps what the default would have deleted.
+    h.json(&["new", "repo/held", "--no-sync"]);
+    let held = h.json(&["remove", "repo/held", "--keep-branch"]);
+    assert_eq!(held["data"]["branch_kept"], "held");
+    assert!(common::branches(&repo).contains(&"held".to_owned()));
+}
+
+#[test]
+fn rm_and_ls_are_accepted_spellings() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+    h.json(&["new", "repo/work", "--no-sync"]);
+    assert!(h.json(&["ls"])["data"]["trees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tree| tree["target"] == "repo/work"));
+    assert_eq!(h.json(&["rm", "repo/work"])["data"]["removed"], true);
 }
 
 #[test]
