@@ -314,13 +314,28 @@ fn new_attaches_and_the_live_pane_has_the_tree_environment() {
         pane.contains("RAW=unset"),
         "pane exported WT_PORT_HTTP:\n{pane}"
     );
+    // The pane also carries the echoed command, wrapped at whatever width the
+    // terminal had when it was typed, and the host shell's prompt — `sh-3.2$`
+    // on macOS, `$` on Linux. Neither is evidence of anything this proves, so
+    // the snapshot holds the command's output alone.
+    let lines = pane.lines().collect::<Vec<_>>();
+    let first = lines
+        .iter()
+        .position(|line| line.contains("bin/tree-tool"))
+        .expect("pane did not echo the resolved tree binary");
+    let last = lines
+        .iter()
+        .position(|line| line.trim() == "__TREE_ENV__")
+        .expect("pane did not reach the sentinel");
     insta::assert_snapshot!(
         "session_tree_environment",
-        pane.replace(
-            &private.harness.root.to_string_lossy().to_string(),
-            "<ROOT>"
-        )
-        .trim_end()
+        lines[first..=last]
+            .join("\n")
+            .replace(
+                &private.harness.root.to_string_lossy().to_string(),
+                "<ROOT>"
+            )
+            .trim_end()
     );
 
     private.send_line(&session, "exit");
