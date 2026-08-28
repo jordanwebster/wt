@@ -14,7 +14,7 @@ with it.
 wt register ~/source/orbit
 wt new orbit/fix-scrolling        # creates the tree, lands you inside it
 orbit serve                       # this tree's build, on this tree's port
-wt remove orbit/fix-scrolling --yes
+wt remove orbit/fix-scrolling     # or `wt rm`
 ```
 
 ## A worktree owns its names
@@ -241,17 +241,27 @@ start  = ["codex"]
 resume = ["codex", "resume", "--last"]
 ```
 
-Remove a worktree when finished. Destructive commands prompt on a terminal and
-require `--yes` when non-interactive.
+Remove a worktree when finished. `wt remove` (or `wt rm`) asks only when the
+removal would destroy work: uncommitted changes, or commits no remote carries
+on a branch it is about to delete. A clean worktree whose commits are pushed is
+removed without a prompt. `--force` permits a removal that loses work and is
+itself the consent, so it never prompts; without a terminal such a removal is
+refused rather than guessed at. The other destructive commands — `unregister`,
+`destroy`, `refresh`, `prune` — prompt on a terminal and require `--yes`
+otherwise.
 
 ```sh
-wt remove orbit/fix-scrolling --yes
+wt rm orbit/fix-scrolling            # asks only if there is work to lose
+wt rm orbit/fix-scrolling --force    # discards it without asking
 wt prune --yes
 ```
 
 Removal closes the session, then destroys the resources this worktree actually
 created — the plan recorded when they were created, not whatever the branch
-happens to say now — and then removes the Git worktree. `wt prune` reports or
+happens to say now — and then removes the Git worktree. The branch goes too
+when its commits are on a remote, since `origin` can restore it; a branch
+carrying unpushed commits is kept, and the summary says so. `--delete-branch`
+deletes it either way, `--keep-branch` never does. `wt prune` reports or
 repairs stale records and out-of-band deletions.
 
 ## `.wt.toml` reference

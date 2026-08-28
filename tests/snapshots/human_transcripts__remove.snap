@@ -1,7 +1,9 @@
 ---
 source: tests/human_transcripts.rs
-expression: "normalize(h, &output.stdout)"
+assertion_line: 282
+expression: normalized
 ---
 Removed repo/work
   destroyed  1
+  branch     deleted
   session    closed

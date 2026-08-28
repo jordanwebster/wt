@@ -1,11 +1,13 @@
 ---
 source: tests/json_snapshots.rs
+assertion_line: 128
 expression: "normalize(value, &h.root)"
 ---
 {
   "command": "remove",
   "data": {
-    "branch_deleted": false,
+    "branch_deleted": true,
+    "branch_kept": null,
     "destroyed": [
       {
         "child": null,

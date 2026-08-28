@@ -673,3 +673,54 @@ global cache and hard-links into `.venv`.
 The closed template function set adds `home()`, which resolves to the same wt
 home exposed as `WT_HOME`. A cold first build remains non-blocking because A47
 runs `build` in the background.
+
+## A54. Consent is gated on loss, not on the verb
+
+`wt remove` prompts only when the removal destroys something that cannot be
+recovered once it finishes. Two things qualify: uncommitted changes in the
+worktree, and commits reachable only from a branch this run deletes. A clean
+tree whose commits are on a remote is removed without a prompt, as are the
+missing-directory and replaced-directory paths, which delete no work at all.
+
+The prompt that fired on every removal carried no information. A user who is
+asked to confirm the harmless case learns to answer `y` without reading, and
+the one removal in fifty that discards a day's work is answered the same way.
+Consent is worth asking for only where a wrong answer costs something.
+
+The two flags stay on separate axes. `--force` permits a work-losing removal
+*and* supplies its consent, so it never prompts: the user who types it has
+already said the thing the prompt would ask. `--yes` only suppresses prompts
+for removals that are permitted anyway; it does not unlock the destruction of
+uncommitted work, because it is a global flag that lands in aliases and agent
+command lines where the tree in question was never examined. Without a TTY a
+work-losing removal is refused with `TREE_DIRTY` (5) and the remedy names
+`--force`; `CONFIRM_REQUIRED` no longer arises from `remove`.
+
+Removal now deletes the tree's local branch when its commits are on a remote,
+because the branch is then a name that can be recreated from `origin` and
+leaving it behind litters every repository wt is used on. When the commits are
+not on a remote the branch is the only thing keeping them reachable, so it is
+kept and the summary says so with the count. `--delete-branch` deletes it
+regardless, `--keep-branch` never deletes it, and an adopted tree's branch is
+never deleted by default because it predates wt's knowledge of the repository.
+This is the sole reason `remove` may prompt about commits: with the branch kept
+by default, unpushed commits survive the removal and need no consent.
+
+The rule is `remove` only. `unregister`, `destroy` and `refresh` keep their
+unconditional prompt: the first tears down a whole registration and is rare
+enough that the keystroke costs nothing, and the other two are aimed at a
+named resource whose teardown is the user's whole intent.
+
+Resource teardown is not counted as loss. Removal runs every tree-tied
+`Destroy{teardown}` without asking, on A7's premise that a declared resource is
+reproducible from its declaration. A teardown recipe that destroys data no
+declaration can rebuild is outside the model, as it already was.
+
+## A55. `rm` and `ls` are accepted spellings
+
+`wt rm` resolves to `remove` and `wt ls` to `list`. Both are hidden from
+`--help`, the canonical names in §14.1 are unchanged, and A15's settled surface
+is not reopened: these are spellings of approved verbs, not new verbs. The
+unknown-subcommand allowlist accepts them, so neither reaches the
+nearest-name tip — which, ranking by edit distance alone, answered `rm` with
+`fmt, run, env` and never suggested `remove`.

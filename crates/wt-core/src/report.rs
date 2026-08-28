@@ -348,6 +348,8 @@ pub struct RemoveData {
     pub destroyed: Vec<DestroyedReport>,
     pub orphans_kept: Vec<String>,
     pub branch_deleted: bool,
+    /// The branch removal left behind, because no remote carries its commits.
+    pub branch_kept: Option<String>,
     pub session_closed: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -913,6 +915,7 @@ mod tests {
                 destroyed: vec![destroyed()],
                 orphans_kept: vec!["legacy".to_owned()],
                 branch_deleted: false,
+                branch_kept: Some("work".to_owned()),
                 session_closed: false,
             },
         );

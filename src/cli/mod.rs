@@ -69,6 +69,7 @@ pub enum Command {
     /// Adopt an existing git worktree.
     Adopt(Adopt),
     /// List registered trees.
+    #[command(alias = "ls")]
     List(List),
     /// Report one tree's state and tasks.
     Status(Status),
@@ -104,6 +105,7 @@ pub enum Command {
     /// Close agent sessions.
     Close(Close),
     /// Tear down and remove a linked tree.
+    #[command(alias = "rm")]
     Remove(Remove),
     /// Report or clean stale tree records.
     Prune(Prune),
@@ -358,13 +360,17 @@ pub struct Close {
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = "Example: wt remove project/feature --yes")]
+#[command(after_help = "Example: wt remove project/feature")]
 pub struct Remove {
     pub target: String,
     #[arg(long)]
     pub force: bool,
-    #[arg(long)]
+    /// Delete the tree's branch even when no remote carries its commits.
+    #[arg(long, conflicts_with = "keep_branch")]
     pub delete_branch: bool,
+    /// Keep the tree's branch that removal would otherwise delete.
+    #[arg(long)]
+    pub keep_branch: bool,
     #[arg(long)]
     pub keep_orphans: bool,
     #[arg(long)]
@@ -466,6 +472,9 @@ pub fn parse() -> Cli {
         "locks",
         "shell-init",
         "completions",
+        // Accepted spellings (A55); clap maps them to their verbs.
+        "rm",
+        "ls",
     ];
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut skip = false;

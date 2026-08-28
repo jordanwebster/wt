@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use wt_core::lifecycle::{OpVerb, Operation, StatePhase};
 use wt_core::model::Tombstone;
-use wt_core::remove::{AfterDestroy, GitObs, Obs, RemoveOptions, Upstream};
+use wt_core::remove::{AfterDestroy, Consent, GitObs, Obs, RemoveOptions, RemovePlan, Upstream};
 use wt_core::report::{DestroyedReport, RemoveData};
 use wt_core::{CoreError, ExitClass};
 use wt_sys::lock::{self, Mode};
@@ -27,6 +27,7 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
             destroyed: Vec::new(),
             orphans_kept: Vec::new(),
             branch_deleted: false,
+            branch_kept: None,
             session_closed: false,
         });
     };
@@ -48,6 +49,8 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         dir_exists,
         identity_ok,
         git: git_obs,
+        branch: tree.source.branch.clone(),
+        adopted: tree.source.kind == wt_core::model::SourceKind::Adopted,
         session_live,
         door_holders: door_holders(context, &target)?,
         resources,
@@ -57,19 +60,20 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         RemoveOptions {
             force: args.force,
             keep_orphans: args.keep_orphans,
+            delete_branch: args.delete_branch,
+            keep_branch: args.keep_branch,
         },
     )?;
-    let prompt = format!(
-        "remove plan: {}",
-        serde_json::to_string(&plan).unwrap_or_else(|_| target.to_string())
-    );
-    if !context.confirm(&prompt)? {
+    if wt_core::remove::gate(&plan, context.tty.stdin)? == Consent::Prompt
+        && !context.confirm_loss(&consent_plan(&tree, &observed, &plan), "Remove it?")?
+    {
         return Output::data(RemoveData {
             target: target.to_string(),
             removed: false,
             destroyed: Vec::new(),
             orphans_kept: Vec::new(),
             branch_deleted: false,
+            branch_kept: None,
             session_closed: false,
         });
     }
@@ -116,6 +120,8 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         dir_exists: current_dir_exists,
         identity_ok: current_identity_ok,
         git: observe_git(context, &tree, current_dir_exists && current_identity_ok)?,
+        branch: tree.source.branch.clone(),
+        adopted: tree.source.kind == wt_core::model::SourceKind::Adopted,
         session_live: false,
         door_holders: door_holders(context, &target)?,
         resources: context
@@ -123,7 +129,7 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
             .map(|state| state.resources.keys().cloned().collect())
             .unwrap_or_default(),
     };
-    wt_core::remove::revalidate(&plan, &reobserved, args.force)?;
+    wt_core::remove::revalidate(&plan, &reobserved)?;
     let now = wt_sys::fsx::timestamp()?;
     context.mutate_state(&target, &holder, |state| {
         state.phase = StatePhase::Removing;
@@ -218,10 +224,16 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         git.worktree_prune()?;
     }
     let mut branch_deleted = false;
-    if args.delete_branch {
-        if let Some(branch) = &tree.source.branch {
-            git.branch_delete(branch, args.force)?;
+    let mut branch_kept = None;
+    if let Some(branch) = &tree.source.branch {
+        if plan.delete_branch {
+            // `-D`, because the plan's own test — every commit is on a remote,
+            // or the user named the branch — outranks git's merged-into-HEAD
+            // heuristic, which refuses a pushed branch that main has not taken.
+            git.branch_delete(branch, true)?;
             branch_deleted = true;
+        } else {
+            branch_kept = Some(branch.clone());
         }
     }
     let orphans_kept = if after == AfterDestroy::KeepLiveEntry {
@@ -266,8 +278,83 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         destroyed,
         orphans_kept,
         branch_deleted,
+        branch_kept,
         session_closed,
     })
+}
+
+/// The plan a user is asked to consent to: what this removal ends, in the
+/// summary shape of SPEC §14.1, with the losses first.
+fn consent_plan(tree: &wt_core::model::TreeRec, observed: &Obs, plan: &RemovePlan) -> String {
+    let headline = if plan.dirty {
+        format!("Remove {} — this discards uncommitted work", plan.target)
+    } else {
+        format!("Remove {} — this deletes unpushed commits", plan.target)
+    };
+    let mut facts = vec![("path", tree.path.as_str().to_owned())];
+    if let Some(git) = observed.git.as_ref() {
+        if plan.dirty {
+            facts.push(("dirty", dirty_summary(&git.dirty_porcelain)));
+        }
+        if plan.unpushed {
+            facts.push(("unpushed", unpushed_summary(git, plan.branch.as_deref())));
+        }
+    }
+    if plan.session_live {
+        facts.push(("session", format!("{} will be killed", tree.session_name)));
+    }
+    for holder in &plan.door_holders {
+        facts.push(("in use", format!("pid {} ({})", holder.pid, holder.verb)));
+    }
+    if !plan.resources.is_empty() {
+        facts.push((
+            "resources",
+            format!("{} will be destroyed", plan.resources.join(", ")),
+        ));
+    }
+    match (plan.branch.as_deref(), plan.delete_branch) {
+        (Some(branch), true) => facts.push(("branch", format!("{branch} will be deleted"))),
+        (Some(branch), false) => facts.push((
+            "keeps",
+            format!("branch {branch} (--delete-branch to delete it)"),
+        )),
+        (None, _) => {}
+    }
+    super::human::consent_block(headline, facts)
+}
+
+fn dirty_summary(porcelain: &str) -> String {
+    let lines = porcelain.lines().collect::<Vec<_>>();
+    let untracked = lines.iter().filter(|line| line.starts_with("??")).count();
+    let modified = lines.len() - untracked;
+    let mut parts = Vec::new();
+    if modified > 0 {
+        parts.push(format!("{modified} modified"));
+    }
+    if untracked > 0 {
+        parts.push(format!("{untracked} untracked"));
+    }
+    format!(
+        "{} {} ({})",
+        lines.len(),
+        if lines.len() == 1 { "file" } else { "files" },
+        parts.join(", ")
+    )
+}
+
+fn unpushed_summary(git: &GitObs, branch: Option<&str>) -> String {
+    let name = branch.unwrap_or("HEAD");
+    if git.ahead > 0 {
+        format!(
+            "{} {} on {name}",
+            git.ahead,
+            if git.ahead == 1 { "commit" } else { "commits" }
+        )
+    } else if git.upstream == Upstream::Gone {
+        format!("upstream of {name} is gone")
+    } else {
+        format!("no remote carries {name}")
+    }
 }
 
 pub(crate) fn door_holders(
