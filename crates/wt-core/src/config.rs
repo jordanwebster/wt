@@ -5,7 +5,7 @@ use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     error::CoreError,
-    model::{valid_duration, EnvKey, PortName, RelDir, RelPath, TaskId},
+    model::{valid_duration, EnvKey, LockName, PortName, RelDir, RelPath, TaskId},
     template, ExitClass,
 };
 
@@ -208,12 +208,30 @@ pub struct Detect {
     pub ignore: Option<Vec<RelPath>>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LockCfg {
+    pub slots: u16,
+    pub wait: Option<String>,
+}
+
+impl Default for LockCfg {
+    fn default() -> Self {
+        Self {
+            slots: 1,
+            wait: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     #[serde(flatten)]
     pub root: Scope,
     pub ports: Vec<PortName>,
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
+    pub locks: IndexMap<String, LockCfg>,
     pub dirs: IndexMap<String, Scope>,
     pub sync_inputs: Vec<RelPath>,
     pub detect: Detect,
@@ -370,6 +388,23 @@ pub fn validate(config: &Config) -> Result<(), CoreError> {
     let mut ports = BTreeSet::new();
     if config.ports.iter().any(|port| !ports.insert(port)) {
         return Err(invalid("port names must be unique"));
+    }
+    for (name, lock) in &config.locks {
+        LockName::new(name)?;
+        if lock.slots == 0 {
+            return Err(invalid(format!(
+                "locks.\"{name}\".slots must be at least 1"
+            )));
+        }
+        if lock
+            .wait
+            .as_deref()
+            .is_some_and(|wait| !valid_duration(wait))
+        {
+            return Err(invalid(format!(
+                "locks.\"{name}\".wait must be digits followed by ms, s, m, or h"
+            )));
+        }
     }
     for (dir, scope) in std::iter::once((".", &config.root))
         .chain(config.dirs.iter().map(|(dir, scope)| (dir.as_str(), scope)))
@@ -710,6 +745,9 @@ fn validate_task(
     task: &Task,
     locations: &BTreeMap<String, SourceLocation>,
 ) -> Result<(), CoreError> {
+    if let Some(lock) = &task.lock {
+        LockName::new(lock)?;
+    }
     if task.run.is_none() && task.destroy.is_none() && task.needs.is_none() {
         return Err(invalid("a task needs run, destroy, or needs"));
     }
@@ -829,6 +867,9 @@ pub fn merge(layers: &[(Layer, Config)]) -> Config {
         }
         if !layer.ports.is_empty() {
             output.ports.clone_from(&layer.ports);
+        }
+        for (name, lock) in &layer.locks {
+            output.locks.insert(name.clone(), lock.clone());
         }
         append_unique(&mut output.sync_inputs, &layer.sync_inputs);
         if layer.detect.depth.is_some() {
@@ -1170,6 +1211,43 @@ mod tests {
         let merged = merge(&[(Layer::Repo, low), (Layer::Tree, high)]);
         assert_eq!(merged.detect.depth, Some(1));
         assert_eq!(merged.detect.ignore.unwrap()[0].as_str(), "vendor");
+    }
+
+    #[test]
+    fn section_5_2_named_lock_config_parses_validates_and_defaults() {
+        let config = parse(
+            "locks.\"serial\" = { wait = '250ms' }\n[task.test]\nrun='true'\nlock='serial'",
+            "repo/.wt.toml",
+        )
+        .unwrap();
+        assert_eq!(config.locks["serial"].slots, 1);
+        assert_eq!(config.locks["serial"].wait.as_deref(), Some("250ms"));
+
+        for source in [
+            "locks.serial={slots=0}",
+            "locks.serial={slots=65536}",
+            "locks.serial={wait='later'}",
+            "locks.serial={slots=1,mystery=true}",
+            "locks.'../escape'={slots=1}",
+            "[dirs.sub.locks.serial]\nslots=2",
+            "[task.test]\nrun='true'\nlock='../escape'",
+        ] {
+            assert!(parse(source, "repo/.wt.toml").is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn section_5_3_named_lock_entries_merge_by_name_at_root() {
+        let repo = parse(
+            "locks.serial={slots=2,wait='1s'}\nlocks.network={slots=3}",
+            "repo/.wt.toml",
+        )
+        .unwrap();
+        let user = parse("locks.serial={slots=4}", "$WT_HOME/config.toml").unwrap();
+        let merged = merge(&[(Layer::Repo, repo), (Layer::User, user)]);
+        assert_eq!(merged.locks["serial"].slots, 4);
+        assert_eq!(merged.locks["serial"].wait, None);
+        assert_eq!(merged.locks["network"].slots, 3);
     }
 
     #[test]

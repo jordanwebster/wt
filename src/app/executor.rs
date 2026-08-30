@@ -310,18 +310,60 @@ fn acquire_node_locks(
                     ),
                 )?,
             }),
-            PlannedLock::Named { name } => guards.push(Guard::Named {
-                _token: lock::named(
-                    &context
-                        .home
-                        .join(format!("locks/{}/named/{name}.lock", door.tree.label)),
-                    &holder,
-                    wait.and_then(duration_millis).map(Duration::from_millis),
-                )?,
-            }),
+            PlannedLock::Named { name } => {
+                let configured = door.config.locks.get(&name);
+                let slots = configured.map_or(1, |lock| lock.slots);
+                let wait = wait
+                    .or(configured.and_then(|lock| lock.wait.as_deref()))
+                    .or(context.settings.task.lock_wait.as_deref());
+                let wait = match wait {
+                    Some("forever") => None,
+                    Some(value) => duration_millis(value).map(Duration::from_millis),
+                    None => Some(Duration::ZERO),
+                };
+                let dir = context
+                    .home
+                    .join(format!("locks/{}/named/{name}", door.tree.label));
+                let token = lock::named(&dir, slots, &holder, wait)
+                    .map_err(|error| named_lock_error(&name, error))?;
+                guards.push(Guard::Named { _token: token });
+            }
         }
     }
     Ok(guards)
+}
+
+fn named_lock_error(name: &str, error: lock::NamedAcquireError) -> CoreError {
+    let occupancy = match error {
+        lock::NamedAcquireError::Held(occupancy) => occupancy,
+        lock::NamedAcquireError::Other(error) => return error,
+    };
+    let holders = occupancy
+        .holders
+        .iter()
+        .map(|slot| {
+            slot.holder.as_ref().map_or_else(
+                || format!("slot {}: unknown holder", slot.slot),
+                |holder| {
+                    format!(
+                        "slot {}: pid {} {} {} since {}",
+                        slot.slot, holder.pid, holder.target, holder.verb, holder.since
+                    )
+                },
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    CoreError::new(
+        ExitClass::Conflict,
+        "LOCK_HELD",
+        format!(
+            "named lock `{name}` is held: {}/{} in use; holders: {holders}",
+            occupancy.holders.len(),
+            occupancy.slots
+        ),
+        format!("retry with `--wait <duration>`, or raise `locks.\"{name}\".slots`"),
+    )
 }
 
 fn resource_lock_path(context: &Context, key: &ResourceKey) -> PathBuf {

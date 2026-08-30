@@ -791,14 +791,20 @@ A new root-only configuration key `locks."<name>"` with fields
 `slots` (integer ≥ 1, default 1) and `wait` (Duration, default
 `task.lock_wait`) sizes a named lock. The key flows through the ordinary
 layer merge, so a repository may suggest a capacity and the user's
-`[repos.<label>]` overrides it: capacity is a machine fact and the machine's
+`[repos.<label>]` overrides it (the whole entry replaces per name, as
+`task` entries do): capacity is a machine fact and the machine's
 owner has the last word, by the merge rule that already exists rather than a
 bespoke one. Acquisition takes any one of the N slot files, trying each in
 order and polling within the deadline; `LOCK_HELD` reports occupancy
 ("4/4 in use"), the holders, and the remedy (`--wait`, or raising `slots`).
 `wt locks` shows `held n/N` and per-slot holders. Lock level 4 and
 `lock_plan` are unchanged; a lock with no `locks` entry has one slot and
-behaves exactly as today. Rationale: "at most N concurrent" is the correct
+the §13.3 default wait. Honouring that default is itself a change: the
+previous implementation ignored `task.lock_wait` and queued without bound,
+so a task carrying `lock` under default settings now fails fast with the
+occupancy report instead of queueing invisibly — a behaviour change,
+announced as one; `--wait`, the per-lock `wait`, or `task.lock_wait`
+restores queueing deliberately. Rationale: "at most N concurrent" is the correct
 policy for machine-wide weight — N test containers in a fixed-size VM — and
 both previously available options were wrong: no lock exhausts the machine
 and a mutex serialises a fleet to one.

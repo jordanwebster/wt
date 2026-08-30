@@ -118,6 +118,25 @@ impl NamedToken {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamedSlotHolder {
+    pub slot: u16,
+    pub path: PathBuf,
+    pub holder: Option<Holder>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamedOccupancy {
+    pub slots: u16,
+    pub holders: Vec<NamedSlotHolder>,
+}
+
+#[derive(Debug)]
+pub enum NamedAcquireError {
+    Held(NamedOccupancy),
+    Other(CoreError),
+}
+
 #[derive(Debug)]
 pub struct RmwToken(Guard);
 
@@ -169,16 +188,68 @@ pub fn resource(path: &Path, holder: &Holder, wait: Duration) -> Result<Resource
     acquire(path, Level::Resource, Mode::Exclusive, holder, wait).map(ResourceToken)
 }
 
-/// Acquires a level-4 named task lock.
-pub fn named(path: &Path, holder: &Holder, wait: Option<Duration>) -> Result<NamedToken> {
-    acquire(
-        path,
-        Level::Named,
-        Mode::Exclusive,
-        holder,
-        wait.unwrap_or(Duration::MAX),
-    )
-    .map(NamedToken)
+/// Acquires one slot of a level-4 named task lock.
+pub fn named(
+    dir: &Path,
+    slots: u16,
+    holder: &Holder,
+    wait: Option<Duration>,
+) -> std::result::Result<NamedToken, NamedAcquireError> {
+    debug_assert!(slots > 0, "named locks always have at least one slot");
+    let started = Instant::now();
+    loop {
+        for slot in 0..slots {
+            let path = named_slot_path(dir, slot);
+            match acquire_inner(
+                &path,
+                Level::Named,
+                Mode::Exclusive,
+                holder,
+                Duration::ZERO,
+                true,
+            ) {
+                Ok(guard) => return Ok(NamedToken(guard)),
+                Err(error) if error.code.0 == "LOCK_HELD" => {}
+                Err(error) => return Err(NamedAcquireError::Other(error)),
+            }
+        }
+
+        if wait.is_some_and(|deadline| started.elapsed() >= deadline) {
+            let occupancy = named_occupancy(dir, slots).map_err(NamedAcquireError::Other)?;
+            if occupancy.holders.len() < usize::from(slots) {
+                // A slot freed between the sweep and this read; re-attempt after
+                // a short pause so a deadline overrun stays bounded instead of
+                // spinning hot while holders churn.
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            return Err(NamedAcquireError::Held(occupancy));
+        }
+
+        let interval = wait.map_or(Duration::from_millis(100), |deadline| {
+            Duration::from_millis(100).min(deadline.saturating_sub(started.elapsed()))
+        });
+        std::thread::sleep(interval);
+    }
+}
+
+pub fn named_occupancy(dir: &Path, slots: u16) -> Result<NamedOccupancy> {
+    let mut holders = Vec::new();
+    for slot in 0..slots {
+        let path = named_slot_path(dir, slot);
+        if is_held(&path)? {
+            holders.push(NamedSlotHolder {
+                slot,
+                holder: read_holder(&path)?,
+                path,
+            });
+        }
+    }
+    Ok(NamedOccupancy { slots, holders })
+}
+
+fn named_slot_path(dir: &Path, slot: u16) -> PathBuf {
+    dir.join(format!("{slot}.lock"))
 }
 
 /// Acquires the level-5 leaf registry RMW lock.
@@ -487,7 +558,7 @@ mod tests {
         .unwrap();
         let git = git(&dir.path().join("2"), &holder(), Duration::ZERO).unwrap();
         let resource = resource(&dir.path().join("3"), &holder(), Duration::ZERO).unwrap();
-        let named_token = named(&dir.path().join("4"), &holder(), Some(Duration::ZERO)).unwrap();
+        let named_token = named(&dir.path().join("4"), 1, &holder(), Some(Duration::ZERO)).unwrap();
         let registry = registry_rmw(&dir.path().join("5"), &holder(), Duration::ZERO).unwrap();
         let state = state_rmw(&dir.path().join("6"), &holder(), Duration::ZERO).unwrap();
         drop(state);
@@ -497,7 +568,7 @@ mod tests {
         drop(git);
         drop(tree_token);
 
-        let high = named(&dir.path().join("high"), &holder(), Some(Duration::ZERO)).unwrap();
+        let high = named(&dir.path().join("high"), 1, &holder(), Some(Duration::ZERO)).unwrap();
         let result = std::panic::catch_unwind(|| {
             let _ = tree(
                 &dir.path().join("low"),
@@ -542,6 +613,111 @@ mod tests {
         drop(door_token);
         assert!(!door_path.exists());
         drop(tree_token);
+    }
+
+    #[test]
+    fn section_13_3_named_capacity_fills_slots_and_waits_for_the_first_free_one() {
+        use std::sync::mpsc;
+
+        let dir = tempdir().unwrap();
+        let lock_dir = dir.path().join("named/serial");
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let first_dir = lock_dir.clone();
+        let first_ready = ready_tx.clone();
+        let first = std::thread::spawn(move || {
+            let token = named(
+                &first_dir,
+                2,
+                &Holder::current("repo/first", "run", "first"),
+                Some(Duration::ZERO),
+            )
+            .unwrap();
+            first_ready.send(()).unwrap();
+            release_first_rx.recv().unwrap();
+            drop(token);
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let (release_second_tx, release_second_rx) = mpsc::channel();
+        let second_dir = lock_dir.clone();
+        let second = std::thread::spawn(move || {
+            let token = named(
+                &second_dir,
+                2,
+                &Holder::current("repo/second", "run", "second"),
+                Some(Duration::ZERO),
+            )
+            .unwrap();
+            ready_tx.send(()).unwrap();
+            release_second_rx.recv().unwrap();
+            drop(token);
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let error = named(
+            &lock_dir,
+            2,
+            &Holder::current("repo/third", "run", "third"),
+            Some(Duration::ZERO),
+        )
+        .unwrap_err();
+        let NamedAcquireError::Held(occupancy) = error else {
+            panic!("full named lock must report occupancy");
+        };
+        assert_eq!(occupancy.slots, 2);
+        assert_eq!(
+            occupancy
+                .holders
+                .iter()
+                .map(|holder| holder.slot)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+
+        let (waiter_ready_tx, waiter_ready_rx) = mpsc::channel();
+        let (release_waiter_tx, release_waiter_rx) = mpsc::channel();
+        let waiter_dir = lock_dir.clone();
+        let waiter = std::thread::spawn(move || {
+            let token = named(
+                &waiter_dir,
+                2,
+                &Holder::current("repo/waiter", "run", "waiter"),
+                Some(Duration::from_secs(1)),
+            )
+            .unwrap();
+            waiter_ready_tx.send(()).unwrap();
+            release_waiter_rx.recv().unwrap();
+            drop(token);
+        });
+        release_first_tx.send(()).unwrap();
+        waiter_ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        let occupancy = named_occupancy(&lock_dir, 2).unwrap();
+        assert_eq!(occupancy.holders.len(), 2);
+        assert!(occupancy.holders.iter().any(|slot| slot
+            .holder
+            .as_ref()
+            .is_some_and(|holder| holder.target == "repo/waiter")));
+
+        release_second_tx.send(()).unwrap();
+        release_waiter_tx.send(()).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn section_4_named_slot_ignores_a_held_flat_leftover() {
+        let dir = tempdir().unwrap();
+        let flat = dir.path().join("named/serial.lock");
+        let flat_token = tree(&flat, Mode::Exclusive, &holder(), Duration::ZERO).unwrap();
+        let slot_dir = dir.path().join("named/serial");
+        let named_token = named(&slot_dir, 1, &holder(), Some(Duration::ZERO)).unwrap();
+        assert!(slot_dir.join("0.lock").exists());
+        drop(named_token);
+        drop(flat_token);
     }
 
     #[test]

@@ -89,7 +89,7 @@ $WT_HOME/                                 --home > WT_HOME env > ~/.wt; exported
   locks/<label>/<name>.doors/<pid>.lock   door-holder record {pid, verb, since}; try-flock = liveness
   locks/git/<gitdir_id>.lock              level-2 repo-git
   locks/<label>/res/tree/<name>/<ScopeEnc>/<task>.lock ; locks/<label>/res/repo/<ScopeEnc>/<task>.lock   level-3
-  locks/<label>/named/<lockname>.lock     level-4
+  locks/<label>/named/<lockname>/<i>.lock   level-4 named-lock slot; an old flat <lockname>.lock is inert
   locks/<label>/<name>.rmw.lock, _repo.rmw.lock   level-6
   trees/<label>/<name>/                   worktrees (settings.trees_dir overrides)
 <tree>/.wt/                               tool-owned, excluded, never authoritative; holds tree_id, logs, rendered files
@@ -132,11 +132,12 @@ Teardown reads no layer (§10.3).
 
 ### 5.2 `.wt.toml` grammar (A15; ★ new keys)
 ```
-Config  := Scope & { ports?: [PortName], dirs?: Map<RelDir, Scope>, sync_inputs?: [RelPath] ★, detect?: Detect ★ }
+Config  := Scope & { ports?: [PortName], locks?: Map<LockName, LockCfg> ★, dirs?: Map<RelDir, Scope>, sync_inputs?: [RelPath] ★, detect?: Detect ★ }
 Scope   := { bin?: [RelPath], commands?: [CommandName] | Map<CommandName,bool> ★, vars?: Map<VarKey, Template|false> ★,
              env?: Map<EnvKey, Template|false>, copy?: [RelPath], files?: Map<RelPath, File|false>,
              task?: Map<TaskId, Task|false>, adapters?: Map<AdapterId, { tool?: ToolId, disabled?: bool }> }
 Detect  := { depth?: 0|1|2 (1), ignore?: [RelPath] }
+LockCfg := { slots?: u16 (1, minimum 1), wait?: Duration }
 File    := { content?: Template, source?: RelPath, marker?: String ("#"; "" = no header), mode?: OctalString ★ ("0644") }
 Task    := { run?: Cmd, exists?: Cmd, destroy?: Cmd, needs?: [ScopedTask|PrivateId], lock?: LockName, name?: Template,
              tied_to?: "tree"|"repo", env?: Map<EnvKey, Template>, cwd?: RelPath, timeout?: Duration, description?: String,
@@ -183,7 +184,7 @@ Scopes are declared by `[dirs."d"]` (layers 1–3) or detected (§6). The scope 
 | `bin` | concatenated root-first then nearer, deduplicated, nearer first on PATH |
 | `commands` | union of claims across scopes, deduplicated and sorted; within one scope, higher-layer `false` deletes a lower-layer claim |
 | `adapters` | per scope, merged by id across layers |
-| `ports`, `sync_inputs`, `detect` | root only |
+| `ports`, `locks`, `sync_inputs`, `detect` | root only; `locks` merges by `LockName` through the ordinary layer precedence |
 
 A resource's scope is the scope at which its effective task was declared.
 
@@ -626,7 +627,7 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 | tree shared / exclusive | — / `locks.tree_exclusive` | non-blocking / 30s | — / `--wait d` | `TREE_BUSY` (4) / `TREE_IN_USE` (4) |
 | repo-git | `locks.repo_git` | 60s | `--wait d` | `LOCK_HELD` (4) |
 | resource lock | `locks.resource` | 120s | `--wait d` | `LOCK_HELD` (4) |
-| named lock | `task.lock_wait` | 0s | `--wait d|forever` | `LOCK_HELD` (4) |
+| named lock | `locks.<name>.wait`, then `task.lock_wait` | 0s | `--wait d|forever` | `LOCK_HELD` (4), with `n/N in use`, per-slot holders, and the `--wait` / raise-`slots` remedy |
 | registry / state RMW | `locks.rmw` | 5s | — | `LOCK_TIMEOUT` (8) |
 | git query / fetch / clone / worktree / submodule | `git.timeouts.*` | 30s / 120s / 600s / 60s / 600s | `--no-fetch`; task `timeout` | `TIMEOUT` (8) |
 | `exists` probe; `destroy`; task `run` | `task.probe_timeout` / `task.destroy_timeout` / `task.timeout` | 10s / 60s / none | task `timeout`, `--timeout` | Probe=Failed / DestroyFail / `TIMEOUT` (8) |
@@ -716,7 +717,7 @@ shapes — open, closed, and failed — even though `open` emits open/failed and
 | `env` | `{ target, set, overrode, restored, missing_bins, rendered, bins: [ {dir, exists, executables} ], ports: [ {name, port} ], env: Map, activation: Activation }` |
 | `list` | `{ trees: [Tree], locks: [ {name, label, holder: {pid, target, verb, since}} ] }`; `status` | `Tree & { tasks: [TaskInfo], config_errors }` |
 | `path` / `which` | `{ target, path }` / `{ target, cmd, path|null, in_bin }` |
-| `tasks` / `config` / `locks` | `{ target, tasks: [ {id, scope, origin, cwd, needs, resource, tied_to|null, lock|null, description|null} ] }` / `{ target, entries: [ {key, scope, layer, value} ] }` (env values shown as keys only) / `{ locks: [ {level, name, path, held, holder|null} ] }` |
+| `tasks` / `config` / `locks` | `{ target, tasks: [ {id, scope, origin, cwd, needs, resource, tied_to|null, lock|null, description|null} ] }` / `{ target, entries: [ {key, scope, layer, value} ] }` (env values shown as keys only) / `{ locks: [ {level, name, path, held, holder|null, held_slots?:u16, slots?:u16, holders?:[ {slot, path, holder|null} ]} ] }`; `held_slots` and `slots` are present for named locks, `holders` lists the held slots in ascending order and is omitted when empty, and human output renders `held n/N` with per-slot holders |
 | `prune` | `{ applied: bool, items: [ {target, reasons: [String], action, result|null} ] }` |
 | `doctor` / `shell-init` / `completions` | `{ findings: [ {severity, code, subject, message, remedy} ], counts: {error, warn, info} }` / `{ shell, script }` |
 
@@ -794,6 +795,7 @@ Levels **U** (wt-core), **I** (wt-sys/app on temp repos with shims: tmux, docker
 | §9.4 + §11.4 step 5 | attached `open` then `remove --yes` → session killed, lock acquired, removal completes; a `wt shell` in the tree → `TREE_IN_USE` naming the shell; two concurrent `open`s → one session | I |
 | §10.1 | `lock_plan` order asserted by a lock-order tracer (out-of-order acquisition panics in test builds); task env not contributed; present resource env contributed; log retention keeps 20 per task | I |
 | §10.1, §14.1, §14.4 (A58) | argv arguments append after templating and shell arguments appear at `"$@"`, only on the resolved target; an adapter-composed root forwards to the single adapter recipe; a two-scope composite refuses and names the public scoped tasks; a user aggregate refuses regardless of fan-out; no-parameter shell and resource refusals have their specified usage codes and remedies; absent arguments preserve behaviour; aliases accept `--`; log header, dry-run, and JSON carry the exact argument vector; arguments without `--` name the delimiter | C |
+| §4, §5.2–5.3, §13.3, §14.4 (A59) | named-lock config parses, validates `slots`/`wait`, is root-only, and merges by name; two holders fill two ordered slot files, a third gets `LOCK_HELD 2/2` naming both holders and both remedies, and a bounded waiter proceeds after release; an absent entry means one slot and the §13.3 default wait (previously unimplemented, now honoured — the announced A59 behaviour change); `wt locks` reports `held n/N` and per-slot holders | U, I, C |
 | §10.3 | snapshot env = exactly the minimised set (never `WT_ACTIVATION`; parent keys only via `snapshot_env`); teardown env = invoker's env overlaid; A25 scans only the recipe about to run; files 0600 under umask 000; repo-tied env has no tree-specific key; orbit daemon after `rm -rf`: `prune` → `orphaned(exe_missing)`, installed `orbit` never invoked; a recipe without tree words runs with bins removed from PATH; canonical root gone → `repo_root_missing` | I |
 | §10.4 | pgdata sequence (declared → run notice → external present → refresh → declared → remove drops absent/destroys present); probe exit 2 → never runs/destroys, teardown → orphaned; `resource.frozen` failpoint → next `run` probes and settles; destroy failure → orphaned, others attempted; declaration deleted after creation → still destroyed from the instance; sibling-scope same-named resources distinct | I, C |
 | §10.5 | instance frozen after `needs`, later config edit does not change it; no refresh on a plain door; repo-tied: the invoking tree's stripped declaration is used until an instance exists, then the instance governs | I, C |

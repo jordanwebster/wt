@@ -2182,6 +2182,133 @@ fn truth_surfaces_report_descriptions_config_errors_and_live_locks() {
 }
 
 #[test]
+fn sections_13_3_and_14_4_named_lock_capacity_reports_occupancy_and_waits() {
+    fn wait_for(path: &Path) {
+        for _ in 0..200 {
+            if path.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("timed out waiting for {}", path.display());
+    }
+
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        r#"
+locks.serial = { slots = 2 }
+[task.first]
+run = 'touch "$WT_ROOT/.first"; while [ ! -e "$WT_ROOT/.release-first" ]; do sleep 0.01; done'
+lock = "serial"
+[task.second]
+run = 'touch "$WT_ROOT/.second"; while [ ! -e "$WT_ROOT/.release-second" ]; do sleep 0.01; done'
+lock = "serial"
+[task.waiter]
+run = 'touch "$WT_ROOT/.waiter"'
+lock = "serial"
+[task.legacy_first]
+run = 'touch "$WT_ROOT/.legacy-first"; while [ ! -e "$WT_ROOT/.release-legacy" ]; do sleep 0.01; done'
+lock = "legacy"
+[task.legacy_second]
+run = "true"
+lock = "legacy"
+"#,
+    );
+    h.register(&repo);
+
+    let mut first = h
+        .wt_std()
+        .args(["run", "first", "repo", "--json"])
+        .spawn()
+        .unwrap();
+    wait_for(&repo.join(".first"));
+    let mut second = h
+        .wt_std()
+        .args(["run", "second", "repo", "--json"])
+        .spawn()
+        .unwrap();
+    wait_for(&repo.join(".second"));
+
+    let refused = h
+        .wt()
+        .args(["run", "waiter", "repo", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(4));
+    let refused: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refused["error"]["code"], "LOCK_HELD");
+    assert!(refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("2/2 in use"));
+    assert!(refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("slot 0: pid"));
+    assert!(refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("slot 1: pid"));
+    assert!(refused["error"]["remedy"]
+        .as_str()
+        .unwrap()
+        .contains("locks.\"serial\".slots"));
+
+    let locks = h.json(&["locks", "repo"]);
+    let named = locks["data"]["locks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|lock| lock["level"] == 4 && lock["name"] == "repo:serial")
+        .unwrap();
+    assert_eq!(named["held_slots"], 2);
+    assert_eq!(named["slots"], 2);
+    assert_eq!(named["holders"].as_array().unwrap().len(), 2);
+    assert!(named["holders"][0]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("/named/serial/0.lock"));
+    h.wt()
+        .args(["locks", "repo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("held 2/2"));
+
+    let mut waiter = h
+        .wt_std()
+        .args(["run", "waiter", "repo", "--wait", "2s", "--json"])
+        .spawn()
+        .unwrap();
+    common::write(&repo.join(".release-first"), "release\n");
+    wait_for(&repo.join(".waiter"));
+    assert!(waiter.wait().unwrap().success());
+    assert!(first.wait().unwrap().success());
+    common::write(&repo.join(".release-second"), "release\n");
+    assert!(second.wait().unwrap().success());
+
+    let mut legacy = h
+        .wt_std()
+        .args(["run", "legacy_first", "repo", "--json"])
+        .spawn()
+        .unwrap();
+    wait_for(&repo.join(".legacy-first"));
+    let legacy_refused = h
+        .wt()
+        .args(["run", "legacy_second", "repo", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(legacy_refused.status.code(), Some(4));
+    let legacy_refused: serde_json::Value = serde_json::from_slice(&legacy_refused.stdout).unwrap();
+    assert!(legacy_refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("1/1 in use"));
+    common::write(&repo.join(".release-legacy"), "release\n");
+    assert!(legacy.wait().unwrap().success());
+}
+
+#[test]
 fn missing_bins_are_silent_at_doors_and_reported_by_doctor() {
     let h = Harness::new();
     let repo = h.repo("repo", "bin=['missing-bin']\n[task.fail]\nrun='exit 2'\n");

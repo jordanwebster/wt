@@ -505,6 +505,19 @@ pub struct LockReport {
     pub path: String,
     pub held: bool,
     pub holder: Option<HolderReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_slots: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holders: Vec<SlotHolderReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SlotHolderReport {
+    pub slot: u16,
+    pub path: String,
+    pub holder: Option<HolderReport>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PruneData {
@@ -1085,6 +1098,9 @@ mod tests {
                     path: "/home/locks/repo/work.lock".to_owned(),
                     held: true,
                     holder: Some(holder()),
+                    held_slots: None,
+                    slots: None,
+                    holders: Vec::new(),
                 }],
             },
         );

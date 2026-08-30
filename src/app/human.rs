@@ -505,19 +505,29 @@ fn render_locks(data: LocksData, _notices: &[Notice]) -> String {
         .locks
         .into_iter()
         .map(|lock| {
-            vec![
-                lock.level.to_string(),
-                lock.name,
-                if lock.held { "held" } else { "free" }.to_owned(),
-                if lock.held {
-                    lock.holder
-                        .map(|holder| format!("{} {}", holder.pid, holder.verb))
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                },
-                lock.path,
-            ]
+            let state = lock.slots.map_or_else(
+                || if lock.held { "held" } else { "free" }.to_owned(),
+                |slots| format!("held {}/{slots}", lock.held_slots.unwrap_or(0)),
+            );
+            let holders = if lock.slots.is_some() {
+                lock.holders
+                    .into_iter()
+                    .map(|slot| {
+                        slot.holder.map_or_else(
+                            || format!("{}:unknown", slot.slot),
+                            |holder| format!("{}:{} {}", slot.slot, holder.pid, holder.verb),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            } else if lock.held {
+                lock.holder
+                    .map(|holder| format!("{} {}", holder.pid, holder.verb))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            vec![lock.level.to_string(), lock.name, state, holders, lock.path]
         })
         .collect::<Vec<_>>();
     table(
