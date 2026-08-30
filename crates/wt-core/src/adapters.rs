@@ -324,7 +324,7 @@ pub fn compose(
                         RelDir::new(&hit.dir)?,
                         Origin::Composite,
                         &Task {
-                            needs: vec![private],
+                            needs: Some(vec![private]),
                             ..Task::default()
                         },
                     );
@@ -379,7 +379,7 @@ pub fn compose(
                 RelDir::new(".")?,
                 Origin::Composite,
                 &Task {
-                    needs,
+                    needs: Some(needs),
                     ..Task::default()
                 },
             );
@@ -396,7 +396,7 @@ pub fn compose(
                 RelDir::new(".")?,
                 Origin::Composite,
                 &Task {
-                    needs: vec![selected.to_owned()],
+                    needs: Some(vec![selected.to_owned()]),
                     ..Task::default()
                 },
             );

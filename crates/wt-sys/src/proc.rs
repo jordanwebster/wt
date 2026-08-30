@@ -377,8 +377,23 @@ pub fn run(
     timeout: Option<Duration>,
     tee: Tee,
 ) -> Result<ProcessOutput> {
+    run_with_header(request, log, None, timeout, tee)
+}
+
+/// Runs a child like [`run`] and writes a header only to the task log.
+pub fn run_with_header(
+    request: &CommandRequest,
+    log: Option<&Path>,
+    log_header: Option<&[u8]>,
+    timeout: Option<Duration>,
+    tee: Tee,
+) -> Result<ProcessOutput> {
     trace_spawn(request)?;
-    let log = log.map(open_log).transpose()?;
+    let mut log = log.map(open_log).transpose()?;
+    if let (Some(file), Some(header)) = (&mut log, log_header) {
+        file.write_all(header)
+            .map_err(io_error("write task log header"))?;
+    }
     let process_group = !std::io::stdin().is_terminal();
     let mut command = build_command(request, process_group);
     command

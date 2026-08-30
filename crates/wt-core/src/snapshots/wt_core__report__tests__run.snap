@@ -12,6 +12,9 @@ expression: envelope
   "data": {
     "target": "repo/work",
     "task": "test",
+    "args": [
+      "test_file.rs"
+    ],
     "child": {
       "code": 0,
       "signal": null

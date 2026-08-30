@@ -96,7 +96,8 @@ pub struct Task {
     pub run: Option<Command>,
     pub exists: Option<Command>,
     pub destroy: Option<Command>,
-    pub needs: Vec<String>,
+    #[serde(serialize_with = "serialize_needs")]
+    pub needs: Option<Vec<String>>,
     pub lock: Option<String>,
     pub name: Option<String>,
     pub tied_to: Option<TiedTo>,
@@ -114,6 +115,13 @@ impl Task {
     pub fn is_resource(&self) -> bool {
         self.destroy.is_some()
     }
+}
+
+fn serialize_needs<S: Serializer>(
+    needs: &Option<Vec<String>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    needs.as_deref().unwrap_or_default().serialize(serializer)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -702,8 +710,28 @@ fn validate_task(
     task: &Task,
     locations: &BTreeMap<String, SourceLocation>,
 ) -> Result<(), CoreError> {
+    if task.run.is_none() && task.destroy.is_none() && task.needs.is_none() {
+        return Err(invalid("a task needs run, destroy, or needs"));
+    }
     if task.run.is_none() && task.destroy.is_none() {
-        return Err(invalid("a task needs run or destroy"));
+        let inert_key = [
+            (task.lock.is_some(), "lock"),
+            (!task.env.is_empty(), "env"),
+            (task.cwd.is_some(), "cwd"),
+            (task.exists.is_some(), "exists"),
+            (task.timeout.is_some(), "timeout"),
+            (task.ready_within.is_some(), "ready_within"),
+            (task.name.is_some(), "name"),
+            (task.tied_to.is_some(), "tied_to"),
+            (!task.snapshot_env.is_empty(), "snapshot_env"),
+        ]
+        .into_iter()
+        .find_map(|(present, key)| present.then_some(key));
+        if let Some(key) = inert_key {
+            return Err(invalid(format!(
+                "aggregate task `{id}` key `{key}` would guard nothing; put `{key}` on a task that runs"
+            )));
+        }
     }
     if task.destroy.is_some() && (task.exists.is_none() || task.tied_to.is_none()) {
         return Err(invalid("a resource needs exists and tied_to"));
@@ -955,7 +983,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(app.ports[0].as_str(), "metro");
-        assert_eq!(app.root.task["ios"].value().unwrap().needs, ["orbit-src"]);
+        assert_eq!(
+            app.root.task["ios"].value().unwrap().needs,
+            Some(vec!["orbit-src".to_owned()])
+        );
         validate_resolved(&app, 16).unwrap();
 
         let cloud = parse(
@@ -1030,6 +1061,34 @@ mod tests {
     fn validation_rejects_resource_without_probe_or_scope() {
         let error = parse("[task.db]\ndestroy='drop'", "x").unwrap_err();
         assert_eq!(error.code.0, "CONFIG_INVALID");
+    }
+
+    #[test]
+    fn section_5_6_aggregate_validation_accepts_needs_only_and_refuses_inert_keys() {
+        assert!(parse("[task.setup]\nneeds=[]\ndescription='all setup steps'", "x").is_ok());
+        assert!(parse("[task.empty]\ndescription='not enough'", "x")
+            .unwrap_err()
+            .message
+            .contains("run, destroy, or needs"));
+
+        for (key, value) in [
+            ("lock", "'serial'"),
+            ("env", "{ A = 'value' }"),
+            ("cwd", "'sub'"),
+            ("exists", "'true'"),
+            ("timeout", "'1s'"),
+            ("ready_within", "'1s'"),
+            ("name", "'aggregate'"),
+            ("tied_to", "'tree'"),
+            ("snapshot_env", "['TOKEN']"),
+        ] {
+            let source = format!("[task.setup]\nneeds=['leaf']\n{key}={value}");
+            let error = parse(&source, "x").unwrap_err();
+            assert_eq!(error.code.0, "CONFIG_INVALID");
+            assert!(error.message.contains(&format!("key `{key}`")));
+            assert!(error.message.contains("would guard nothing"));
+            assert!(error.message.contains("task that runs"));
+        }
     }
 
     #[test]

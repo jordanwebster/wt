@@ -8,13 +8,17 @@ pub(crate) fn run(context: &mut Context, args: Run) -> Result<Output, CoreError>
     let door = door::enter(context, args.target.as_deref(), "run")?;
     let notices = door.notices.clone();
     let plan = executor::plan(context, &door, &args.task)?;
+    let args_target = executor::validate_args(&plan, &args.args)?;
     if args.dry_run {
-        return Ok(Output::data(executor::dry_run(&plan))?.with_notices(notices));
+        return Ok(Output::data(executor::dry_run(&plan, &args.args))?.with_notices(notices));
     }
     let execution = executor::execute_plan(
         context,
         &door,
         &plan,
+        args_target
+            .as_deref()
+            .map(|target| (target, args.args.as_slice())),
         args.timeout.as_deref(),
         args.wait.as_deref(),
         args.no_log,

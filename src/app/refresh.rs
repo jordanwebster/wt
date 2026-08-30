@@ -34,7 +34,7 @@ pub(crate) fn run(context: &mut Context, args: ResourceAction) -> Result<Output,
         .map(|record| format!("{:?}", record.state).to_ascii_lowercase())
         .unwrap_or_else(|| "declared".to_owned());
     let _ = executor::destroy_resource(context, &door, key, false)?;
-    let result = executor::execute_plan(context, &door, &plan, None, None, false)?;
+    let result = executor::execute_plan(context, &door, &plan, None, None, None, false)?;
     let after = context
         .read_state(&door.target)?
         .and_then(|state| {

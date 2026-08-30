@@ -724,3 +724,153 @@ is not reopened: these are spellings of approved verbs, not new verbs. The
 unknown-subcommand allowlist accepts them, so neither reaches the
 nearest-name tip — which, ranking by edit distance alone, answered `rm` with
 `fmt, run, env` and never suggested `remove`.
+
+## A56. Scope is a named axis: tree, repo, machine
+
+Every fact wt holds has exactly one scope — tree, repo, or machine — and the
+scope decides where the fact is declared, where its state lives, which
+variables its snapshots may carry, and what tears it down. Tree and repo scope
+exist today (`tied_to`, per-tree state files, `_repo.json`, the tree-variable
+stripping rule); machine scope exists implicitly in settings (geometry,
+agents, the session backend, lock waits) but nothing declarative can name it.
+A57–A63 extend existing mechanisms along this axis rather than adding parallel
+ones: capacity for a named lock is a machine fact expressed through the
+ordinary layer merge (A59), an exclusive resource occupies one slot of a wider
+arena (A60), and a machine-tied task is a resource whose arena is the host
+(A61). The stripping rule generalises: a repo-scoped snapshot carries no
+tree-specific keys (A28); a machine-scoped snapshot additionally carries no
+repo-specific keys (`WT_LABEL`, `WT_REPO`, and the `label()` / `repo()`
+functions). Rationale: three consumer requests — lock capacity, exclusive
+holders, machine-scoped onboarding — are one missing concept; naming the axis
+once keeps them one family with one vocabulary.
+
+## A57. A task may be only an aggregate
+
+A task must declare one of `run`, `destroy`, or `needs`; a task with none
+remains `CONFIG_INVALID`. A task with `needs` and neither `run` nor `destroy`
+is an aggregate: running it runs its needs, in plan order, and nothing else —
+the same node shape §6.2 already builds for root composites. An aggregate
+accepts `needs` and `description` only; `lock`, `env`, `cwd`, `exists`,
+`timeout` or `ready_within` on one is `CONFIG_INVALID` with a message saying
+the key would guard nothing and belongs on a task that runs. Rationale: the
+old rule forbade users from writing what wt writes for itself, and the workaround
+(`run = "true"`) is noise in the one file most worth reading as
+documentation. Named entry points — `wt run setup` for onboarding,
+`wt run check` for grouped verification — are the shapes that want it.
+
+## A58. `wt run` accepts trailing arguments
+
+`wt run <task> [target] -- <args…>` (and the `test`/`lint`/`fmt`/`build`
+aliases) resolves exactly one argument target by traversing from the invoked
+root. A node with a `run` recipe is the target. A wt-composed run-less node is
+transparent when it has exactly one need, preserving the ergonomic meaning of
+an alias or a single-adapter root; with two or more needs it refuses with
+`ARGS_ON_COMPOSITE` (2), naming its direct constituent task ids so the caller
+can choose one. A user-declared aggregate (A57) refuses with that error
+regardless of fan-out, naming its needs, because adding one declared need must
+not silently redirect arguments. A resource reached anywhere refuses with
+`ARGS_UNSUPPORTED`: its `run` is a state transition replayed from snapshots,
+not a parameterised invocation. Only the resolved recipe receives `<args…>`;
+nodes run before it never do. An argv recipe receives them appended
+element-wise. A shell-string recipe receives them as positional parameters —
+the recipe writes `"$@"` where they belong — preserving A44: the string is
+never touched. A shell-string recipe that receives args but whose text
+contains none of `$@`, `$*`, `${@`, `${*` or `$<digit>` is refused with
+`ARGS_UNSUPPORTED` (2) naming the fix; the scan is lexical, and a `"$@"`
+inside a comment satisfying it is an accepted residual. Args appear in the
+log header, in `--dry-run`, and in `run --json` data; the usage error for args
+given without `--` names `--`. Rationale: "run the declared task, but only this
+file" is the most common agent invocation;
+without it agents fall back to `wt exec` and lose the lock, the log, the
+needs chain and the task `cwd`. Loud refusal beats guessing where arguments
+belong in a multi-command recipe or a fan-out composite.
+
+## A59. A named lock has capacity
+
+A new root-only configuration key `locks."<name>"` with fields
+`slots` (integer ≥ 1, default 1) and `wait` (Duration, default
+`task.lock_wait`) sizes a named lock. The key flows through the ordinary
+layer merge, so a repository may suggest a capacity and the user's
+`[repos.<label>]` overrides it: capacity is a machine fact and the machine's
+owner has the last word, by the merge rule that already exists rather than a
+bespoke one. Acquisition takes any one of the N slot files, trying each in
+order and polling within the deadline; `LOCK_HELD` reports occupancy
+("4/4 in use"), the holders, and the remedy (`--wait`, or raising `slots`).
+`wt locks` shows `held n/N` and per-slot holders. Lock level 4 and
+`lock_plan` are unchanged; a lock with no `locks` entry has one slot and
+behaves exactly as today. Rationale: "at most N concurrent" is the correct
+policy for machine-wide weight — N test containers in a fixed-size VM — and
+both previously available options were wrong: no lock exhausts the machine
+and a mutex serialises a fleet to one.
+
+## A60. An exclusive resource occupies one slot of a wider arena
+
+A tree-tied resource may declare `exclusive = "repo"` or (with A61)
+`exclusive = "machine"`: at most one tree holds an instance at a time,
+recorded as `holder {tree, since}` in the arena's state file. Enforcement is
+matched to the failure mode, which is silent cross-tree collateral: a
+non-holder's record never leaves `declared` — it is neither probed nor
+destroyed — so `remove` of a non-holder cannot tear down the holder's
+instance, and a non-holder's `run` cannot mistake the holder's instance for
+its own. `run` from a non-holder refuses `RESOURCE_HELD` (4) naming the
+holder; `wt run <r> --take` destroys the holder's record through its frozen
+instance, clears the holder, claims it, proceeds as itself, and prints what
+it displaced. `--take` never prompts: displacing a declared-reproducible
+resource is not loss (A54) and the flag carries the consent, on the same
+axis as `--force`. When no holder is recorded and a probe finds the resource
+present, the probing tree becomes the holder with `external = true` — the
+first-probe-freezes rule unchanged. The holder is cleared by teardown of the
+holder's record, by `destroy`/`refresh`, and by a confirmed-absent probe
+(`RESOURCE_GONE`). The repo-tied tree-variable restriction is untouched: the
+gap was a missing concept, not a wrong restriction. Rationale: "one dev
+server; retarget it to my tree and tell me who I bumped" was previously
+expressible only through configurations that failed silently, and the
+consent gate cannot be built inside a recipe.
+
+## A61. Machine-tied tasks and resources
+
+`tied_to = "machine"` declares a task or resource whose arena is the host:
+docker running, an authenticated CLI, a base database every repository
+shares. Records live in `$WT_HOME/state/_machine.json`, keyed by
+`ScopedTask` exactly as `_repo.json` is; two labels declaring the same
+scoped task share the record. Declarations are stripped of tree- and
+repo-specific keys (A56), and the invoking context's stripped declaration is
+effective until an instance is frozen — exactly as A31 reads A28 for repo
+scope, with no cross-repo agreement mechanism. Machine-tied templates and
+recipes may reference neither tree-specific nor repo-specific keys
+(validated as the repo-tied rule is today). Machine records are never
+touched by `remove` or `unregister`; only `wt destroy` and `wt refresh` act
+on them, with their unconditional prompt. No new address form is introduced:
+a machine task is declared in `.wt.toml` or `[repos.<label>]` like any other
+and referenced from `needs` by name. Rationale: the resource model is
+executable onboarding — `exists` is "is this set up?", `run` sets it up, and
+the never-prompt-off-a-TTY rule gives an agent a clean failure with a
+remedy — but the steps are machine facts; declaring them repo-tied
+duplicates and re-probes them per label and gives `unregister` the wrong
+semantics.
+
+## A62. A session outlives its agent
+
+wt wraps an agent's `start`/`resume` command so that the pane's process is
+the agent and, when the agent exits, the pane becomes the same interactive
+shell `wt shell` would start, with the same assembled environment. There is
+no `send-keys`, no timing window, and no setting: A34 is preserved (an agent
+starts only when wt creates a session), tmux remains the session's liveness
+truth (A24), and a session whose agent has ended is A33's statement
+continued — a session without an agent is a shell. A dead agent therefore
+leaves a prompt in the right directory instead of a vanished session, and
+`wt open` remains idempotent. Rationale: agents crash and exit; recreating
+their context is the cost the session existed to avoid.
+
+## A63. A tree carries user metadata
+
+`TreeRec` gains `meta`, a string map (keys matching `[a-z_][a-z0-9_]*`,
+values at most 1024 bytes), set at creation with `wt new --meta k=v`
+(repeatable) and edited with `wt meta <target> k=v` (`k=` unsets); shown by
+`status` and carried in `list --json` and `status --json`. Keys are opaque
+to wt: they are not readable from templates and nothing in wt's behaviour
+depends on them. Rationale: teams hang external identity — a ticket — on a
+tree, and the registry defines the fleet (A36), so fleet metadata belongs in
+it rather than in a side registry; but only as data, because a
+template-readable key would create an unset-key failure mode nothing needs
+yet.

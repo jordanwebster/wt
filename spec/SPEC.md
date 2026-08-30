@@ -1,7 +1,7 @@
 # wt — specification
 Normative specification for the clean re-implementation of `wt`. Read
 with `problem-statement.md` (requirements R1–R13) and
-`requirements-addendum.md` (binding decisions A1–A31);
+`requirements-addendum.md` (binding decisions A1–A63);
 `acceptance/*.wt.toml` are three representative configurations the
 implementation must accept unchanged.
 
@@ -43,6 +43,9 @@ A door on a `ready` tree (`wt exec`, the common agent call) performs **at most**
 6. Nothing happens outside a door (A2). Ecosystem knowledge is data (§6).
 7. Everything needed to tear a tree down lives under `$WT_HOME`; teardown never runs a recipe that names a tree binary after the tree is gone (A18, A25).
 8. Consent precedes mutation in destructive verbs (R9, §11.4).
+9. Scope is a named axis (A56): every fact has one scope — tree, repo, or
+   machine — deciding where it is declared, where its state lives, which
+   variables its snapshots carry, and what tears it down.
 
 ## 2. Concepts
 | Concept | Definition | Identity | State owner |
@@ -141,6 +144,10 @@ Task    := { run?: Cmd, exists?: Cmd, destroy?: Cmd, needs?: [ScopedTask|Private
 Cmd     := String | [String]          // `sh -c`: NEVER templated, every character is the shell's | argv: each element templated
 Template:= String                      // ${name} reads a var, ${ports.n} a declared port; ${fn()} calls; $$ is a literal $; `$` before a non-name character is literal
 ```
+Every task declares at least one of `run`, `destroy`, or `needs`. A task with
+`needs` and neither `run` nor `destroy` is an aggregate and accepts only
+`needs` and `description`; any other task key would guard nothing and belongs
+on a task that runs (A57).
 `false` deletes an inherited map entry; in the map form of `commands`, `true`
 claims a name and `false` deletes an inherited claim. The array form remains the
 compact declaration form. The three acceptance files (§16) are restated in
@@ -196,7 +203,7 @@ Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ bas
 ### 5.6 Validation: static vs late-bound
 | Check | When | Error |
 |---|---|---|
-| grammar, unknown keys, identifiers, lexical paths (§5.7), durations, modes, template syntax; every `${…}` names a declared `vars` key or a permitted function with a declared port argument (§5.2); `destroy ⇒ exists ∧ tied_to`; `ready_within ⇒ exists`; `run ∨ destroy`; one of `content`/`source`; port names unique; `ports.len() ≤ stride`; `commands` entries unique and basenames; a `copy` entry that is also a `files` key | parse/validate | `CONFIG_INVALID` (5) with `path:line:col` |
+| grammar, unknown keys, identifiers, lexical paths (§5.7), durations, modes, template syntax; every `${…}` names a declared `vars` key or a permitted function with a declared port argument (§5.2); `destroy ⇒ exists ∧ tied_to`; `ready_within ⇒ exists`; `run ∨ destroy ∨ needs`; an aggregate carries only `needs` and `description`; one of `content`/`source`; port names unique; `ports.len() ≤ stride`; `commands` entries unique and basenames; a `copy` entry that is also a `files` key | parse/validate | `CONFIG_INVALID` (5) with `path:line:col` |
 | `vars` DAG acyclic and fully resolvable within the effective scope → `VARS_CYCLE` / `VARS_UNKNOWN` naming every key involved; `${NAME}` in a task `env` map naming another key of the same map → `TASK_ENV_SELF_REFERENCE` | resolve | `CONFIG_INVALID` |
 | `needs` resolvable/acyclic; `tied_to = repo` templates reference no tree-specific key (§5.5) | resolve | `CONFIG_INVALID` |
 | `bin`/`cwd` existence, `source` readability | door (`bin`: doctor, A50) | `BIN_DIR_MISSING` (doctor finding), `CWD_MISSING` (5), `FILE_SOURCE_MISSING` (5) |
@@ -216,7 +223,7 @@ Selection per scanned dir: user/repo `adapters.<id>.tool` > lockfile > sniff > `
 |---|---|---|---|---|---|---|---|
 | cargo/cargo | `Cargo.toml` | `cargo fetch` | `cargo build --all-targets` | `cargo test` | `cargo clippy --all-targets -- -D warnings` | `cargo fmt` | `Cargo.lock`, `Cargo.toml` |
 | cargo/cargo-nightly-fmt | `rustfmt.toml`/`.rustfmt.toml` parsed as TOML with top-level `unstable_features`/`group_imports`/`imports_granularity` | same | same | same | same | `cargo +nightly fmt` | same |
-| node/npm | `package-lock.json`/`npm-shrinkwrap.json`; default with `NO_LOCKFILE` (then `npm install`) | `npm ci` | `npm run build`† | `npm test` | `npm run lint`† | `npm run format`† | lockfile, `package.json` |
+| node/npm | `package-lock.json`/`npm-shrinkwrap.json`; default with `NO_LOCKFILE` (then `npm install`) | `npm ci` | `npm run build`† | `npm test` (args: `npm test -- "$@"`) | `npm run lint`† | `npm run format`† | lockfile, `package.json` |
 | node/pnpm | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` | † | † | † | † | idem |
 | node/yarn | `yarn.lock` | `yarn install --immutable` (`.yarnrc.yml`) / `--frozen-lockfile` | † | † | † | † | idem |
 | node/bun | `bun.lock(b)` | `bun install --frozen-lockfile` | † | † | † | † | idem |
@@ -230,7 +237,7 @@ Selection per scanned dir: user/repo `adapters.<id>.tool` > lockfile > sniff > `
 † only when `package.json` declares the script. Nudges: `node: if npm → pnpm`; `python: if pip|poetry → uv`; `cargo: sccache, used_if_env = ["RUSTC_WRAPPER=sccache"]`; doctor evaluates `used_if_env` against the effective door env → `ACCELERATOR_INACTIVE` (warn) / `ACCELERATOR_AVAILABLE` / `ACCELERATOR_MISSING` (info); never applied (R7). R7 mechanisms applied: worktree object sharing and `wt list --disk`. **Adapters own per-ecosystem cheapness (A46, A53)** and express it as ordinary layer-0 configuration. Both cargo tools set `CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}"`, sharing intermediates per repository while leaving `CARGO_TARGET_DIR` unset so each tree owns its binaries under its own `target/` (§9.2a). pnpm uses its content-addressed store and uv its global cache. Repository and user `env` layers override the cargo value by the ordinary merge rule, and the door reports inherited values it displaces. An adapter *may* contribute `commands`, and the merge and delete rules treat such a contribution like any other layer-0 key; no built-in adapter declares any today, because the names live in a manifest rather than in the static catalog, so a repository declares its own. `wt` is never a legal claim (§5.6): a name that refuses until built would make `wt build` unrunnable.
 
 ### 6.2 Composition and private ids
-Every adapter hit at scope `d` contributes private nodes `@<adapter>/<tool>@<d>/<k>` (`cwd = d`, origin `adapter`), never overridden by layers, addressable by `needs` and `wt tasks --private`. Public: at a non-root scope `d`, `d/k` is the layer task if declared there, else an alias of the private node; at root, `k` is the layer task if declared at root, else the composite `{ needs: [@submodules/git@./k?, @<root adapter>@./k?, d1/k, d2/k …] }` over sorted scopes with an effective `d/k`; an empty composite does not exist. `verify` = `test` else `build` else absent (`NO_VERIFY`). orbitcloud before the repo layer: `sync` = composite over `@dotnet/dotnet@./sync`, `frontend/sync`, `website/sync`; after `[task.sync]`, `sync` is the repo task and all others remain addressable.
+Every adapter hit at scope `d` contributes private nodes `@<adapter>/<tool>@<d>/<k>` (`cwd = d`, origin `adapter`), never overridden by layers, addressable by `needs` and `wt tasks --private`. Public: at a non-root scope `d`, `d/k` is the layer task if declared there, else an alias of the private node; at root, `k` is the layer task if declared at root, else the composite `{ needs: [@submodules/git@./k?, @<root adapter>@./k?, d1/k, d2/k …] }` over sorted scopes with an effective `d/k`; an empty composite does not exist. A user-declared needs-only task is the same composite node shape, retaining its layer origin (A57). `verify` = `test` else `build` else absent (`NO_VERIFY`). orbitcloud before the repo layer: `sync` = composite over `@dotnet/dotnet@./sync`, `frontend/sync`, `website/sync`; after `[task.sync]`, `sync` is the repo task and all others remain addressable.
 
 ## 7. Coordinates: allocation, inheritance, ports
 Allocation happens inside the reserving registry transaction of `new`/`register`/`adopt` (§11):
@@ -377,13 +384,33 @@ Probe    := Present(0) | Absent(1) | Failed{exit(n≥2)|timeout|spawn}
             // talking to infrastructure should begin with a reachability test that exits 2 (A31; orbitcloud does)
 lock_plan(node, held) -> ascending [ Tree(shared) unless held, RepoGit if "RepoGit" ∈ sys_locks, Resource(key) if resource, Named(node.lock) if lock ]   // levels 1–4; the sole acquisition authority; 5/6 are leaf RMWs inside steps
 ```
-`wt run <task> [target] [--wait d|forever] [--timeout d] [--dry-run] [--no-log]` (aliases `test lint fmt build`; `sync` is §11.3; `destroy`/`refresh` drive §10.4):
+`wt run <task> [target] [--wait d|forever] [--timeout d] [--dry-run]
+[--no-log] [-- <args…>]` (aliases `test lint fmt build`; `sync` is §11.3;
+`destroy`/`refresh` drive §10.4). Trailing arguments are resolved and validated
+before X1, and before `--dry-run` prints its plan. Starting at the invoked root,
+a node with a `run` recipe is the resolved argument target. Arguments reach
+only that recipe; nodes that run before it never receive them. An argv recipe
+appends them element-wise after templating. A shell-string recipe is unchanged
+and is spawned as `sh -c <recipe> <task-id> <args…>`, so the recipe places them
+through positional parameters. With arguments present, a lexical scan must
+find `$@`, `$*`, `${@`, `${*`, or `$<digit>` in the shell text, else
+`ARGS_UNSUPPORTED` (2) names `"$@"` as the fix; a match in a comment is an
+accepted residual. A wt-composed run-less node is transparent through an
+exactly-one-need chain, so `wt test -- -k foo` in a single-adapter repository
+reaches the adapter recipe. A fan-out of two or more refuses with
+`ARGS_ON_COMPOSITE` (2), naming the node's direct constituent tasks. A
+user-declared aggregate (A57) refuses with `ARGS_ON_COMPOSITE` regardless of
+fan-out, naming its needs. A resource reached anywhere in the traversal
+refuses with `ARGS_UNSUPPORTED` because its `run` is a state transition
+replayed from snapshots, not a parameterised invocation. Arguments appear in
+the log header, in `--dry-run`, and in `run --json` data; giving them without
+`--` produces a usage error that names `--` (A58).
 
 | Step | Action | Lock |
 |---|---|---|
 | X0 | door D0–D6 (§9.1) | 1,5,6 |
 | X1 | for each node in plan order: `assemble` with `contributed` = resources currently `present`; acquire `lock_plan(node, held)` in order | per plan |
-| X2 | resource node: refresh its declaration (§10.5) then `resource::step` with event `Run` (§10.4). Task node: `exists` → Present: "present", skip; Failed: `TASK_PROBE_FAILED` (6), stop; then spawn `run` (cwd `node.cwd`) through the `run` parent (§9.2); non-zero → "failed", stop | — |
+| X2 | resource node: refresh its declaration (§10.5) then `resource::step` with event `Run` (§10.4). Task node: `exists` → Present: "present", skip; Failed: `TASK_PROBE_FAILED` (6), stop; then spawn `run` (cwd `node.cwd`) through the `run` parent (§9.2), with trailing arguments only when this is the resolved argument target; non-zero → "failed", stop | — |
 | X3 | release the node's guards in reverse order; continue | — |
 
 Output is tee'd to `<tree>/.wt/logs/<ScopeEnc>-<task>-<utc>.log`; before writing a new log, logs of the same `(scope, task)` beyond the newest `logs.keep − 1` are deleted (§12). `--dry-run` prints the plan with `lock_plan` output and executes nothing; task env ends with its node.
@@ -618,7 +645,7 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 | `wt sync [target] [--force]` | yes | §11.3 |
 | `wt list [label] [--probe] [--fast] [--disk]`, `wt status [target] [--probe]` ★ | — | §12 |
 | `wt prune [label] [--yes] [--merged] [--gone] [--records T]` | yes | §12 |
-| `wt run <task> [target] …` (aliases `test lint fmt build`); `wt destroy <ScopedTask> [target]`, `wt refresh <ScopedTask> [target]` | per task / per §10.4 | §10.1, §10.4 |
+| `wt run <task> [target] … [-- <args…>]` (aliases `test lint fmt build`); `wt destroy <ScopedTask> [target]`, `wt refresh <ScopedTask> [target]` | per task / per §10.4 | §10.1, §10.4 |
 | `wt exec [target] [--no-gate] -- <cmd…>` | — | §9.1–9.2; `--help`: "passthrough door; not a task (see `wt run`); no `--json` (A20)" |
 | `wt shell [target]` | — | §9.3 |
 | `wt env [target] …` | — | §8.5 |
@@ -683,7 +710,7 @@ shapes — open, closed, and failed — even though `open` emits open/failed and
 | `new` / `adopt` | `{ tree, created, resumed, sync: StepRep[]|null, verify: {ok, steps: StepRep[]}|null }` / `{ tree, adopted, resumed }` |
 | `remove` | `{ target, removed, destroyed: [ {scope, task, state, child|null} ], orphans_kept: [ScopedTask], branch_deleted, branch_kept: string|null, session_closed }` |
 | `sync` | `{ target, ran, steps: StepRep[], inputs: [ {path, hash} ] }` |
-| `run` | `{ target, task, child|null, log|null, steps: StepRep[] }`; `--dry-run`: `{ task, steps: [ {id, scope, origin, cwd, run, exists, lock, sys_locks, resource, tied_to} ] }` |
+| `run` | `{ target, task, args: [String], child|null, log|null, steps: StepRep[] }`; `--dry-run`: `{ task, args: [String], steps: [ {id, scope, origin, cwd, run, exists, lock, sys_locks, resource, tied_to} ] }` |
 | `destroy` / `refresh` | `{ target, scope, task, before, after, child|null }` |
 | `open` (non-attaching) / `close` | shared `{ sessions: [ {target, name, created, existing, agent|null, foreground} | {target, session, closed} | {target, name, failed:true, code, message, remedy} ] }`; `open` emits open/failed, `close` emits closed, and only `open --all` may return `ok:false` with this data retained |
 | `env` | `{ target, set, overrode, restored, missing_bins, rendered, bins: [ {dir, exists, executables} ], ports: [ {name, port} ], env: Map, activation: Activation }` |
@@ -703,7 +730,7 @@ Redaction: environment values appear only in `env` output; `ResourceSnapshot.env
 | `Tree.ports` | recorded index (semantic) |
 | `Tree.sync.changed`, `Tree.sync.drift`, `sync.inputs`, `register.declared.*`, `env.*` string arrays, `unregister.artifacts`, `env.bins[].executables` | lexical |
 | `*.steps`, `tasks.tasks`, `run --dry-run.steps` | plan order (topological, ties `(scope, id)`) / `(scope, id)` |
-| `tasks.tasks[].needs`, `prune.items[].reasons`, arrays inside `config.entries[].value` | declaration order (semantic) |
+| `tasks.tasks[].needs`, `run.args`, `run --dry-run.args`, `prune.items[].reasons`, arrays inside `config.entries[].value` | declaration/invocation order (semantic) |
 | `notices` / `doctor.findings` | `(level: warn, info; code; subject; message)` / `(severity: error, warn, info; code; subject)` |
 | `open.sessions`, `prune.items` / `list.locks`, `locks.locks` / `config.entries` / `*.config_errors` | `(target)` / `(level, name)` / `(key, scope, layer precedence)` / `(path, line, col, message)` |
 | any other array | sorted lexically by canonical JSON of its elements |
@@ -760,11 +787,13 @@ Levels **U** (wt-core), **I** (wt-sys/app on temp repos with shims: tmux, docker
 | Area (owner) | Proof | Level |
 |---|---|---|
 | §0 | a `wt exec` on a ready tree: subprocess tracer shows ≤ 1 git query (plus `ls-files` on the first render only); no bind; no state write when nothing changed; two flocks; §13.3: each subprocess class with a sleeping shim hits its deadline, lock waits bounded, `list` in a non-ready phase never blocks a concurrent verb | I |
+| §5.6, §6.2 (A57) | a needs-only aggregate is valid, runs its needs in plan order, spawns nothing itself, and exits 0; every inert task key is refused by `CONFIG_INVALID` naming the key and that it belongs on a task that runs | U, C |
 | §8.1–8.4 | proptest over marker-free parents (incl. pre-set `WT_*`, PATH variants, pre-set aliases, force, task env, two trees) asserting L1, L2 and "effect ⊆ applied keys"; a corrupted marker → `ACTIVATION_IGNORED` and the door proceeds; a user-edited tool-set key is replaced by the next door; `--deactivate --sh` evaluated restores the parent | U, C |
 | §8.3 | edited bytes with header+record → `RENDER_ONTO_USER_FILE`; a tracked path → `RENDER_ONTO_TRACKED` at first render and after `sync`; `render.write` failpoint → next door reports row 5 with the `rm` remedy | I |
 | §9.1–9.2 | env identical across `env --dotenv`, `exec -- env`, `run` node, probe shell at spawn, tmux probe agent; door file names the exec'd child's pid; `remove` during `exec -- sleep` → `TREE_IN_USE` naming it; fd-closing child releases the lock (documented residual); `--no-gate` outside `$TMUX` → `NO_GATE_REFUSED`; an owned command refuses before its build and execs the tree's binary after it, in one persistent shell (§9.2a); adversarial `run` children (partial JSON, no newline, 10 MB, invalid UTF-8, signal death) → one envelope; passthrough refusals (§9.3) | I, C |
 | §9.4 + §11.4 step 5 | attached `open` then `remove --yes` → session killed, lock acquired, removal completes; a `wt shell` in the tree → `TREE_IN_USE` naming the shell; two concurrent `open`s → one session | I |
 | §10.1 | `lock_plan` order asserted by a lock-order tracer (out-of-order acquisition panics in test builds); task env not contributed; present resource env contributed; log retention keeps 20 per task | I |
+| §10.1, §14.1, §14.4 (A58) | argv arguments append after templating and shell arguments appear at `"$@"`, only on the resolved target; an adapter-composed root forwards to the single adapter recipe; a two-scope composite refuses and names the public scoped tasks; a user aggregate refuses regardless of fan-out; no-parameter shell and resource refusals have their specified usage codes and remedies; absent arguments preserve behaviour; aliases accept `--`; log header, dry-run, and JSON carry the exact argument vector; arguments without `--` name the delimiter | C |
 | §10.3 | snapshot env = exactly the minimised set (never `WT_ACTIVATION`; parent keys only via `snapshot_env`); teardown env = invoker's env overlaid; A25 scans only the recipe about to run; files 0600 under umask 000; repo-tied env has no tree-specific key; orbit daemon after `rm -rf`: `prune` → `orphaned(exe_missing)`, installed `orbit` never invoked; a recipe without tree words runs with bins removed from PATH; canonical root gone → `repo_root_missing` | I |
 | §10.4 | pgdata sequence (declared → run notice → external present → refresh → declared → remove drops absent/destroys present); probe exit 2 → never runs/destroys, teardown → orphaned; `resource.frozen` failpoint → next `run` probes and settles; destroy failure → orphaned, others attempted; declaration deleted after creation → still destroyed from the instance; sibling-scope same-named resources distinct | I, C |
 | §10.5 | instance frozen after `needs`, later config edit does not change it; no refresh on a plain door; repo-tied: the invoking tree's stripped declaration is used until an instance exists, then the instance governs | I, C |
@@ -776,7 +805,7 @@ Levels **U** (wt-core), **I** (wt-sys/app on temp repos with shims: tmux, docker
 | §4.1–4.4 | invariants incl. path uniqueness and no live/tombstone coexistence; `register` twice same label → `registered: false`; other label → `PATH_REGISTERED`; store crash at the rename boundary leaves the old file; `HOME_OLD_FORMAT` before any write; `TREE_REPLACED` on every verb for a replaced directory; `STATE_ORPHAN` collected by `prune` | U, I, C |
 | §12 | `list` reports `drift` when the default branch changed a sync input; `prune` tombstone collection; `prune --records` on `missing`/`replaced`/`remove-interrupted` never touches the directory (spawn tracer: no cwd or PATH inside it); non-TTY `prune` without `--yes` → exit 0, `applied: false`; `NO_COORDINATION` for a config without ports/env/resources; `close` idempotent JSON | I, C |
 | §14.4–14.5 | every verb's `--json` validates; ordering on raw output (a test walks the schema for unlisted arrays); bytes compared after normalisation; §14.6: `wtcd`/`wtsh` and the PATH guard in zsh, bash, fish (fish sourced twice with a shim-plus-two-bin `WT_PATH_PREFIX`: restored once, PATH does not grow) | C |
-| R1–R13, A1–A31 | R12/A2: filesystem allowlist snapshot around `new` + doors (only `<tree>`, `<tree>/.wt`, declared materialisations, `$WT_HOME`, `<commondir>/{info/exclude,worktrees/*,refs/wt/*,FETCH_HEAD,objects/*}`), `git status` clean, tracked bytes unchanged, `unregister` leaves the checkout clean or reports `ARTIFACT_KEPT`; each requirement maps to the rows above by its owning section; A9: the three inputs parse byte-for-byte; golden `tasks --json`; orbitcloud recipes run verbatim against the docker shim asserting the path hash and the exit-2 reachability guard | U, I, C |
+| R1–R13, A1–A63 | R12/A2: filesystem allowlist snapshot around `new` + doors (only `<tree>`, `<tree>/.wt`, declared materialisations, `$WT_HOME`, `<commondir>/{info/exclude,worktrees/*,refs/wt/*,FETCH_HEAD,objects/*}`), `git status` clean, tracked bytes unchanged, `unregister` leaves the checkout clean or reports `ARTIFACT_KEPT`; each requirement maps to the rows above by its owning section; A9: the three inputs parse byte-for-byte; golden `tasks --json`; orbitcloud recipes run verbatim against the docker shim asserting the path hash and the exit-2 reachability guard | U, I, C |
 
 ## 18. Decisions, exclusions, implementer's choices
 | Decision | One-line reason |

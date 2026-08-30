@@ -431,6 +431,359 @@ fn aliases_use_the_run_task_set() {
 }
 
 #[test]
+fn section_6_2_aggregate_task_runs_needs_in_plan_order() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        r#"
+[task.first]
+run='printf first >> "$WT_ROOT/.aggregate-order"'
+[task.second]
+run='printf second >> "$WT_ROOT/.aggregate-order"'
+needs=['first']
+[task.setup]
+needs=['second']
+description='run all setup steps'
+"#,
+    );
+    h.register(&repo);
+
+    let result = h.json(&["run", "setup", "repo"]);
+    assert_eq!(
+        result["data"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["first", "second", "setup"]
+    );
+    assert_eq!(result["data"]["steps"][2]["status"], "skipped");
+    assert_eq!(result["data"]["steps"][2]["child"], serde_json::Value::Null);
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".aggregate-order")).unwrap(),
+        "firstsecond"
+    );
+    let tasks = h.json(&["tasks", "repo"]);
+    let setup = tasks["data"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "setup")
+        .unwrap();
+    assert_eq!(setup["origin"], "repo");
+}
+
+#[test]
+fn section_5_6_aggregate_inert_key_refusal_names_key() {
+    let h = Harness::new();
+    let repo = h.repo("repo", "[task.setup]\nneeds=[]\nlock='serial'\n");
+    h.wt()
+        .args(["register", repo.to_str().unwrap()])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("CONFIG_INVALID"))
+        .stderr(predicate::str::contains("key `lock`"))
+        .stderr(predicate::str::contains("would guard nothing"))
+        .stderr(predicate::str::contains("task that runs"));
+}
+
+#[test]
+fn section_10_1_trailing_args_append_to_argv_root_only_and_are_reported() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo(
+        "repo",
+        r#"
+[task.dependency]
+run=['${root()}/record-args', 'dependency', 'declared']
+[task.argv]
+run=['${root()}/record-args', 'root', 'base']
+needs=['dependency']
+[task.test]
+run=['${root()}/record-args', 'alias', 'declared']
+"#,
+    );
+    common::write_executable(
+        &repo.join("record-args"),
+        r#"#!/bin/sh
+label=$1
+shift
+printf '%s:' "$label" >> "$WT_ROOT/.recorded-args"
+for arg in "$@"; do printf '<%s>' "$arg" >> "$WT_ROOT/.recorded-args"; done
+printf '\n' >> "$WT_ROOT/.recorded-args"
+"#,
+    );
+    h.register(&repo);
+
+    let output = h
+        .wt()
+        .args(["run", "argv", "repo", "--json", "--", "a b", "*.rs"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["args"], serde_json::json!(["a b", "*.rs"]));
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".recorded-args")).unwrap(),
+        "dependency:<declared>\nroot:<base><a b><*.rs>\n"
+    );
+    let log = value["data"]["log"].as_str().unwrap();
+    assert!(std::fs::read_to_string(log)
+        .unwrap()
+        .starts_with("wt args: [\"a b\",\"*.rs\"]\n"));
+
+    let dry = h
+        .wt()
+        .args([
+            "run",
+            "argv",
+            "repo",
+            "--dry-run",
+            "--json",
+            "--",
+            "dry arg",
+        ])
+        .output()
+        .unwrap();
+    assert!(dry.status.success());
+    let dry: serde_json::Value = serde_json::from_slice(&dry.stdout).unwrap();
+    assert_eq!(dry["data"]["args"], serde_json::json!(["dry arg"]));
+    h.wt()
+        .args(["run", "argv", "repo", "--dry-run", "--", "visible arg"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Plan for argv -- \"visible arg\""));
+
+    let alias = h
+        .wt()
+        .args(["test", "repo", "--json", "--", "alias arg"])
+        .output()
+        .unwrap();
+    assert!(alias.status.success());
+    let alias: serde_json::Value = serde_json::from_slice(&alias.stdout).unwrap();
+    assert_eq!(alias["data"]["args"], serde_json::json!(["alias arg"]));
+    assert!(std::fs::read_to_string(repo.join(".recorded-args"))
+        .unwrap()
+        .ends_with("alias:<declared><alias arg>\n"));
+}
+
+#[test]
+fn section_10_1_shell_trailing_args_use_positional_parameters() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo(
+        "repo",
+        r#"
+[task.shell]
+run='"$WT_ROOT/record-args" shell ruff "$@" && "$WT_ROOT/record-args" shell mypy .'
+[task.plain]
+run='printf unchanged > "$WT_ROOT/.plain"'
+[task.comment]
+run='''# "$@" is intentionally only a lexical match
+printf ignored > "$WT_ROOT/.comment"'''
+"#,
+    );
+    common::write_executable(
+        &repo.join("record-args"),
+        r#"#!/bin/sh
+label=$1
+shift
+printf '%s:' "$label" >> "$WT_ROOT/.shell-args"
+for arg in "$@"; do printf '<%s>' "$arg" >> "$WT_ROOT/.shell-args"; done
+printf '\n' >> "$WT_ROOT/.shell-args"
+"#,
+    );
+    h.register(&repo);
+
+    h.wt()
+        .args(["run", "shell", "repo", "--", "only file.py", "second"])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".shell-args")).unwrap(),
+        "shell:<ruff><only file.py><second>\nshell:<mypy><.>\n"
+    );
+    h.wt().args(["run", "plain", "repo"]).assert().success();
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".plain")).unwrap(),
+        "unchanged"
+    );
+    h.wt()
+        .args(["run", "comment", "repo", "--", "ignored"])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".comment")).unwrap(),
+        "ignored"
+    );
+}
+
+#[test]
+fn section_10_1_trailing_arg_refusals_precede_dependencies() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo(
+        "repo",
+        r#"
+[task.dependency]
+run='touch "$WT_ROOT/.dependency-ran"'
+[task.no_parameters]
+run='true'
+needs=['dependency']
+[task.leaf]
+run='true'
+[task.aggregate]
+needs=['leaf']
+[task.service]
+run='touch "$WT_ROOT/.service"'
+exists='test -f "$WT_ROOT/.service"'
+destroy='rm -f "$WT_ROOT/.service"'
+tied_to='tree'
+"#,
+    );
+    h.register(&repo);
+
+    h.wt()
+        .args(["run", "no_parameters", "repo", "--", "arg"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("ARGS_UNSUPPORTED"))
+        .stderr(predicate::str::contains("\"$@\""));
+    assert!(!repo.join(".dependency-ran").exists());
+
+    h.wt()
+        .args(["run", "aggregate", "repo", "--", "arg"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("ARGS_ON_COMPOSITE"))
+        .stderr(predicate::str::contains("leaf"))
+        .stderr(predicate::str::contains("wt run leaf --"));
+
+    h.wt()
+        .args(["run", "service", "repo", "--", "arg"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("ARGS_UNSUPPORTED"))
+        .stderr(predicate::str::contains(
+            "state transition replayed from snapshots",
+        ));
+    assert!(!repo.join(".service").exists());
+
+    h.wt()
+        .args(["run", "no_parameters", "repo"])
+        .assert()
+        .success();
+    assert!(repo.join(".dependency-ran").exists());
+}
+
+#[test]
+fn section_10_1_trailing_args_refuse_two_scope_composite_with_public_needs() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo(
+        "repo",
+        r#"
+[dirs."d1".task.check]
+run=['true']
+[dirs."d2".task.check]
+run=['true']
+"#,
+    );
+    wt_sys::fsx::create_private_dir(&repo.join("d1")).unwrap();
+    wt_sys::fsx::create_private_dir(&repo.join("d2")).unwrap();
+    h.register(&repo);
+
+    let output = h
+        .wt()
+        .args(["run", "check", "repo", "--", "arg"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ARGS_ON_COMPOSITE"), "{stderr}");
+    assert!(stderr.contains("d1/check"), "{stderr}");
+    assert!(stderr.contains("d2/check"), "{stderr}");
+    assert!(!stderr.contains('@'), "{stderr}");
+}
+
+#[test]
+fn section_10_1_trailing_args_cross_single_scope_composite() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo(
+        "repo",
+        r#"
+[dirs."d1".task.check]
+run=['${root()}/record-args', 'check']
+"#,
+    );
+    wt_sys::fsx::create_private_dir(&repo.join("d1")).unwrap();
+    common::write_executable(
+        &repo.join("record-args"),
+        r#"#!/bin/sh
+printf '%s' "$1" > "$WT_ROOT/.single-scope-args"
+shift
+for arg in "$@"; do printf '<%s>' "$arg" >> "$WT_ROOT/.single-scope-args"; done
+"#,
+    );
+    h.register(&repo);
+
+    h.wt()
+        .args(["run", "check", "repo", "--", "forwarded arg"])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".single-scope-args")).unwrap(),
+        "check<forwarded arg>"
+    );
+}
+
+#[test]
+fn section_10_1_trailing_args_cross_adapter_composite_and_alias() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo("repo", "[dirs.d1]\n");
+    common::write(
+        &repo.join("d1/package.json"),
+        r#"{"name":"fixture","scripts":{"test":"fixture"}}"#,
+    );
+    common::write(&repo.join("d1/package-lock.json"), "{}\n");
+    common::write_executable(
+        &h.shims.join("npm"),
+        r#"#!/bin/sh
+for arg in "$@"; do printf '<%s>' "$arg" >> "$WT_ROOT/.adapter-args"; done
+printf '\n' >> "$WT_ROOT/.adapter-args"
+"#,
+    );
+    h.register(&repo);
+
+    h.wt()
+        .args(["test", "repo", "--", "-k", "foo"])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".adapter-args")).unwrap(),
+        "<test><--><-k><foo>\n"
+    );
+}
+
+#[test]
+fn section_14_1_trailing_args_require_the_delimiter() {
+    let h = Harness::new();
+    h.wt()
+        .args(["run", "task", "repo", "argument"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unexpected argument 'argument'"))
+        .stderr(predicate::str::contains("[-- <ARGS>...]"));
+}
+
+#[test]
 fn resource_run_and_destroy_follow_probe_truth() {
     let h = Harness::new();
     let repo = h.repo("repo", RESOURCE);

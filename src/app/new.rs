@@ -641,7 +641,8 @@ fn finish_under_lock(
     let sync = if args.no_sync {
         None
     } else if let Ok(plan) = executor::plan(context, &door, "sync") {
-        let execution = match executor::execute_plan(context, &door, &plan, None, None, false) {
+        let execution = match executor::execute_plan(context, &door, &plan, None, None, None, false)
+        {
             Ok(execution) => execution,
             Err(error) => {
                 mark_new_failed(context, &target, holder, &error)?;
@@ -718,7 +719,7 @@ fn run_verify(
 ) -> Result<NewVerifyReport, CoreError> {
     let target = door.target.clone();
     let result = executor::plan(context, door, "verify")
-        .and_then(|plan| executor::execute_plan(context, door, &plan, None, None, false));
+        .and_then(|plan| executor::execute_plan(context, door, &plan, None, None, None, false));
     match result {
         Ok(execution) => {
             notices.extend(execution.notices);

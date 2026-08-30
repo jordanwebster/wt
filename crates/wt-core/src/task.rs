@@ -50,7 +50,7 @@ impl Node {
             scope,
             origin,
             cwd,
-            needs: task.needs.clone(),
+            needs: task.needs.clone().unwrap_or_default(),
             run: task.run.clone(),
             exists: task.exists.clone(),
             destroy: task.destroy.clone(),

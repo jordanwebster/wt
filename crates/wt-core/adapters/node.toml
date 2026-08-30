@@ -15,7 +15,7 @@ sync_inputs = ["package-lock.json", "npm-shrinkwrap.json", "package.json"]
 [tools.npm.task.sync]
 run = "npm ci"
 [tools.npm.task.test]
-run = "npm test"
+run = '''if [ "$#" -gt 0 ]; then npm test -- "$@"; else npm test; fi'''
 [tools.npm.task.lint]
 run = "npm run lint"
 [tools.npm.task.fmt]

@@ -12,7 +12,7 @@ use wt_core::resource::{
     Action as ResourceDecision, EffectResult, Event, ExpandedCommand, Probe, ProbeResult,
     ResourceKey, ResourceRecord, ResourceSnapshot, SnapshotRoots,
 };
-use wt_core::task::{HeldLocks, Node, PlannedLock, TaskPlan};
+use wt_core::task::{HeldLocks, Node, Origin, PlannedLock, TaskPlan};
 use wt_core::{CoreError, ExitClass};
 use wt_sys::lock::{self, GitToken, NamedToken, ResourceToken};
 use wt_sys::proc::{self, CommandRequest, ProcessOutput, Tee};
@@ -62,9 +62,10 @@ pub(crate) fn plan(context: &Context, door: &Door, root: &str) -> Result<TaskPla
     wt_core::task::plan(root, &catalog)
 }
 
-pub(crate) fn dry_run(plan: &TaskPlan) -> DryRunData {
+pub(crate) fn dry_run(plan: &TaskPlan, args: &[String]) -> DryRunData {
     DryRunData {
         task: plan.root.clone(),
+        args: args.to_vec(),
         steps: plan
             .nodes
             .iter()
@@ -87,10 +88,92 @@ pub(crate) fn dry_run(plan: &TaskPlan) -> DryRunData {
     }
 }
 
+pub(crate) fn validate_args(plan: &TaskPlan, args: &[String]) -> Result<Option<String>, CoreError> {
+    if args.is_empty() {
+        return Ok(None);
+    }
+
+    let mut current_id = plan.root.as_str();
+    loop {
+        let node = plan
+            .nodes
+            .iter()
+            .find(|node| node.id == current_id)
+            .expect("a task plan contains every dependency");
+        if node.resource.is_some() {
+            return Err(CoreError::new(
+                ExitClass::Usage,
+                "ARGS_UNSUPPORTED",
+                format!(
+                    "resource {} cannot receive arguments: its run is a state transition replayed from snapshots, not a parameterised invocation",
+                    node.id
+                ),
+                "run the resource without arguments",
+            ));
+        }
+        if let Some(run) = &node.run {
+            if let Command::Shell(shell) = run {
+                if !shell_accepts_args(shell) {
+                    return Err(CoreError::new(
+                        ExitClass::Usage,
+                        "ARGS_UNSUPPORTED",
+                        format!(
+                            "shell recipe for {} does not reference positional arguments",
+                            node.id
+                        ),
+                        "add `\"$@\"` to the shell recipe where the arguments belong, or run without arguments",
+                    ));
+                }
+            }
+            return Ok(Some(node.id.clone()));
+        }
+
+        if node.origin == Origin::Composite && node.needs.len() == 1 {
+            current_id = &node.needs[0];
+            continue;
+        }
+
+        let names = if node.needs.is_empty() {
+            "none".to_owned()
+        } else {
+            node.needs.join(", ")
+        };
+        let remedy = node.needs.first().map_or_else(
+            || "run the aggregate without arguments".to_owned(),
+            |need| {
+                format!(
+                    "pass arguments to one of its direct constituent tasks, for example: `wt run {need} -- …`"
+                )
+            },
+        );
+        return Err(CoreError::new(
+            ExitClass::Usage,
+            "ARGS_ON_COMPOSITE",
+            format!(
+                "run-less node {} cannot receive arguments; direct constituent tasks: {names}",
+                node.id
+            ),
+            remedy,
+        ));
+    }
+}
+
+fn shell_accepts_args(shell: &str) -> bool {
+    shell.contains("$@")
+        || shell.contains("$*")
+        || shell.contains("${@")
+        || shell.contains("${*")
+        || shell
+            .as_bytes()
+            .windows(2)
+            .any(|pair| pair[0] == b'$' && pair[1].is_ascii_digit())
+}
+
 pub(crate) fn execute_plan(
     context: &mut Context,
     door: &Door,
     plan: &TaskPlan,
+    resolved_args: Option<(&str, &[String])>,
     timeout: Option<&str>,
     wait: Option<&str>,
     no_log: bool,
@@ -108,7 +191,10 @@ pub(crate) fn execute_plan(
             notices.extend(result.notices);
             (result.status, result.child, result.log)
         } else {
-            run_task(context, door, node, timeout, no_log)?
+            let node_args = resolved_args
+                .filter(|(target, _)| *target == node.id)
+                .map_or(&[] as &[String], |(_, args)| args);
+            run_task(context, door, node, node_args, timeout, no_log)?
         };
         if child.is_some() {
             last_child.clone_from(&child);
@@ -131,6 +217,7 @@ pub(crate) fn execute_plan(
         data: RunData {
             target: door.target.to_string(),
             task: plan.root.clone(),
+            args: resolved_args.map_or_else(Vec::new, |(_, args)| args.to_vec()),
             child: last_child,
             log: last_log,
             steps,
@@ -254,6 +341,7 @@ fn run_task(
     context: &Context,
     door: &Door,
     node: &Node,
+    args: &[String],
     timeout: Option<&str>,
     no_log: bool,
 ) -> Result<(String, Option<ChildReport>, Option<String>), CoreError> {
@@ -299,9 +387,16 @@ fn run_task(
         return Ok(("skipped".to_owned(), None, None));
     };
     let log = log_path(context, door, node, no_log)?;
-    let output = proc::run(
-        &request(run, &assembled, &cwd)?,
+    let log_header = (!args.is_empty()).then(|| {
+        format!(
+            "wt args: {}\n",
+            serde_json::to_string(args).expect("strings always serialize")
+        )
+    });
+    let output = proc::run_with_header(
+        &request_with_args(run, &assembled, &cwd, &node.id, args)?,
         log.as_deref(),
+        log_header.as_deref().map(str::as_bytes),
         timeout
             .or(node.timeout.as_deref())
             .or(context.settings.task.timeout.as_deref())
@@ -956,6 +1051,24 @@ fn request(
     cwd: &Path,
 ) -> Result<CommandRequest, CoreError> {
     CommandRequest::expanded(&expanded(command, assembled)?, cwd, assembled.env.clone())
+}
+
+fn request_with_args(
+    command: &Command,
+    assembled: &EnvOutput,
+    cwd: &Path,
+    task_id: &str,
+    args: &[String],
+) -> Result<CommandRequest, CoreError> {
+    let mut request = request(command, assembled, cwd)?;
+    if args.is_empty() {
+        return Ok(request);
+    }
+    if matches!(command, Command::Shell(_)) {
+        request.args.push(task_id.into());
+    }
+    request.args.extend(args.iter().map(Into::into));
+    Ok(request)
 }
 
 fn log_path(

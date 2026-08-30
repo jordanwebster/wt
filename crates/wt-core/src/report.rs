@@ -231,6 +231,7 @@ pub struct DryRunStepReport {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DryRunData {
     pub task: String,
+    pub args: Vec<String>,
     pub steps: Vec<DryRunStepReport>,
 }
 
@@ -369,6 +370,7 @@ pub struct SyncInputReport {
 pub struct RunData {
     pub target: String,
     pub task: String,
+    pub args: Vec<String>,
     pub child: Option<ChildReport>,
     pub log: Option<String>,
     pub steps: Vec<StepReport>,
@@ -936,6 +938,7 @@ mod tests {
             RunData {
                 target: "repo/work".into(),
                 task: "test".into(),
+                args: vec!["test_file.rs".into()],
                 child: Some(ChildReport {
                     code: Some(0),
                     signal: None,
@@ -948,6 +951,7 @@ mod tests {
             "run_dry",
             DryRunData {
                 task: "test".into(),
+                args: vec!["test_file.rs".into()],
                 steps: vec![DryRunStepReport {
                     id: "test".into(),
                     scope: ".".into(),

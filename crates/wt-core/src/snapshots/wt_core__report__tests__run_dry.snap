@@ -11,6 +11,9 @@ expression: envelope
   "command": "command",
   "data": {
     "task": "test",
+    "args": [
+      "test_file.rs"
+    ],
     "steps": [
       {
         "id": "test",

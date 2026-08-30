@@ -530,6 +530,17 @@ fn render_locks(data: LocksData, _notices: &[Notice]) -> String {
 fn render_run(value: &Value, notices: &[Notice]) -> String {
     if value.get("steps").is_some() && value.get("target").is_none() {
         let task = value["task"].as_str().unwrap_or("task");
+        let args = value["args"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(Value::to_string)
+            .collect::<Vec<_>>();
+        let headline = if args.is_empty() {
+            format!("Plan for {task}")
+        } else {
+            format!("Plan for {task} -- {}", args.join(" "))
+        };
         let rows = value["steps"]
             .as_array()
             .into_iter()
@@ -543,11 +554,7 @@ fn render_run(value: &Value, notices: &[Notice]) -> String {
                 ]
             })
             .collect::<Vec<_>>();
-        return table(
-            format!("Plan for {task}"),
-            ["task", "scope", "layer", "cwd"],
-            rows,
-        );
+        return table(headline, ["task", "scope", "layer", "cwd"], rows);
     }
     let _ = notices;
     String::new()

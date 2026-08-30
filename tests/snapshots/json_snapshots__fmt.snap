@@ -5,6 +5,7 @@ expression: "normalize(value, &h.root)"
 {
   "command": "fmt",
   "data": {
+    "args": [],
     "child": {
       "code": 0,
       "signal": null
