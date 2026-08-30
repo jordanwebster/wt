@@ -24,6 +24,7 @@ pub(crate) fn run(context: &mut Context, args: Tasks) -> Result<Output, CoreErro
             tied_to: node.tied_to.map(|value| match value {
                 TiedTo::Tree => "tree".to_owned(),
                 TiedTo::Repo => "repo".to_owned(),
+                TiedTo::Machine => "machine".to_owned(),
             }),
             lock: node.lock,
             description: None,

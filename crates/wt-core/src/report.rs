@@ -563,10 +563,10 @@ pub fn sort_trees(trees: &mut [TreeReport]) {
 }
 
 fn tied_order(value: &str) -> u8 {
-    if value == "tree" {
-        0
-    } else {
-        1
+    match value {
+        "tree" => 0,
+        "repo" => 1,
+        _ => 2,
     }
 }
 
@@ -621,7 +621,7 @@ pub fn sort_array(values: &mut [Value], order: ArrayOrder) {
         }),
         ArrayOrder::Resources => values.sort_by_key(|value| {
             (
-                u8::from(text(value, "tied_to") != "tree"),
+                tied_order(&text(value, "tied_to")),
                 text(value, "scope"),
                 text(value, "task"),
             )
@@ -1188,11 +1188,14 @@ mod tests {
         sort_array(&mut notices, ArrayOrder::Notices);
         assert_eq!(notices[0]["level"], "warn");
         let mut resources = vec![
+            serde_json::json!({"tied_to":"machine","scope":".","task":"m"}),
             serde_json::json!({"tied_to":"repo","scope":".","task":"a"}),
             serde_json::json!({"tied_to":"tree","scope":"z","task":"z"}),
         ];
         sort_array(&mut resources, ArrayOrder::Resources);
         assert_eq!(resources[0]["tied_to"], "tree");
+        assert_eq!(resources[1]["tied_to"], "repo");
+        assert_eq!(resources[2]["tied_to"], "machine");
         let mut semantic = vec![serde_json::json!("z"), serde_json::json!("a")];
         sort_array(&mut semantic, ArrayOrder::Semantic);
         assert_eq!(semantic, [serde_json::json!("z"), serde_json::json!("a")]);

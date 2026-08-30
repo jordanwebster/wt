@@ -152,6 +152,7 @@ pub fn execute_observed(
             }
             current_repo_root.join(snapshot.cwd_rel.as_str())
         }
+        TiedTo::Machine => Path::new(&snapshot.roots.home).join(snapshot.cwd_rel.as_str()),
     };
     let request = CommandRequest::expanded(command, cwd, environment)?;
     let at = timestamp();
@@ -305,7 +306,7 @@ mod tests {
         ResourceSnapshot {
             schema: 1,
             key: ResourceKey {
-                label: Label::new("repo").unwrap(),
+                label: Some(Label::new("repo").unwrap()),
                 tied_to: TiedTo::Tree,
                 name: Some("tree".into()),
                 scope: RelPath::new(".").unwrap(),

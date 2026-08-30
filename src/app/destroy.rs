@@ -22,17 +22,8 @@ pub(crate) fn run(context: &mut Context, args: ResourceAction) -> Result<Output,
         .as_ref()
         .ok_or_else(|| resource_required(&args.task))?;
     executor::refresh_all_declarations(context, &door)?;
-    let before = context
-        .read_state(&door.target)?
-        .and_then(|state| {
-            state
-                .resources
-                .values()
-                .find(|record| &record.key == key)
-                .cloned()
-        })
-        .map(|record| format!("{:?}", record.state).to_ascii_lowercase())
-        .unwrap_or_else(|| "declared".to_owned());
+    let before =
+        executor::resource_state(context, &door, key)?.unwrap_or_else(|| "declared".to_owned());
     let (after, child) = executor::destroy_resource(context, &door, key, false)?;
     Ok(Output::data(ResourceActionData {
         target: door.target.to_string(),

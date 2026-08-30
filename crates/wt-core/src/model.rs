@@ -143,6 +143,10 @@ pub fn repo_state_path(label: &Label) -> String {
     format!("state/{label}/_repo.json")
 }
 
+pub fn machine_state_path() -> &'static str {
+    "state/_machine.json"
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RelPath(String);
@@ -614,6 +618,7 @@ mod tests {
         let target = Target::parse("repo/work").unwrap();
         assert_eq!(tree_state_path(&target), "state/repo/work.json");
         assert_eq!(repo_state_path(&target.label), "state/repo/_repo.json");
+        assert_eq!(machine_state_path(), "state/_machine.json");
         assert_eq!(
             scope_enc(&RelDir::new("services/api").unwrap()),
             "services%2Fapi"

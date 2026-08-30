@@ -83,14 +83,16 @@ ScopeEnc   := RelDir with "/" → "%2F", "." for root
 $WT_HOME/                                 --home > WT_HOME env > ~/.wt; exported as WT_HOME in doors; 0700
   config.toml
   registry.json, registry.lock            level-5 RMW lock
+  state/_machine.json                     machine-tied resource records (0600)
   state/<label>/_repo.json                repo-tied resource records (0600)
   state/<label>/<name>.json               tree state (0600); exists exactly while the address has a live entry
   locks/<label>/<name>.lock               level-1 tree lock (shared: doors; exclusive: lifecycle verbs); path depends only on the address
   locks/<label>/<name>.doors/<pid>.lock   door-holder record {pid, verb, since}; try-flock = liveness
   locks/git/<gitdir_id>.lock              level-2 repo-git
   locks/<label>/res/tree/<name>/<ScopeEnc>/<task>.lock ; locks/<label>/res/repo/<ScopeEnc>/<task>.lock   level-3
+  locks/_machine/res/<ScopeEnc>/<task>.lock   machine resource lock, level-3
   locks/<label>/named/<lockname>/<i>.lock   level-4 named-lock slot; an old flat <lockname>.lock is inert
-  locks/<label>/<name>.rmw.lock, _repo.rmw.lock   level-6
+  locks/<label>/<name>.rmw.lock, locks/<label>/_repo.rmw.lock, locks/_machine.rmw.lock   level-6
   trees/<label>/<name>/                   worktrees (settings.trees_dir overrides)
 <tree>/.wt/                               tool-owned, excluded, never authoritative; holds tree_id, logs, rendered files
 <commondir>/info/exclude                  managed block (§4.2)
@@ -140,7 +142,7 @@ Detect  := { depth?: 0|1|2 (1), ignore?: [RelPath] }
 LockCfg := { slots?: u16 (1, minimum 1), wait?: Duration }
 File    := { content?: Template, source?: RelPath, marker?: String ("#"; "" = no header), mode?: OctalString ★ ("0644") }
 Task    := { run?: Cmd, exists?: Cmd, destroy?: Cmd, needs?: [ScopedTask|PrivateId], lock?: LockName, name?: Template,
-             tied_to?: "tree"|"repo", env?: Map<EnvKey, Template>, cwd?: RelPath, timeout?: Duration, description?: String,
+             tied_to?: "tree"|"repo"|"machine", env?: Map<EnvKey, Template>, cwd?: RelPath, timeout?: Duration, description?: String,
              ready_within?: Duration ★, snapshot_env?: [EnvKey] ★ }
 Cmd     := String | [String]          // `sh -c`: NEVER templated, every character is the shell's | argv: each element templated
 Template:= String                      // ${name} reads a var, ${ports.n} a declared port; ${fn()} calls; $$ is a literal $; `$` before a non-name character is literal
@@ -206,7 +208,7 @@ Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ bas
 |---|---|---|
 | grammar, unknown keys, identifiers, lexical paths (§5.7), durations, modes, template syntax; every `${…}` names a declared `vars` key or a permitted function with a declared port argument (§5.2); `destroy ⇒ exists ∧ tied_to`; `ready_within ⇒ exists`; `run ∨ destroy ∨ needs`; an aggregate carries only `needs` and `description`; one of `content`/`source`; port names unique; `ports.len() ≤ stride`; `commands` entries unique and basenames; a `copy` entry that is also a `files` key | parse/validate | `CONFIG_INVALID` (5) with `path:line:col` |
 | `vars` DAG acyclic and fully resolvable within the effective scope → `VARS_CYCLE` / `VARS_UNKNOWN` naming every key involved; `${NAME}` in a task `env` map naming another key of the same map → `TASK_ENV_SELF_REFERENCE` | resolve | `CONFIG_INVALID` |
-| `needs` resolvable/acyclic; `tied_to = repo` templates reference no tree-specific key (§5.5) | resolve | `CONFIG_INVALID` |
+| `needs` resolvable/acyclic; `tied_to = repo` templates and recipes reference no tree-specific key (§5.5); `tied_to = machine` templates and recipes additionally reference neither `WT_LABEL`/`WT_REPO` nor `label()`/`repo()` | resolve | `CONFIG_INVALID` |
 | `bin`/`cwd` existence, `source` readability | door (`bin`: doctor, A50) | `BIN_DIR_MISSING` (doctor finding), `CWD_MISSING` (5), `FILE_SOURCE_MISSING` (5) |
 
 ### 5.7 Path containment and no-follow I/O
@@ -417,7 +419,12 @@ the log header, in `--dry-run`, and in `run --json` data; giving them without
 Output is tee'd to `<tree>/.wt/logs/<ScopeEnc>-<task>-<utc>.log`; before writing a new log, logs of the same `(scope, task)` beyond the newest `logs.keep − 1` are deleted (§12). `--dry-run` prints the plan with `lock_plan` output and executes nothing; task env ends with its node.
 
 ### 10.2 Resource identity and lock
-`ResourceKey := { label, tied_to, name|null (tree name; null for repo), scope: RelDir, task }`; state key `"<ScopedTask>"`; lock path per §4 (level 3), held from probe through the final commit. CLI selection by `ScopedTask`.
+`ResourceKey := { label|null, tied_to, name|null, scope: RelDir, task }`;
+tree and repo keys carry the label, machine keys carry `label: null`; only a
+tree key carries its tree name. The state key is `"<ScopedTask>"`, including
+in `_machine.json`, so two labels declaring the same machine-scoped task share
+one record. The lock path is per §4 (level 3), held from probe through the
+final commit. CLI selection is by `ScopedTask`.
 
 ### 10.3 Snapshots and `execute`
 ```
@@ -427,14 +434,14 @@ ResourceSnapshot := { schema: 1, key, name, cwd_rel: RelDir, exists: CmdExpanded
                       roots: { tree, home }, recorded_sequence, recorded_at }
 CmdExpanded := { shell: String } | { argv: [String] }
 ```
-- **Env minimisation.** `env` contains exactly: all `WT_*` keys of the recording assembly except `WT_ACTIVATION`; `PATH`; every declared alias key and the resource's task-env keys with their assembled values; keys listed in `snapshot_env`. For **repo-tied** resources the tree-specific keys of §5.5 are removed (A28). Nothing else is stored; a recipe that needs a frozen parent value names it in `snapshot_env`. `register` prints the keys each resource will persist; no report prints values (§14.4).
-- **Executable inventory (A25).** `bin_dirs` = the tree's declared `bin` directories (absolute) and `bin_exes` = the names in them that `exec` would run — symlinks resolved, since a link to a binary runs under its own name — both captured at snapshot time.
-- **Working directory.** Tree-tied: `roots.tree/cwd_rel`. Repo-tied: the label's current canonical path (read from the registry) joined with `cwd_rel`; `register --move-to` therefore needs no snapshot rewrite.
+- **Env minimisation.** `env` contains exactly: all `WT_*` keys of the recording assembly except `WT_ACTIVATION`; `PATH`; every declared alias key and the resource's task-env keys with their assembled values; keys listed in `snapshot_env`. For **repo-tied** resources the tree-specific keys of §5.5 are removed (A28). For **machine-tied** resources those keys and the repo-specific `WT_LABEL` and `WT_REPO` keys are removed (A56). Nothing else is stored; a recipe that needs a frozen parent value names it in `snapshot_env`. `register` prints the keys each resource will persist; no report prints values (§14.4).
+- **Executable inventory (A25).** For tree- and repo-tied resources, `bin_dirs` = the tree's declared `bin` directories (absolute) and `bin_exes` = the names in them that `exec` would run — symlinks resolved, since a link to a binary runs under its own name — both captured at snapshot time. Machine-tied resources capture neither: tree binaries are tree-specific.
+- **Working directory.** Tree-tied: `roots.tree/cwd_rel`. Repo-tied: the label's current canonical path (read from the registry) joined with `cwd_rel`; `register --move-to` therefore needs no snapshot rewrite. Machine-tied: `roots.home/cwd_rel`.
 
 `execute(snapshot, Exists|Destroy|Run, tree_missing)`, reading no config layer:
 1. **Environment.** The invoking wt process's environment overlaid by `snapshot.env` (snapshot keys win).
 2. **Missing-tree rule (A25).** `tree_missing` = `roots.tree` is absent **or the tree's phase is `replaced`** (§11.1) — a replaced directory is never used. If `tree_missing` or any `bin_dirs` entry is absent: split **the recipe text about to be run** on whitespace and `; | & ( ) < >`, strip `'` and `"`; if any word equals a name in `bin_exes` → do not run; result `orphaned(exe_missing)`, remedy "rebuild the tree's binaries, or destroy by hand: `<recipe>`". Otherwise run with `PATH` stripped of every `bin_dirs` entry. If the tree exists (not replaced) and all `bin_dirs` exist, run with the env unchanged. wt's guarantee for a replaced or missing tree is exactly: no process is spawned with a cwd inside the replacement directory, and no replacement binary is on PATH; identities a recipe derives from the recorded `WT_ROOT` string are the recipe's own semantics (A29).
-3. **cwd.** Tree-tied: `roots.tree/cwd_rel` if it exists and `tree_missing` is false, else `$TMPDIR` (else `/tmp`) with `WT_ROOT` left at the recorded string. Repo-tied: canonical path `/cwd_rel`; absent → `orphaned(repo_root_missing)`, remedy "`wt register … --move-to`, or destroy by hand".
+3. **cwd.** Tree-tied: `roots.tree/cwd_rel` if it exists and `tree_missing` is false, else `$TMPDIR` (else `/tmp`) with `WT_ROOT` left at the recorded string. Repo-tied: canonical path `/cwd_rel`; absent → `orphaned(repo_root_missing)`, remedy "`wt register … --move-to`, or destroy by hand". Machine-tied: `roots.home/cwd_rel`.
 4. Spawn `sh -c shell` or `argv`; deadlines §13.3.
 
 ### 10.4 Resource state machine (A22, A31)
@@ -442,7 +449,7 @@ CmdExpanded := { shell: String } | { argv: [String] }
 ResourceRecord := { key, declaration: ResourceSnapshot, instance: ResourceSnapshot|null, state: declared|present|orphaned, reason|null,
                     external: bool, undeclared: bool, last_probe: {at, result}|null, last_error: {at, event, message, child|null}|null, since }
 ```
-Probes, runs and destroys use `instance` when present, else `declaration` (§10.5). The **instance is frozen** from the fresh declaration (i) immediately before wt spawns `run` (durable before the spawn, so a crash mid-run still leaves a teardown snapshot) or (ii) at the first Present probe when `instance` is null (`external = true`); it is cleared only by a confirmed-absent probe. `Destroy` carries `teardown` (true inside `remove`, `unregister`, `prune`). Every state write is durable before the next effect; a `Failed` probe never triggers `run` or `destroy`. There are no persisted in-progress states: the resource lock (§10.2) serialises transitions and the next probe decides after a crash (principle 4). `name` default: tree-tied `${WT_NAME_SHORT}_<name_snake(ScopedTask)>`, repo-tied `${WT_LABEL}_<name_snake(ScopedTask)>`; `WT_SELF` is the expanded value.
+Probes, runs and destroys use `instance` when present, else `declaration` (§10.5). The **instance is frozen** from the fresh declaration (i) immediately before wt spawns `run` (durable before the spawn, so a crash mid-run still leaves a teardown snapshot) or (ii) at the first Present probe when `instance` is null (`external = true`); it is cleared only by a confirmed-absent probe. `Destroy` carries `teardown` (true inside `remove`, `unregister`, `prune`). Every state write is durable before the next effect; a `Failed` probe never triggers `run` or `destroy`. There are no persisted in-progress states: the resource lock (§10.2) serialises transitions and the next probe decides after a crash (principle 4). `name` default: tree-tied `${WT_NAME_SHORT}_<name_snake(ScopedTask)>`, repo-tied `${WT_LABEL}_<name_snake(ScopedTask)>`, machine-tied `machine_<name_snake(ScopedTask)>`; `WT_SELF` is the expanded value.
 
 | State | Run | Probe (`list`/`status --probe`) | Destroy | Refresh |
 |---|---|---|---|---|
@@ -452,14 +459,20 @@ Probes, runs and destroys use `instance` when present, else `declaration` (§10.
 
 Invariants: a record exists for every effective tree-tied resource from its first refresh; `present` only on a Present probe; a record is dropped only after a confirmed-absent probe and only when undeclared or during teardown; teardown terminates (after one `Destroy{teardown}` pass every record is dropped or `orphaned`); a no-`run` resource is never run.
 
-### 10.5 Declaration refresh; repo-tied declarations
+### 10.5 Declaration refresh; repo- and machine-tied declarations
 **When.** Declarations are refreshed at `register`/`adopt` (I3), `new` (S4), `sync`, `wt run <resource>` (X2, before the step), `list`/`status --probe`, and `remove`/`unregister` step 8 — never by an ordinary door (§0). For each effective resource `r` across all scopes: run `assemble` once more with `task = TaskContext{r}` and `r`'s scope from the same `clean` parent, render output discarded, notices suppressed except `ENV_UNDEFINED` (→ `REFRESH_SKIPPED{r}` warn, record unrefreshed); build `r`'s snapshot (§10.3); then, by `tied_to`:
 - **tree-tied** → the tree's state file (tree RMW, level 6): upsert the record: absent → **declared** with `declaration`; otherwise replace `declaration` only, never `instance`;
 - **repo-tied** → `_repo.json` (repo RMW, level 6): upsert `resources[<ScopedTask>].declaration` from the refreshing tree's **stripped** snapshot (A28, A31); `instance` and state are never touched by a refresh.
+- **machine-tied** → `_machine.json` (machine RMW, level 6): upsert
+  `resources[<ScopedTask>].declaration` from the invoking context's snapshot
+  stripped of tree- and repo-specific keys (A56, A61); `instance` and state
+  are never touched by a declaration refresh. The store uses the same
+  `{schema, label, resources}` shape and protocol as `_repo.json`, with
+  `label: null`.
 
 **Teardown obeys the record, never the working tree (A48).** Frozen-instance teardown predates A48: at `remove`/`unregister` step 8 the refresh may only replace a `declaration`, while a resource with a frozen `instance` is destroyed through that instance and a vanished declaration remains recorded as `undeclared = true`. A48 adds newest-first teardown, ordered by the durable `recorded_sequence` of the effective snapshots (with `recorded_at` only as a compatibility fallback for older records). It does not newly justify the absence of an approval gate.
 
-Undeclared tasks keep their records with `undeclared = true` until dropped by a confirmed-absent probe during teardown. **Repo-tied semantics:** while `instance` exists it governs; otherwise the most recent stripped declaration (the invoking tree's, since an action refreshes first) is effective. There is no cross-tree agreement check. Ordinary `remove` of a non-canonical tree tears down tree-tied records only; repo-tied instances survive while the label remains and are destroyed only by `destroy`/`refresh`/`unregister`.
+Undeclared tasks keep their records with `undeclared = true` until dropped by a confirmed-absent probe during teardown. **Repo- and machine-tied semantics:** while `instance` exists it governs; otherwise the most recent stripped declaration (the invoking context's, since an action refreshes first) is effective. There is no cross-tree or cross-repo agreement check. Ordinary `remove` of a non-canonical tree tears down tree-tied records only; repo-tied instances survive while the label remains and are destroyed only by `destroy`/`refresh`/`unregister`. Machine records are never touched by `remove` or `unregister`; their lifecycle teardown is performed only by explicit `wt destroy` or `wt refresh`, both retaining their unconditional confirmation gate. Other declaration-refresh, run, and probe sites follow the ordinary §10.1–10.5 rules.
 
 Worked example — orbitcloud `pgdata` (no `run`): `new` → declared; `run pgdata` → Absent → declared, exit 0 with the notice; Aspire creates the container; `list --probe` → present (external, instance frozen); `refresh` → destroy → declared; `remove` → `Destroy{teardown}`: present → destroyed and dropped, absent → dropped; docker down → probe exits 2 → `orphaned(probe_failed)` and `remove` stops (§11.4 step 9) unless `--keep-orphans`. orbit `daemon` (`needs = ["build"]`): `run daemon` → `build` runs → instance frozen (its `bin_exes` contains `orbit`) → `orbit server start` → confirming probe → present; after `rm -rf <tree>`: `prune` → missing-tree rule: the `destroy` text contains the word `orbit` ∈ `bin_exes` → `orphaned(exe_missing)`; the installed `orbit` is never run.
 
@@ -550,8 +563,11 @@ Classification (pure over git results): "unpushed" = upstream present ∧ `rev-l
 
 **Missing directory:** steps 2 (records only), 3–5, 7–8 (records only, `execute` with `tree_missing = true`), 9, 10 (`git worktree prune`), 11. **Replaced directory** (phase `replaced`): steps 2 (records only), 4–5, 7–9 with `tree_missing = true`; no git step (the directory is not ours; doctor reports it as `UNMANAGED_WORKTREE`/`STALE_GIT_WORKTREE`); then 11 (A31). Already absent ⇒ `removed: false`, exit 0.
 
+Step 8 excludes machine-tied declarations and records completely: `remove`
+does not refresh, probe, destroy, or rewrite `_machine.json` (A61).
+
 ### 11.5 `unregister`
-`wt unregister <label> [--yes] [--force]`: refuses while non-canonical trees exist (`TREES_EXIST` 5) unless `--force` (removes them first via §11.4, one consent prompt listing all). For the canonical tree the teardown is performed inline: §11.4 step 1 **without** its canonical refusal, then steps 2–8 exactly as written (step 8 is the **only** tree-tied teardown pass), then **every repo-tied record** with `Destroy{teardown}`; **failure barrier**: if any tree-tied or repo-tied record is not dropped → `DESTROY_FAILED` (6), the canonical tree stays `removing` → `remove-interrupted`, and nothing below runs; otherwise artefact cleanup — hash-owned rendered files deleted via §5.7, `.wt/` deleted (consented; it may hold application data), anything else `ARTIFACT_KEPT` with its exclusion retained; exclude block removed if nothing kept; registry and state records deleted. The checkout is never deleted.
+`wt unregister <label> [--yes] [--force]`: refuses while non-canonical trees exist (`TREES_EXIST` 5) unless `--force` (removes them first via §11.4, one consent prompt listing all). For the canonical tree the teardown is performed inline: §11.4 step 1 **without** its canonical refusal, then steps 2–8 exactly as written (step 8 is the **only** tree-tied teardown pass), then **every repo-tied record** with `Destroy{teardown}`; **failure barrier**: if any tree-tied or repo-tied record is not dropped → `DESTROY_FAILED` (6), the canonical tree stays `removing` → `remove-interrupted`, and nothing below runs; otherwise artefact cleanup — hash-owned rendered files deleted via §5.7, `.wt/` deleted (consented; it may hold application data), anything else `ARTIFACT_KEPT` with its exclusion retained; exclude block removed if nothing kept; registry and state records deleted. The checkout is never deleted. Machine-tied declarations and records are excluded from both refresh and teardown, and `_machine.json` is left byte-for-byte untouched (A61).
 
 ### 11.6 `register` and `adopt`
 `wt register [path] [--label L] [--move-to PATH] [--repair]`, `wt adopt <path> [--label L] [--name N]`:
@@ -573,7 +589,7 @@ Classification (pure over git results): "unpushed" = upstream present ∧ `rev-l
 Run exactly once per incarnation at `new` S3 (never for canonical or adopted trees). Source root = the canonical checkout. Per entry: source absent → `COPY_ABSENT` info; tracked by git → `COPY_TRACKED` (5), `new` aborts at S3 (`incomplete`, resumable); destination exists → `COPY_EXISTS` info, never overwritten; otherwise copied via §5.7 (files byte-for-byte with mode, directories recursively, symlinks recreated); record `materialized {kind: copied, hash: null}`. Copied paths are not hash-owned and are never re-rendered or individually deleted; they are excluded while the tree or its tombstone exists. Task side effects outside the tree are never tracked; a side effect that occupies a future tree path surfaces as `PATH_OCCUPIED` at that tree's `new` (§11.2 G).
 
 ## 12. Truth: `list`, `status`, `doctor`, `prune`, logs
-`wt list [label] [--probe] [--fast] [--disk]`, `wt status [target] [--probe]`: address, phase (§11.1), branch/detached, dirty counts, upstream ahead/behind, behind default, sync state (`ok | stale (<files>) | failed | never`, `behind <default> by N`, **`drift (<files>)`** = sync inputs changed on the default branch since the merge-base: one bounded `git diff --name-only HEAD...origin/<default> -- <sync_inputs>` per tree, S3/A31; `--fast` skips it), session `yes|no|unknown`, agent, resources `{scope, task, state, external, undeclared, last_probe, last_error}`, slot/ports (+`bound` from one bind probe per declared port, skipped by `--fast`), path. `--probe` refreshes declarations (§10.5) and runs `exists` per record under its resource lock.
+`wt list [label] [--probe] [--fast] [--disk]`, `wt status [target] [--probe]`: address, phase (§11.1), branch/detached, dirty counts, upstream ahead/behind, behind default, sync state (`ok | stale (<files>) | failed | never`, `behind <default> by N`, **`drift (<files>)`** = sync inputs changed on the default branch since the merge-base: one bounded `git diff --name-only HEAD...origin/<default> -- <sync_inputs>` per tree, S3/A31; `--fast` skips it), session `yes|no|unknown`, agent, tree-, repo-, and machine-tied resources `{scope, task, tied_to, state, external, undeclared, last_probe, last_error}`, slot/ports (+`bound` from one bind probe per declared port, skipped by `--fast`), path. `--probe` refreshes declarations (§10.5) and runs `exists` under each displayed record's resource lock. For `list`, each distinct `ResourceKey` is probed once per pass: tree-tied keys remain per tree, while a repo- or machine-tied record shared across displayed trees is probed once and its one result is displayed for every tree that declares it. `status` probes each displayed record once. Doctor's state-orphan scan treats `_machine.json` as the machine store, never as an orphaned tree state file.
 
 `wt doctor [label] [--probe]` findings `{severity, code, subject, message, remedy}`:
 
@@ -727,7 +743,7 @@ Redaction: environment values appear only in `env` output; `ResourceSnapshot.env
 | Array | Order |
 |---|---|
 | `list.trees` | `(label, canonical first, name)` |
-| `Tree.resources`, `*.destroyed`, `remove.orphans_kept` | `(tied_to: tree, repo; scope; task)` |
+| `Tree.resources`, `*.destroyed`, `remove.orphans_kept` | `(tied_to: tree, repo, machine; scope; task)` |
 | `Tree.ports` | recorded index (semantic) |
 | `Tree.sync.changed`, `Tree.sync.drift`, `sync.inputs`, `register.declared.*`, `env.*` string arrays, `unregister.artifacts`, `env.bins[].executables` | lexical |
 | `*.steps`, `tasks.tasks`, `run --dry-run.steps` | plan order (topological, ties `(scope, id)`) / `(scope, id)` |
@@ -796,6 +812,7 @@ Levels **U** (wt-core), **I** (wt-sys/app on temp repos with shims: tmux, docker
 | §10.1 | `lock_plan` order asserted by a lock-order tracer (out-of-order acquisition panics in test builds); task env not contributed; present resource env contributed; log retention keeps 20 per task | I |
 | §10.1, §14.1, §14.4 (A58) | argv arguments append after templating and shell arguments appear at `"$@"`, only on the resolved target; an adapter-composed root forwards to the single adapter recipe; a two-scope composite refuses and names the public scoped tasks; a user aggregate refuses regardless of fan-out; no-parameter shell and resource refusals have their specified usage codes and remedies; absent arguments preserve behaviour; aliases accept `--`; log header, dry-run, and JSON carry the exact argument vector; arguments without `--` name the delimiter | C |
 | §4, §5.2–5.3, §13.3, §14.4 (A59) | named-lock config parses, validates `slots`/`wait`, is root-only, and merges by name; two holders fill two ordered slot files, a third gets `LOCK_HELD 2/2` naming both holders and both remedies, and a bounded waiter proceeds after release; an absent entry means one slot and the §13.3 default wait (previously unimplemented, now honoured — the announced A59 behaviour change); `wt locks` reports `held n/N` and per-slot holders | U, I, C |
+| §4, §5.2, §5.6, §10.2–10.5, §11.4–11.5, §12, §14.5 (A61) | machine-tied validation rejects tree- and repo-specific keys/functions and snapshot stripping removes both sets; two labels declaring one `ScopedTask` share one `_machine.json` record with `label: null`; machine RMW/resource lock paths are used; remove and unregister leave the machine store byte-identical; destroy prompts on a TTY and requires `--yes` without one; refresh works from either label; `list --probe` probes shared repo- and machine-tied `ResourceKey`s once per pass and reuses each result across trees; status/list JSON order resources tree, repo, machine | U, I, C |
 | §10.3 | snapshot env = exactly the minimised set (never `WT_ACTIVATION`; parent keys only via `snapshot_env`); teardown env = invoker's env overlaid; A25 scans only the recipe about to run; files 0600 under umask 000; repo-tied env has no tree-specific key; orbit daemon after `rm -rf`: `prune` → `orphaned(exe_missing)`, installed `orbit` never invoked; a recipe without tree words runs with bins removed from PATH; canonical root gone → `repo_root_missing` | I |
 | §10.4 | pgdata sequence (declared → run notice → external present → refresh → declared → remove drops absent/destroys present); probe exit 2 → never runs/destroys, teardown → orphaned; `resource.frozen` failpoint → next `run` probes and settles; destroy failure → orphaned, others attempted; declaration deleted after creation → still destroyed from the instance; sibling-scope same-named resources distinct | I, C |
 | §10.5 | instance frozen after `needs`, later config edit does not change it; no refresh on a plain door; repo-tied: the invoking tree's stripped declaration is used until an instance exists, then the instance governs | I, C |

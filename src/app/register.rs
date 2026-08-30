@@ -538,6 +538,7 @@ fn finish_with_door(
             tied_to: match node.tied_to.unwrap_or(TiedTo::Tree) {
                 TiedTo::Tree => "tree",
                 TiedTo::Repo => "repo",
+                TiedTo::Machine => "machine",
             }
             .to_owned(),
             snapshot_keys: node.snapshot_env.clone(),

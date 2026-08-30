@@ -8,9 +8,9 @@ use crate::{
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct ResourceKey {
-    pub label: Label,
+    pub label: Option<Label>,
     pub tied_to: TiedTo,
-    /// Tree-tied resources use the address name; repo-tied resources use null.
+    /// Tree-tied resources use the address name; wider scopes use null.
     pub name: Option<String>,
     pub scope: RelDir,
     pub task: String,
@@ -24,7 +24,12 @@ pub fn default_name(key: &ResourceKey, name_short: &str) -> String {
     };
     let prefix = match key.tied_to {
         TiedTo::Tree => name_short.to_owned(),
-        TiedTo::Repo => key.label.to_string(),
+        TiedTo::Repo => key
+            .label
+            .as_ref()
+            .expect("repo-tied resource keys carry a label")
+            .to_string(),
+        TiedTo::Machine => "machine".to_owned(),
     };
     format!("{prefix}_{}", name_snake(&scoped_task))
 }
@@ -680,7 +685,7 @@ mod tests {
         ResourceSnapshot {
             schema: 1,
             key: ResourceKey {
-                label: Label::new("repo").unwrap(),
+                label: Some(Label::new("repo").unwrap()),
                 tied_to: TiedTo::Tree,
                 name: Some("work".to_owned()),
                 scope: RelDir::new(".").unwrap(),
@@ -1650,7 +1655,7 @@ mod tests {
     }
 
     #[test]
-    fn default_names_distinguish_tree_and_repo_resources() {
+    fn default_names_distinguish_tree_repo_and_machine_resources() {
         let tree = snapshot(true).key;
         assert_eq!(
             default_name(&tree, "repo_work_12345678"),
@@ -1667,5 +1672,13 @@ mod tests {
         assert!(tree_json.get("tree_id").is_none());
         let repo_json = serde_json::to_value(&repo).unwrap();
         assert!(repo_json["name"].is_null());
+
+        let mut machine = repo;
+        machine.tied_to = TiedTo::Machine;
+        machine.label = None;
+        assert_eq!(default_name(&machine, "ignored"), "machine_services_api_db");
+        let machine_json = serde_json::to_value(&machine).unwrap();
+        assert!(machine_json["label"].is_null());
+        assert!(machine_json["name"].is_null());
     }
 }

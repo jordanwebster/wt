@@ -142,7 +142,7 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
     })?;
     let entered = if current_dir_exists && current_identity_ok {
         let door = door::enter_held(context, tree.clone(), "remove", false)?;
-        executor::refresh_all_declarations(context, &door)?;
+        executor::refresh_lifecycle_declarations(context, &door)?;
         Some(door)
     } else {
         None
@@ -160,7 +160,7 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         let key = record.key.clone();
         let resource_holder = context.holder(target.to_string(), "remove")?;
         let _resource = lock::resource(
-            &resource_lock_path(context, &key),
+            &executor::resource_lock_path(context, &key),
             &resource_holder,
             super::context::duration(
                 context.settings.locks.resource.as_deref(),
@@ -445,22 +445,4 @@ fn tmux_has(context: &Context, tree: &wt_core::model::TreeRec) -> Result<bool, C
         Err(error) if error.code.0 == "TOOL_MISSING" => Ok(false),
         result => result,
     }
-}
-
-fn resource_lock_path(
-    context: &Context,
-    key: &wt_core::resource::ResourceKey,
-) -> std::path::PathBuf {
-    let tied = match key.tied_to {
-        wt_core::config::TiedTo::Tree => {
-            format!("tree/{}/", key.name.as_deref().unwrap_or("canonical"))
-        }
-        wt_core::config::TiedTo::Repo => "repo/".to_owned(),
-    };
-    context.home.join(format!(
-        "locks/{}/res/{tied}{}/{}.lock",
-        key.label,
-        wt_core::model::scope_enc(&key.scope),
-        key.task
-    ))
 }

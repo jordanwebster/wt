@@ -363,6 +363,14 @@ fn present_resource_env_from(
             .into_iter()
             .flat_map(|state| state.resources.into_values()),
     );
+    records.extend(
+        wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(
+            &context.home.join(wt_core::model::machine_state_path()),
+            "STATE_CORRUPT",
+        )?
+        .into_iter()
+        .flat_map(|state| state.resources.into_values()),
+    );
     let mut contributed = records
         .into_iter()
         .filter(|record| record.state == ResourceState::Present)

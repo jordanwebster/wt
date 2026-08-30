@@ -617,6 +617,14 @@ fn state_orphan_findings(
     findings: &mut Vec<Finding>,
 ) -> Result<(), CoreError> {
     for label_dir in wt_sys::fsx::read_dir_paths(&context.home.join("state"))? {
+        if label_dir.file_name().and_then(|name| name.to_str()) == Some("_machine.json")
+            || !matches!(
+                wt_sys::fsx::path_kind(&label_dir)?,
+                wt_sys::fsx::PathKind::Directory
+            )
+        {
+            continue;
+        }
         let Some(label) = label_dir.file_name().and_then(|name| name.to_str()) else {
             continue;
         };

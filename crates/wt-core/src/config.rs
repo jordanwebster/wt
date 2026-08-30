@@ -88,6 +88,7 @@ fn default_mode() -> String {
 pub enum TiedTo {
     Tree,
     Repo,
+    Machine,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -507,7 +508,7 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
             return Err(invalid("copy entries may not also be rendered files"));
         }
         for task in effective.tasks.values() {
-            if task.tied_to == Some(TiedTo::Repo) {
+            if matches!(task.tied_to, Some(TiedTo::Repo | TiedTo::Machine)) {
                 let mut calls = BTreeSet::new();
                 let mut legacy_references = BTreeSet::new();
                 for command in [
@@ -554,10 +555,25 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                             | "PATH"
                     ) || name.starts_with("WT_PORT_")
                 });
-                if tree_call || legacy_tree_reference {
-                    return Err(invalid(
-                        "repo-tied resource references a tree-specific template function",
-                    ));
+                let machine = task.tied_to == Some(TiedTo::Machine);
+                let repo_call = machine
+                    && calls
+                        .iter()
+                        .any(|call| matches!(call.name(), "label" | "repo"));
+                let legacy_repo_reference = machine
+                    && legacy_references
+                        .iter()
+                        .any(|name| matches!(name.as_str(), "WT_LABEL" | "WT_REPO"));
+                if tree_call || legacy_tree_reference || repo_call || legacy_repo_reference {
+                    let scope = if machine { "machine" } else { "repo" };
+                    let specificity = if machine {
+                        "tree- or repo-specific"
+                    } else {
+                        "tree-specific"
+                    };
+                    return Err(invalid(format!(
+                        "{scope}-tied resource references a {specificity} template function"
+                    )));
                 }
             }
         }
@@ -1161,6 +1177,45 @@ mod tests {
         )
         .unwrap();
         assert!(validate_resolved(&opaque, 16).is_ok());
+    }
+
+    #[test]
+    fn section_5_6_machine_scope_rejects_tree_and_repo_specific_references() {
+        for reference in [
+            "$WT_ROOT",
+            "$WT_LABEL",
+            "$WT_REPO",
+            "${root()}",
+            "${label()}",
+            "${repo()}",
+        ] {
+            let source = if reference.starts_with('$') && !reference.starts_with("${") {
+                format!(
+                    "[task.setup]\ntied_to='machine'\nexists='test -n {reference}'\ndestroy='true'"
+                )
+            } else {
+                format!(
+                    "[task.setup]\ntied_to='machine'\nexists='true'\ndestroy='true'\n[task.setup.env]\nVALUE='{reference}'"
+                )
+            };
+            let config = parse(&source, "x").unwrap();
+            let error = validate_resolved(&config, 16).unwrap_err();
+            assert!(
+                error.message.contains("machine-tied"),
+                "{reference}: {error:?}"
+            );
+            assert!(
+                error.message.contains("tree- or repo-specific"),
+                "{reference}: {error:?}"
+            );
+        }
+
+        let portable = parse(
+            "[task.setup]\ntied_to='machine'\nexists='test -n $WT_HOME'\ndestroy='true'\n[task.setup.env]\nVALUE='${home()}'",
+            "x",
+        )
+        .unwrap();
+        assert!(validate_resolved(&portable, 16).is_ok());
     }
 
     #[test]

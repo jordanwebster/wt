@@ -1685,6 +1685,197 @@ fn refresh_recreates_a_present_resource() {
 }
 
 #[test]
+fn sections_10_2_to_11_5_machine_scope_is_shared_and_lifecycle_excluded() {
+    let h = Harness::new();
+    let config = |source: &str| {
+        format!(
+            r#"
+[task.setup]
+run = 'printf %s "$SOURCE" > "$WT_HOME/machine-ready"'
+exists = 'test -f "$WT_HOME/machine-ready"'
+destroy = 'rm -f "$WT_HOME/machine-ready"'
+tied_to = "machine"
+[task.setup.env]
+SOURCE = "{source}"
+"#
+        )
+    };
+    let first = h.repo("first", &config("first"));
+    let second = h.repo("second", &config("second"));
+    h.register(&first);
+    h.register(&second);
+
+    let machine_path = h.home.join(wt_core::model::machine_state_path());
+    let machine =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(&machine_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    assert_eq!(machine.label, None);
+    assert_eq!(machine.resources.len(), 1);
+    let record = &machine.resources["setup"];
+    assert_eq!(record.key.label, None);
+    assert_eq!(record.key.name, None);
+    assert_eq!(record.key.tied_to, wt_core::config::TiedTo::Machine);
+    assert!(!record.declaration.env.contains_key("WT_LABEL"));
+    assert!(!record.declaration.env.contains_key("WT_REPO"));
+    assert!(!record.declaration.env.contains_key("WT_ROOT"));
+
+    h.json(&["run", "setup", "first"]);
+    assert_eq!(
+        std::fs::read_to_string(h.home.join("machine-ready")).unwrap(),
+        "first"
+    );
+    assert!(h.home.join("locks/_machine.rmw.lock").exists());
+    assert!(h.home.join("locks/_machine/res/./setup.lock").exists());
+
+    h.json(&["refresh", "setup", "second", "--yes"]);
+    assert_eq!(
+        std::fs::read_to_string(h.home.join("machine-ready")).unwrap(),
+        "second"
+    );
+    h.json(&["refresh", "setup", "first", "--yes"]);
+    assert_eq!(
+        std::fs::read_to_string(h.home.join("machine-ready")).unwrap(),
+        "first"
+    );
+
+    h.json(&["new", "first/work", "--no-sync", "--no-open"]);
+    let before_remove = std::fs::read(&machine_path).unwrap();
+    h.json(&["remove", "first/work", "--yes"]);
+    assert_eq!(std::fs::read(&machine_path).unwrap(), before_remove);
+    h.json(&["unregister", "first", "--yes"]);
+    assert_eq!(std::fs::read(&machine_path).unwrap(), before_remove);
+
+    h.wt()
+        .args(["destroy", "setup", "second"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("CONFIRM_REQUIRED"));
+    assert!(h.home.join("machine-ready").exists());
+    let declined = h.pty_output(&["destroy", "setup", "second"], b"n\n");
+    let transcript = String::from_utf8_lossy(&declined.stdout);
+    assert!(transcript.contains("destroy resource setup? [y/N]"));
+    assert!(h.home.join("machine-ready").exists());
+    assert_eq!(
+        h.pty_status(&["destroy", "setup", "second"], b"y\n").code,
+        Some(0)
+    );
+    assert!(!h.home.join("machine-ready").exists());
+
+    h.json(&["refresh", "setup", "second", "--yes"]);
+    assert_eq!(
+        std::fs::read_to_string(h.home.join("machine-ready")).unwrap(),
+        "second"
+    );
+    h.json(&["destroy", "setup", "second", "--yes"]);
+    assert!(!h.home.join("machine-ready").exists());
+}
+
+#[test]
+fn list_probe_deduplicates_shared_resources_across_trees_and_status_probes_once() {
+    let h = Harness::new();
+    let probe_log = h.root.join("resource-probes");
+    let repo = h.repo(
+        "repo",
+        &format!(
+            r#"
+[task.tree]
+exists = 'printf "tree\n" >> "$PROBE_LOG"; false'
+destroy = 'true'
+tied_to = "tree"
+[task.tree.env]
+PROBE_LOG = "{}"
+[task.repo]
+exists = 'printf "repo\n" >> "$PROBE_LOG"; false'
+destroy = 'true'
+tied_to = "repo"
+[task.repo.env]
+PROBE_LOG = "{}"
+[task.machine]
+exists = 'printf "machine\n" >> "$PROBE_LOG"; false'
+destroy = 'true'
+tied_to = "machine"
+[task.machine.env]
+PROBE_LOG = "{}"
+"#,
+            probe_log.display(),
+            probe_log.display(),
+            probe_log.display(),
+        ),
+    );
+    h.register(&repo);
+    h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
+
+    let listed = h.json(&["list", "--probe"]);
+    let counts = || {
+        let log = std::fs::read_to_string(&probe_log).unwrap();
+        ["tree", "repo", "machine"]
+            .map(|kind| log.lines().filter(|invocation| *invocation == kind).count())
+    };
+    assert_eq!(counts(), [2, 1, 1]);
+    let trees = listed["data"]["trees"].as_array().unwrap();
+    assert_eq!(trees.len(), 2);
+    for tied_to in ["repo", "machine"] {
+        let probes = trees
+            .iter()
+            .map(|tree| {
+                tree["resources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|resource| resource["tied_to"] == tied_to)
+                    .unwrap()["last_probe"]
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(probes[0]["result"], "absent");
+        assert_eq!(probes[0], probes[1]);
+    }
+
+    common::write(&probe_log, "");
+    h.json(&["status", "repo/work", "--probe"]);
+    assert_eq!(counts(), [1, 1, 1]);
+}
+
+#[test]
+fn section_14_5_status_and_list_order_resources_by_scope_axis() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        r#"
+[task.tree]
+exists = 'test -f "$WT_ROOT/.tree-resource"'
+destroy = 'rm -f "$WT_ROOT/.tree-resource"'
+tied_to = "tree"
+[task.repo]
+exists = 'test -f "$WT_REPO/.repo-resource"'
+destroy = 'rm -f "$WT_REPO/.repo-resource"'
+tied_to = "repo"
+[task.machine]
+exists = 'test -f "$WT_HOME/machine-resource"'
+destroy = 'rm -f "$WT_HOME/machine-resource"'
+tied_to = "machine"
+"#,
+    );
+    h.register(&repo);
+
+    for value in [
+        h.json(&["status", "repo"])["data"].clone(),
+        h.json(&["list"])["data"]["trees"][0].clone(),
+    ] {
+        assert_eq!(
+            value["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|resource| resource["tied_to"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["tree", "repo", "machine"]
+        );
+    }
+}
+
+#[test]
 fn teardown_uses_frozen_instances_in_newest_first_order() {
     let h = Harness::new();
     let order = h.root.join("destroy-order");

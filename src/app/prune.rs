@@ -188,7 +188,7 @@ fn apply(
         for record in records {
             let holder = context.holder(target.to_string(), "prune")?;
             let _resource = lock::resource(
-                &resource_lock_path(context, &record.key),
+                &executor::resource_lock_path(context, &record.key),
                 &holder,
                 super::context::duration(
                     context.settings.locks.resource.as_deref(),
@@ -343,6 +343,14 @@ fn state_orphans(
 ) -> Result<Vec<std::path::PathBuf>, CoreError> {
     let mut output = Vec::new();
     for label_dir in wt_sys::fsx::read_dir_paths(&context.home.join("state"))? {
+        if label_dir.file_name().and_then(|value| value.to_str()) == Some("_machine.json")
+            || !matches!(
+                wt_sys::fsx::path_kind(&label_dir)?,
+                wt_sys::fsx::PathKind::Directory
+            )
+        {
+            continue;
+        }
         let Some(label) = label_dir.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
@@ -384,22 +392,4 @@ fn close_tombstone_session(context: &Context, session: &str) -> Result<(), CoreE
         Err(error) if error.code.0 == "TOOL_MISSING" => Ok(()),
         Err(error) => Err(error),
     }
-}
-
-fn resource_lock_path(
-    context: &Context,
-    key: &wt_core::resource::ResourceKey,
-) -> std::path::PathBuf {
-    let tied = match key.tied_to {
-        wt_core::config::TiedTo::Tree => {
-            format!("tree/{}/", key.name.as_deref().unwrap_or("canonical"))
-        }
-        wt_core::config::TiedTo::Repo => "repo/".to_owned(),
-    };
-    context.home.join(format!(
-        "locks/{}/res/{tied}{}/{}.lock",
-        key.label,
-        wt_core::model::scope_enc(&key.scope),
-        key.task
-    ))
 }

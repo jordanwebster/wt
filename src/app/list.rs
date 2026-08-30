@@ -1,13 +1,15 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
 use wt_core::config::TiedTo;
-use wt_core::lifecycle::DerivedPhase;
+use wt_core::lifecycle::{DerivedPhase, RepoState};
+use wt_core::model::{Label, TreeRec};
 use wt_core::report::{
     DirtyReport, LastErrorReport, LastProbeReport, ListData, PortReport, ResourceReport,
     SyncTreeReport, TreeReport, UpstreamReport, VerifyTreeReport,
 };
-use wt_core::resource::{ProbeResult, ResourceState};
+use wt_core::resource::{ProbeResult, ResourceKey, ResourceRecord, ResourceState};
 use wt_core::CoreError;
 
 use crate::cli::List;
@@ -16,17 +18,31 @@ use super::context::target_of;
 use super::{door, executor, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: List) -> Result<Output, CoreError> {
+    let selected = context
+        .registry
+        .trees
+        .clone()
+        .into_iter()
+        .filter(|tree| {
+            args.label
+                .as_deref()
+                .is_none_or(|label| tree.label.as_str() == label)
+        })
+        .collect::<Vec<_>>();
+    let shared = if args.probe {
+        probe_list_resources(context, &selected)?
+    } else {
+        SharedResourceRecords::read(context, &selected)?
+    };
     let mut trees = Vec::new();
-    for tree in context.registry.trees.clone() {
-        if args
-            .label
-            .as_deref()
-            .is_some_and(|label| tree.label.as_str() != label)
-        {
-            continue;
-        }
-        trees.push(tree_report(
-            context, &tree, args.fast, args.disk, args.probe,
+    for tree in selected {
+        trees.push(tree_report_with_shared(
+            context,
+            &tree,
+            args.fast,
+            args.disk,
+            false,
+            Some(&shared),
         )?);
     }
     wt_core::report::sort_trees(&mut trees);
@@ -69,6 +85,17 @@ pub(crate) fn tree_report(
     fast: bool,
     disk: bool,
     probe: bool,
+) -> Result<TreeReport, CoreError> {
+    tree_report_with_shared(context, tree, fast, disk, probe, None)
+}
+
+fn tree_report_with_shared(
+    context: &mut Context,
+    tree: &wt_core::model::TreeRec,
+    fast: bool,
+    disk: bool,
+    probe: bool,
+    shared: Option<&SharedResourceRecords>,
 ) -> Result<TreeReport, CoreError> {
     let target = target_of(tree);
     let exists = matches!(
@@ -173,10 +200,34 @@ pub(crate) fn tree_report(
     ports.sort_by_key(|port| {
         tree.ports[&wt_core::model::PortName::new(&port.name).expect("stored port name is valid")]
     });
-    let resources = state
+    let mut resource_records = state
         .as_ref()
-        .map(|state| resource_reports(&state.resources))
-        .unwrap_or_default();
+        .into_iter()
+        .flat_map(|state| state.resources.values().cloned())
+        .collect::<Vec<_>>();
+    if let Some(shared) = shared {
+        resource_records.extend(shared.for_tree(tree));
+    } else {
+        resource_records.extend(
+            wt_sys::fsx::read_json::<RepoState>(
+                &context
+                    .home
+                    .join(wt_core::model::repo_state_path(&tree.label)),
+                "STATE_CORRUPT",
+            )?
+            .into_iter()
+            .flat_map(|state| state.resources.into_values()),
+        );
+        resource_records.extend(
+            wt_sys::fsx::read_json::<RepoState>(
+                &context.home.join(wt_core::model::machine_state_path()),
+                "STATE_CORRUPT",
+            )?
+            .into_iter()
+            .flat_map(|state| state.resources.into_values()),
+        );
+    }
+    let resources = resource_reports(resource_records);
     let sync = state.as_ref().and_then(|state| state.sync.as_ref());
     let changed = if exists && identity_ok {
         sync.map(|sync| sync_changed(context, tree, &sync.inputs))
@@ -234,6 +285,121 @@ pub(crate) fn tree_report(
     })
 }
 
+#[derive(Default)]
+struct SharedResourceRecords {
+    records: BTreeMap<ResourceKey, ResourceRecord>,
+}
+
+impl SharedResourceRecords {
+    fn read(context: &Context, trees: &[TreeRec]) -> Result<Self, CoreError> {
+        if trees.is_empty() {
+            return Ok(Self::default());
+        }
+        let labels = trees
+            .iter()
+            .map(|tree| tree.label.clone())
+            .collect::<BTreeSet<_>>();
+        let mut records = BTreeMap::new();
+        for label in labels {
+            let state = wt_sys::fsx::read_json::<RepoState>(
+                &context.home.join(wt_core::model::repo_state_path(&label)),
+                "STATE_CORRUPT",
+            )?;
+            if let Some(state) = state {
+                for record in state.resources.into_values() {
+                    records.insert(record.key.clone(), record);
+                }
+            }
+        }
+        let machine = wt_sys::fsx::read_json::<RepoState>(
+            &context.home.join(wt_core::model::machine_state_path()),
+            "STATE_CORRUPT",
+        )?;
+        if let Some(state) = machine {
+            for record in state.resources.into_values() {
+                records.insert(record.key.clone(), record);
+            }
+        }
+        Ok(Self { records })
+    }
+
+    fn for_tree(&self, tree: &TreeRec) -> Vec<ResourceRecord> {
+        self.records
+            .values()
+            .filter(|record| match record.key.tied_to {
+                TiedTo::Tree => false,
+                TiedTo::Repo => record.key.label.as_ref() == Some(&tree.label),
+                TiedTo::Machine => true,
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn probe_matching(
+        &mut self,
+        context: &mut Context,
+        tree: &TreeRec,
+        matches: impl Fn(&ResourceKey) -> bool,
+    ) -> Result<(), CoreError> {
+        let keys = self
+            .records
+            .keys()
+            .filter(|key| matches(key))
+            .cloned()
+            .collect::<Vec<_>>();
+        let records = keys
+            .iter()
+            .filter_map(|key| self.records.remove(key))
+            .collect::<Vec<_>>();
+        if records.is_empty() {
+            return Ok(());
+        }
+        let target = target_of(tree);
+        let mut entered = door::enter(context, Some(&target.to_string()), "probe")?;
+        let records = executor::probe_resources(context, &entered, records)?;
+        entered.release_gate();
+        for record in records {
+            self.records.insert(record.key.clone(), record);
+        }
+        Ok(())
+    }
+}
+
+fn probe_list_resources(
+    context: &mut Context,
+    trees: &[TreeRec],
+) -> Result<SharedResourceRecords, CoreError> {
+    let mut probe_tree_by_label = BTreeMap::<Label, TreeRec>::new();
+    for tree in trees {
+        let exists = matches!(
+            wt_sys::fsx::path_kind(Path::new(tree.path.as_str()))?,
+            wt_sys::fsx::PathKind::Directory
+        );
+        if !exists || !context.identity_ok(tree)? {
+            continue;
+        }
+        let target = target_of(tree);
+        let mut entered = door::enter(context, Some(&target.to_string()), "probe")?;
+        executor::refresh_all_declarations(context, &entered)?;
+        executor::probe_tree_resources(context, &entered)?;
+        entered.release_gate();
+        probe_tree_by_label
+            .entry(tree.label.clone())
+            .or_insert_with(|| tree.clone());
+    }
+
+    let mut shared = SharedResourceRecords::read(context, trees)?;
+    for (label, tree) in &probe_tree_by_label {
+        shared.probe_matching(context, tree, |key| {
+            key.tied_to == TiedTo::Repo && key.label.as_ref() == Some(label)
+        })?;
+    }
+    if let Some(tree) = probe_tree_by_label.values().next() {
+        shared.probe_matching(context, tree, |key| key.tied_to == TiedTo::Machine)?;
+    }
+    Ok(shared)
+}
+
 fn sync_changed(
     context: &Context,
     tree: &wt_core::model::TreeRec,
@@ -263,16 +429,17 @@ fn to_u32(value: u64) -> u32 {
 }
 
 fn resource_reports(
-    records: &std::collections::BTreeMap<String, wt_core::resource::ResourceRecord>,
+    records: impl IntoIterator<Item = wt_core::resource::ResourceRecord>,
 ) -> Vec<ResourceReport> {
     let mut reports = records
-        .values()
+        .into_iter()
         .map(|record| ResourceReport {
             scope: record.key.scope.to_string(),
             task: record.key.task.clone(),
             tied_to: match record.key.tied_to {
                 TiedTo::Tree => "tree",
                 TiedTo::Repo => "repo",
+                TiedTo::Machine => "machine",
             }
             .to_owned(),
             name: record.name().to_owned(),
@@ -303,7 +470,16 @@ fn resource_reports(
         })
         .collect::<Vec<_>>();
     reports.sort_by(|left, right| {
-        (&left.tied_to, &left.scope, &left.task).cmp(&(&right.tied_to, &right.scope, &right.task))
+        let order = |tied_to: &str| match tied_to {
+            "tree" => 0,
+            "repo" => 1,
+            _ => 2,
+        };
+        (order(&left.tied_to), &left.scope, &left.task).cmp(&(
+            order(&right.tied_to),
+            &right.scope,
+            &right.task,
+        ))
     });
     reports
 }

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     config::TiedTo,
     resource::{ResourceRecord, ResourceSnapshot},
-    snapshot::is_tree_specific_key,
+    snapshot::{is_repo_specific_key, is_tree_specific_key},
 };
 
 /// Reconciles the effective declaration set without disturbing a frozen
@@ -36,14 +36,17 @@ pub fn reconcile(
     }
 }
 
-/// Repo-tied declarations carry no tree coordinate environment. The invoking
-/// tree's resulting stripped declaration is authoritative until an instance is
-/// frozen; there is no cross-tree agreement comparison.
+/// Wider-scope declarations carry no narrower-scope coordinate environment.
+/// The invoking context's resulting stripped declaration is authoritative
+/// until an instance is frozen; there is no agreement comparison.
 pub fn strip_tree_specific_env(snapshot: &mut ResourceSnapshot) {
-    if snapshot.key.tied_to != TiedTo::Repo {
-        return;
+    match snapshot.key.tied_to {
+        TiedTo::Tree => {}
+        TiedTo::Repo => snapshot.env.retain(|key, _| !is_tree_specific_key(key)),
+        TiedTo::Machine => snapshot
+            .env
+            .retain(|key, _| !is_tree_specific_key(key) && !is_repo_specific_key(key)),
     }
-    snapshot.env.retain(|key, _| !is_tree_specific_key(key));
 }
 
 #[cfg(test)]
@@ -58,7 +61,7 @@ mod tests {
         ResourceSnapshot {
             schema: 1,
             key: ResourceKey {
-                label: Label::new("repo").unwrap(),
+                label: (tied_to != TiedTo::Machine).then(|| Label::new("repo").unwrap()),
                 tied_to,
                 name: (tied_to == TiedTo::Tree).then(|| tree.to_owned()),
                 scope: RelDir::new(".").unwrap(),
@@ -73,6 +76,8 @@ mod tests {
             run: None,
             env: EnvMap::from([
                 ("WT_ROOT".to_owned(), format!("/{tree}")),
+                ("WT_LABEL".to_owned(), "repo".to_owned()),
+                ("WT_REPO".to_owned(), "/repo".to_owned()),
                 ("KEEP".to_owned(), "yes".to_owned()),
             ]),
             bin_dirs: Vec::new(),
@@ -113,6 +118,24 @@ mod tests {
         reconcile(
             &mut records,
             BTreeMap::from([("db".to_owned(), snapshot("db", TiedTo::Repo, "invoking"))]),
+            &BTreeSet::new(),
+        );
+        assert_eq!(
+            records["db"].declaration.env,
+            EnvMap::from([
+                ("KEEP".to_owned(), "yes".to_owned()),
+                ("WT_LABEL".to_owned(), "repo".to_owned()),
+                ("WT_REPO".to_owned(), "/repo".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn section_10_3_machine_declaration_strips_tree_and_repo_specific_keys() {
+        let mut records = BTreeMap::new();
+        reconcile(
+            &mut records,
+            BTreeMap::from([("db".to_owned(), snapshot("db", TiedTo::Machine, "invoking"))]),
             &BTreeSet::new(),
         );
         assert_eq!(

@@ -94,7 +94,7 @@ pub struct TreeState {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RepoState {
     pub schema: u8,
-    pub label: Label,
+    pub label: Option<Label>,
     pub resources: BTreeMap<String, ResourceRecord>,
 }
 

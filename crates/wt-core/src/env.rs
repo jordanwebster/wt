@@ -607,7 +607,7 @@ mod tests {
         cfg.bin.push(RelPath::new("bin").unwrap());
         let tree = tree("a", 20_016);
         let key = ResourceKey {
-            label: Label::new("repo").unwrap(),
+            label: Some(Label::new("repo").unwrap()),
             tied_to: TiedTo::Tree,
             name: Some("a".to_owned()),
             scope: RelPath::new(".").unwrap(),

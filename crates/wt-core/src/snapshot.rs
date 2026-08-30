@@ -15,6 +15,8 @@ const TREE_SPECIFIC_KEYS: &[&str] = &[
     "PATH",
 ];
 
+const REPO_SPECIFIC_KEYS: &[&str] = &["WT_LABEL", "WT_REPO"];
+
 /// Selects exactly the environment keys persisted in a resource snapshot.
 pub fn minimise_env(
     assembled: &EnvMap,
@@ -36,7 +38,11 @@ pub fn minimise_env(
                 && (key.starts_with("WT_")
                     || key.as_str() == "PATH"
                     || explicit.contains(key.as_str()))
-                && (tied_to != TiedTo::Repo || !is_tree_specific_key(key))
+                && match tied_to {
+                    TiedTo::Tree => true,
+                    TiedTo::Repo => !is_tree_specific_key(key),
+                    TiedTo::Machine => !is_tree_specific_key(key) && !is_repo_specific_key(key),
+                }
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
@@ -44,6 +50,10 @@ pub fn minimise_env(
 
 pub(crate) fn is_tree_specific_key(key: &str) -> bool {
     TREE_SPECIFIC_KEYS.contains(&key)
+}
+
+pub(crate) fn is_repo_specific_key(key: &str) -> bool {
+    REPO_SPECIFIC_KEYS.contains(&key)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,6 +104,7 @@ mod tests {
     fn env_minimisation_is_exact_and_repo_tied_values_are_stripped() {
         let assembled = EnvMap::from([
             ("WT_LABEL".to_owned(), "repo".to_owned()),
+            ("WT_REPO".to_owned(), "/repo".to_owned()),
             ("WT_ROOT".to_owned(), "/tree".to_owned()),
             ("WT_ACTIVATION".to_owned(), "secret-marker".to_owned()),
             ("PATH".to_owned(), "/tree/bin:/usr/bin".to_owned()),
@@ -115,6 +126,7 @@ mod tests {
                 "PATH",
                 "TASK_KEY",
                 "WT_LABEL",
+                "WT_REPO",
                 "WT_ROOT",
             ]
         );
@@ -124,7 +136,13 @@ mod tests {
         let repo = minimise_env(&assembled, &aliases, &task, &requested, TiedTo::Repo);
         assert_eq!(
             repo.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["ALIAS", "PARENT_KEEP", "TASK_KEY", "WT_LABEL"]
+            ["ALIAS", "PARENT_KEEP", "TASK_KEY", "WT_LABEL", "WT_REPO"]
+        );
+
+        let machine = minimise_env(&assembled, &aliases, &task, &requested, TiedTo::Machine);
+        assert_eq!(
+            machine.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["ALIAS", "PARENT_KEEP", "TASK_KEY"]
         );
     }
 

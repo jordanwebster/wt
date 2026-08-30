@@ -48,11 +48,11 @@ pub(crate) fn plan(context: &Context, door: &Door, root: &str) -> Result<TaskPla
                 ExitClass::State,
                 "CONFIG_INVALID",
                 format!("resource {} has no tied_to", node.id),
-                "set tied_to to tree or repo",
+                "set tied_to to tree, repo, or machine",
             )
         })?;
         node.resource = Some(ResourceKey {
-            label: door.tree.label.clone(),
+            label: (tied_to != TiedTo::Machine).then(|| door.tree.label.clone()),
             tied_to,
             name: (tied_to == TiedTo::Tree).then(|| door.tree.name.clone()),
             scope: node.scope.clone(),
@@ -82,6 +82,7 @@ pub(crate) fn dry_run(plan: &TaskPlan, args: &[String]) -> DryRunData {
                 tied_to: node.tied_to.map(|tied| match tied {
                     TiedTo::Tree => "tree".to_owned(),
                     TiedTo::Repo => "repo".to_owned(),
+                    TiedTo::Machine => "machine".to_owned(),
                 }),
             })
             .collect(),
@@ -230,11 +231,28 @@ pub(crate) fn refresh_all_declarations(
     context: &mut Context,
     door: &Door,
 ) -> Result<(), CoreError> {
+    refresh_declarations(context, door, true)
+}
+
+pub(crate) fn refresh_lifecycle_declarations(
+    context: &mut Context,
+    door: &Door,
+) -> Result<(), CoreError> {
+    refresh_declarations(context, door, false)
+}
+
+fn refresh_declarations(
+    context: &mut Context,
+    door: &Door,
+    include_machine: bool,
+) -> Result<(), CoreError> {
     let mut catalog = context.task_catalog(&door.tree, &door.config)?;
-    for node in catalog.values_mut().filter(|node| node.destroy.is_some()) {
+    for node in catalog.values_mut().filter(|node| {
+        node.destroy.is_some() && (include_machine || node.tied_to != Some(TiedTo::Machine))
+    }) {
         let tied_to = node.tied_to.unwrap_or(TiedTo::Tree);
         node.resource = Some(ResourceKey {
-            label: door.tree.label.clone(),
+            label: (tied_to != TiedTo::Machine).then(|| door.tree.label.clone()),
             tied_to,
             name: (tied_to == TiedTo::Tree).then(|| door.tree.name.clone()),
             scope: node.scope.clone(),
@@ -246,10 +264,51 @@ pub(crate) fn refresh_all_declarations(
 }
 
 pub(crate) fn probe_all_resources(context: &Context, door: &Door) -> Result<(), CoreError> {
-    let records = context
+    let mut records = context
         .read_state(&door.target)?
         .map(|state| state.resources.into_values().collect::<Vec<_>>())
         .unwrap_or_default();
+    records.extend(
+        wt_sys::fsx::read_json::<RepoState>(
+            &context
+                .home
+                .join(wt_core::model::repo_state_path(&door.target.label)),
+            "STATE_CORRUPT",
+        )?
+        .into_iter()
+        .flat_map(|state| state.resources.into_values()),
+    );
+    records.extend(
+        wt_sys::fsx::read_json::<RepoState>(
+            &context.home.join(wt_core::model::machine_state_path()),
+            "STATE_CORRUPT",
+        )?
+        .into_iter()
+        .flat_map(|state| state.resources.into_values()),
+    );
+    probe_resources(context, door, records).map(|_| ())
+}
+
+pub(crate) fn probe_tree_resources(context: &Context, door: &Door) -> Result<(), CoreError> {
+    let records = context
+        .read_state(&door.target)?
+        .map(|state| {
+            state
+                .resources
+                .into_values()
+                .filter(|record| record.key.tied_to == TiedTo::Tree)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    probe_resources(context, door, records).map(|_| ())
+}
+
+pub(crate) fn probe_resources(
+    context: &Context,
+    door: &Door,
+    records: Vec<ResourceRecord>,
+) -> Result<Vec<ResourceRecord>, CoreError> {
+    let mut probed = Vec::with_capacity(records.len());
     for record in records {
         let holder = context.holder(door.target.to_string(), "probe")?;
         let _resource = lock::resource(
@@ -262,14 +321,16 @@ pub(crate) fn probe_all_resources(context: &Context, door: &Door) -> Result<(), 
         )?;
         let probe = execute_probe(context, door, record.effective_snapshot())?;
         let step = wt_core::resource::step(Some(record), Event::Probe(probe));
-        persist_step(
-            context,
-            door,
-            &step.record.as_ref().expect("probe keeps record").key,
-            &step.record,
-        )?;
+        let key = step
+            .record
+            .as_ref()
+            .expect("probe keeps record")
+            .key
+            .clone();
+        persist_step(context, door, &key, &step.record)?;
+        probed.push(step.record.expect("probe keeps record"));
     }
-    Ok(())
+    Ok(probed)
 }
 
 fn acquire_node_locks(
@@ -366,17 +427,31 @@ fn named_lock_error(name: &str, error: lock::NamedAcquireError) -> CoreError {
     )
 }
 
-fn resource_lock_path(context: &Context, key: &ResourceKey) -> PathBuf {
-    let tied = match key.tied_to {
-        TiedTo::Tree => format!("tree/{}/", key.name.as_deref().unwrap_or("canonical")),
-        TiedTo::Repo => "repo/".to_owned(),
-    };
-    context.home.join(format!(
-        "locks/{}/res/{tied}{}/{}.lock",
-        key.label,
-        scope_enc(&key.scope),
-        key.task
-    ))
+pub(crate) fn resource_lock_path(context: &Context, key: &ResourceKey) -> PathBuf {
+    match key.tied_to {
+        TiedTo::Tree => context.home.join(format!(
+            "locks/{}/res/tree/{}/{}/{}.lock",
+            key.label
+                .as_ref()
+                .expect("tree-tied resource keys carry a label"),
+            key.name.as_deref().unwrap_or("canonical"),
+            scope_enc(&key.scope),
+            key.task
+        )),
+        TiedTo::Repo => context.home.join(format!(
+            "locks/{}/res/repo/{}/{}.lock",
+            key.label
+                .as_ref()
+                .expect("repo-tied resource keys carry a label"),
+            scope_enc(&key.scope),
+            key.task
+        )),
+        TiedTo::Machine => context.home.join(format!(
+            "locks/_machine/res/{}/{}.lock",
+            scope_enc(&key.scope),
+            key.task
+        )),
+    }
 }
 
 fn run_task(
@@ -666,7 +741,15 @@ fn execute_stored_probe(
         record.effective_snapshot(),
         SnapshotAction::Exists,
         &context.parent_env,
-        Path::new(context.registry.labels[&record.key.label].path.as_str()),
+        Path::new(
+            context.registry.labels[record
+                .key
+                .label
+                .as_ref()
+                .expect("stored tree records carry a label")]
+            .path
+            .as_str(),
+        ),
         ExecutionOptions {
             tree_replaced,
             deadlines: wt_sys::snapshot::Deadlines::from_settings(&context.settings.task)?,
@@ -692,7 +775,15 @@ fn execute_stored_effect(
         record.effective_snapshot(),
         SnapshotAction::Destroy,
         &context.parent_env,
-        Path::new(context.registry.labels[&record.key.label].path.as_str()),
+        Path::new(
+            context.registry.labels[record
+                .key
+                .label
+                .as_ref()
+                .expect("stored tree records carry a label")]
+            .path
+            .as_str(),
+        ),
         ExecutionOptions {
             tree_replaced,
             deadlines: wt_sys::snapshot::Deadlines::from_settings(&context.settings.task)?,
@@ -836,11 +927,15 @@ fn refresh_node_declaration(context: &Context, door: &Door, node: &Node) -> Resu
         Err(error) => return Err(error),
     };
     let effective = config_for_node(&door.config, node)?;
-    let bin_dirs = effective
-        .bin
-        .iter()
-        .map(|path| Path::new(door.tree.path.as_str()).join(path.as_str()))
-        .collect::<Vec<_>>();
+    let bin_dirs = if key.tied_to == TiedTo::Machine {
+        Vec::new()
+    } else {
+        effective
+            .bin
+            .iter()
+            .map(|path| Path::new(door.tree.path.as_str()).join(path.as_str()))
+            .collect::<Vec<_>>()
+    };
     let bin_exes = wt_sys::snapshot::capture_bin_exes(&bin_dirs)?;
     let snapshot = ResourceSnapshot {
         schema: 1,
@@ -907,19 +1002,14 @@ fn store_declaration(
             }
             Ok(())
         }),
-        TiedTo::Repo => {
+        TiedTo::Repo | TiedTo::Machine => {
             wt_core::declarations::strip_tree_specific_env(&mut snapshot);
-            let path = context
-                .home
-                .join(wt_core::model::repo_state_path(&key.label));
-            let lock_path = context
-                .home
-                .join(format!("locks/{}/_repo.rmw.lock", key.label));
+            let (path, lock_path, label) = shared_state_paths(context, key);
             let _lock = lock::state_rmw(&lock_path, &holder, context.rmw_wait())?;
             let mut state =
                 wt_sys::fsx::read_json::<RepoState>(&path, "STATE_CORRUPT")?.unwrap_or(RepoState {
                     schema: 1,
-                    label: key.label.clone(),
+                    label,
                     resources: BTreeMap::new(),
                 });
             snapshot.recorded_sequence = next_recorded_sequence(state.resources.values());
@@ -954,13 +1044,11 @@ fn load_record(
         TiedTo::Tree => context
             .read_state(&door.target)?
             .and_then(|state| state.resources.get(&scoped_id(key)).cloned()),
-        TiedTo::Repo => wt_sys::fsx::read_json::<RepoState>(
-            &context
-                .home
-                .join(wt_core::model::repo_state_path(&key.label)),
-            "STATE_CORRUPT",
-        )?
-        .and_then(|state| state.resources.get(&scoped_id(key)).cloned()),
+        TiedTo::Repo | TiedTo::Machine => {
+            let (path, _, _) = shared_state_paths(context, key);
+            wt_sys::fsx::read_json::<RepoState>(&path, "STATE_CORRUPT")?
+                .and_then(|state| state.resources.get(&scoped_id(key)).cloned())
+        }
     };
     record.ok_or_else(|| {
         CoreError::new(
@@ -992,18 +1080,13 @@ fn persist_step(
             }
             Ok(())
         }),
-        TiedTo::Repo => {
-            let path = context
-                .home
-                .join(wt_core::model::repo_state_path(&key.label));
-            let lock_path = context
-                .home
-                .join(format!("locks/{}/_repo.rmw.lock", key.label));
+        TiedTo::Repo | TiedTo::Machine => {
+            let (path, lock_path, label) = shared_state_paths(context, key);
             let _lock = lock::state_rmw(&lock_path, &holder, context.rmw_wait())?;
             let mut state =
                 wt_sys::fsx::read_json::<RepoState>(&path, "STATE_CORRUPT")?.unwrap_or(RepoState {
                     schema: 1,
-                    label: key.label.clone(),
+                    label,
                     resources: BTreeMap::new(),
                 });
             match record {
@@ -1017,6 +1100,42 @@ fn persist_step(
             wt_sys::fsx::write_json(&path, &state)
         }
     }
+}
+
+fn shared_state_paths(
+    context: &Context,
+    key: &ResourceKey,
+) -> (PathBuf, PathBuf, Option<wt_core::model::Label>) {
+    match key.tied_to {
+        TiedTo::Repo => {
+            let label = key
+                .label
+                .as_ref()
+                .expect("repo-tied resource keys carry a label")
+                .clone();
+            (
+                context.home.join(wt_core::model::repo_state_path(&label)),
+                context.home.join(format!("locks/{label}/_repo.rmw.lock")),
+                Some(label),
+            )
+        }
+        TiedTo::Machine => (
+            context.home.join(wt_core::model::machine_state_path()),
+            context.home.join("locks/_machine.rmw.lock"),
+            None,
+        ),
+        TiedTo::Tree => unreachable!("tree state uses the tree store"),
+    }
+}
+
+pub(crate) fn resource_state(
+    context: &Context,
+    door: &Door,
+    key: &ResourceKey,
+) -> Result<Option<String>, CoreError> {
+    Ok(load_record(context, door, key)
+        .ok()
+        .map(|record| format!("{:?}", record.state).to_ascii_lowercase()))
 }
 
 fn node_environment(context: &Context, door: &Door, node: &Node) -> Result<EnvOutput, CoreError> {

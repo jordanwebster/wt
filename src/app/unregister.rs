@@ -90,7 +90,7 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
         Ok(())
     })?;
     let door = door::enter_held(context, tree.clone(), "unregister", false)?;
-    executor::refresh_all_declarations(context, &door)?;
+    executor::refresh_lifecycle_declarations(context, &door)?;
     let mut destroyed = Vec::new();
     let mut teardown_errors = Vec::new();
     let tree_records = executor::newest_resources_first(

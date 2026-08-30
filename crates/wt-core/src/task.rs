@@ -260,7 +260,7 @@ mod tests {
         node.sys_locks.push("RepoGit".to_owned());
         node.lock = Some("serial".to_owned());
         node.resource = Some(ResourceKey {
-            label: Label::new("repo").unwrap(),
+            label: Some(Label::new("repo").unwrap()),
             tied_to: TiedTo::Tree,
             name: Some("work".to_owned()),
             scope: RelDir::new(".").unwrap(),
