@@ -158,7 +158,7 @@ fn canonical_repair_transcript() {
     let h = Harness::new();
     let repo = h.repo(
         "repo",
-        "[files.'.wt/generated']\ncontent='generated for ${target()}'\n",
+        "[files.'.wt/generated']\ncontent='generated for {{target()}}'\n",
     );
     h.register(&repo);
     wt_sys::fsx::remove_path(&repo.join(".wt/tree_id")).unwrap();

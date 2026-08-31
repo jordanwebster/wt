@@ -660,7 +660,7 @@ model, so wt no longer copies build output at all.
 
 Each ecosystem supplies the sharing mechanism. Cargo 1.91+ separates
 `target-dir` outputs from `build-dir` intermediates. Both cargo adapter tools
-set `CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}"`, one
+set `CARGO_BUILD_BUILD_DIR = "{{home()}}/cache/cargo-build/{{label()}}"`, one
 path per repository. `CARGO_TARGET_DIR` remains unset so each tree's binary
 stays in its own `target/`, preserving A41. Repository and user `env` layers
 may override the adapter value by the ordinary merge rule. The split was
@@ -910,7 +910,7 @@ directory also outlived every tree that fed it (77 GB observed for one
 repository, four trees), because nothing owned its lifecycle.
 
 Both cargo tools now set
-`CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}/${name_short()}"`:
+`CARGO_BUILD_BUILD_DIR = "{{home()}}/cache/cargo-build/{{label()}}/{{name_short()}}"`:
 one directory per tree, grouped under the label so attribution and reaping
 are directory listings. `name_short` is deterministic in `(label, name)`, so
 recreating an address readopts its cache warm. wt does not attempt to make
@@ -947,3 +947,33 @@ an unexplained success when that fabricated target was absent. Shared address
 resolution makes removal agree with the rest of the CLI, while the narrowly
 tombstone-backed exception preserves safe script idempotence without hiding a
 mistyped or contextless address.
+
+## A66. One template syntax applies to every templated string
+
+`{{name}}`, `{{fn()}}`, and `{{ports.<name>}}` are the sole evaluation forms.
+Every `{{` begins an expression, expressions contain no whitespace, and a
+malformed expression or an unknown name outside the vars DAG is
+`CONFIG_INVALID` at its source location. The function set, vars DAG (including
+`VARS_UNKNOWN` for an unknown dependency), and port lookup semantics are
+unchanged. Shell-form
+`run`, `exists`, and `destroy` recipes are now templated before `sh -c`, with
+substitutions inserted verbatim; argv elements continue to be templated
+independently. Path-valued shell substitutions therefore need shell quoting,
+or the recipe should use argv form.
+
+Dollar signs have no meaning to wt. `${...}`, `$NAME`, and `$$` pass through as
+literal text, and the legacy `$WT_*` spelling hints and bare-name refusal are
+deleted. A `files` entry may set `template = false` (default true) to render its
+content or source verbatim while preserving hash ownership, markers, and mode.
+This is the opt-out for Jinja, Helm, GitHub Actions, and other formats that own
+`{{`; literal `{{` in any non-file template remains unsupported, an accepted
+limitation.
+
+This supersedes A44's `${...}`/`$$` syntax and never-template-shell rule, and
+the untouched-shell clause in A58; A44's distinction between declared
+constants, functions, and port lookups and A58's argument-forwarding behavior
+remain in force. The old design put two rules on either side of the same seam:
+a declared value in a shell recipe could silently expand to empty in the shell,
+while a rendered shell or Compose file needed a wt-specific dollar escape.
+Using syntax disjoint from the shell gives every string one rule and leaves `$`
+entirely to the shell or rendered format.

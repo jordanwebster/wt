@@ -6,17 +6,17 @@ bin = ["target/debug"]
 commands = ["orbit"]
 
 [env]
-ORBIT_CONFIG = "${root()}/.wt/orbit/config.yaml"
-ORBIT_LOG = "${root()}/.wt/orbit/orbit.log"
+ORBIT_CONFIG = "{{root()}}/.wt/orbit/config.yaml"
+ORBIT_LOG = "{{root()}}/.wt/orbit/orbit.log"
 ORBIT_INVARIANT_FATAL = "1"
 
 [files.".wt/orbit/config.yaml"]
 marker = "#"
 content = """
-host_name: ${name_short()}
-socket_path: ${root()}/.wt/orbit/orbit.sock
-state_path: ${root()}/.wt/orbit/state/state.yaml
-data_dir: ${root()}/.wt/orbit/data
+host_name: {{name_short()}}
+socket_path: {{root()}}/.wt/orbit/orbit.sock
+state_path: {{root()}}/.wt/orbit/state/state.yaml
+data_dir: {{root()}}/.wt/orbit/data
 enable_cloud_mode: false
 prevent_idle_sleep: false
 claude:
@@ -44,7 +44,7 @@ needs = ["build"]
 # This checkout's daemon. A resource: `wt remove` stops it.
 [task.daemon]
 tied_to = "tree"
-name = "${name_short()}"
+name = "{{name_short()}}"
 needs = ["build"]
 exists = "orbit list >/dev/null 2>&1"
 run = "orbit server start"

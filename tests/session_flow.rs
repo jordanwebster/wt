@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use common::{write, write_executable, Harness};
 use wt_sys::proc::{self, CommandRequest, ProcessOutput};
 
-const SESSION_CONFIG: &str = "bin=['bin']\nports=['http']\n[env]\nAPP_PORT=\"${ports.http}\"\n";
+const SESSION_CONFIG: &str = "bin=['bin']\nports=['http']\n[env]\nAPP_PORT=\"{{ports.http}}\"\n";
 
 struct PrivateTmux {
     harness: Harness,

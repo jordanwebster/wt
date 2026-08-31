@@ -10,9 +10,9 @@ use std::collections::BTreeSet;
 const BASIC: &str = r#"
 ports = ["http"]
 [env]
-APP_PORT = "${ports.http}"
+APP_PORT = "{{ports.http}}"
 [files.".wt/generated"]
-content = "port=${ports.http}"
+content = "port={{ports.http}}"
 [task.hello]
 run = "printf hello"
 "#;
@@ -228,7 +228,7 @@ fn run_json_keeps_one_envelope_on_stdout() {
 }
 
 #[test]
-fn shell_recipes_are_opaque_but_argv_and_rendered_scripts_are_templates() {
+fn shell_and_argv_recipes_are_templates_while_dollars_stay_literal() {
     let h = Harness::new();
     let repo = h.repo(
         "repo",
@@ -236,22 +236,40 @@ fn shell_recipes_are_opaque_but_argv_and_rendered_scripts_are_templates() {
 ports = ["http"]
 [vars]
 private = "secret"
+[env]
+OLD_TEMPLATE = '${root()}'
 [files."generated.sh"]
 marker = ""
-content = "printf '%s\\n' '$${h%??}' '${private}' '${ports.http}'"
+content = "printf '%s\\n' '$' '${HOME}' '$$' '${h%??}' '{{private}}' '{{ports.http}}'"
+[files."verbatim.j2"]
+marker = ""
+template = false
+content = "{{ jinja_value }} ${HOME} $$"
+[files."source-copy.j2"]
+marker = ""
+template = false
+source = "input.j2"
 [task.shell]
-run = '''h=abcdef; printf '%s|%s|%s|%s' '${root()}' '$HOME' '$$' "${h%??}"'''
+run = '''h=abcdef; printf '%s|%s|%s|%s|%s|%s|%s|%s' '{{root()}}' '$' '$HOME' '${HOME}' '$$' "${h%??}" '{{private}}' '{{ports.http}}' '''
 [task.argv]
-run = ["printf", "%s|%s", "${private}", "${ports.http}"]
+run = ["printf", "%s|%s", "{{private}}", "{{ports.http}}"]
 "#,
     );
+    common::write(&repo.join("input.j2"), "{{ source_value }} ${HOME} $$");
     h.register(&repo);
+    assert_eq!(
+        h.json(&["env", "repo"])["data"]["env"]["OLD_TEMPLATE"],
+        "${root()}"
+    );
 
     h.wt()
         .args(["run", "shell", "repo"])
         .assert()
         .success()
-        .stdout(predicate::eq("${root()}|$HOME|$$|abcd"));
+        .stdout(predicate::eq(format!(
+            "{}|$|$HOME|${{HOME}}|$$|abcd|secret|20000",
+            std::fs::canonicalize(&repo).unwrap().display()
+        )));
     h.wt()
         .args(["run", "argv", "repo"])
         .assert()
@@ -259,8 +277,41 @@ run = ["printf", "%s|%s", "${private}", "${ports.http}"]
         .stdout(predicate::eq("secret|20000"));
     assert_eq!(
         std::fs::read_to_string(repo.join("generated.sh")).unwrap(),
-        "printf '%s\\n' '${h%??}' 'secret' '20000'"
+        "printf '%s\\n' '$' '${HOME}' '$$' '${h%??}' 'secret' '20000'"
     );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("verbatim.j2")).unwrap(),
+        "{{ jinja_value }} ${HOME} $$"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("source-copy.j2")).unwrap(),
+        "{{ source_value }} ${HOME} $$"
+    );
+}
+
+#[test]
+fn shell_resource_run_exists_and_destroy_are_templated_before_sh_c() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        r#"
+[vars]
+leaf = ".service"
+[task.service]
+tied_to = "tree"
+run = "touch '{{root()}}/{{leaf}}'"
+exists = "test -f '{{root()}}/{{leaf}}'"
+destroy = "rm -f '{{root()}}/{{leaf}}'"
+"#,
+    );
+    h.register(&repo);
+    h.wt().args(["run", "service", "repo"]).assert().success();
+    assert!(repo.join(".service").exists());
+    h.wt()
+        .args(["destroy", "service", "repo", "--yes"])
+        .assert()
+        .success();
+    assert!(!repo.join(".service").exists());
 }
 
 #[test]
@@ -349,12 +400,12 @@ fn backend_none_runs_build_plan_after_ready_and_respects_suppression() {
     let config = format!(
         r#"
 [task.prepare]
-run = ["sh", "-c", "printf 'prepare\\n' >> \"$$EVENTS\""]
+run = ["sh", "-c", "printf 'prepare\\n' >> \"$EVENTS\""]
 [task.prepare.env]
 EVENTS = "{}"
 [task.build]
 needs = ["prepare"]
-run = ["sh", "-c", "printf 'build:%s\\n' \"$$(cat \"$$WT_ROOT/.wt/build.status\")\" >> \"$$EVENTS\""]
+run = ["sh", "-c", "printf 'build:%s\\n' \"$(cat \"$WT_ROOT/.wt/build.status\")\" >> \"$EVENTS\""]
 [task.build.env]
 EVENTS = "{}"
 "#,
@@ -409,7 +460,7 @@ fn backend_none_build_failure_is_one_envelope_and_a_terminal_status() {
 bin = ["bin"]
 commands = ["orbit"]
 [task.build]
-run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status\"; exit 9"]
+run = ["sh", "-c", "cat \"$WT_ROOT/.wt/build.status\" > \"$WT_ROOT/seen-status\"; exit 9"]
 "#,
     );
     common::write_executable(&h.shims.join("orbit"), "#!/bin/sh\nprintf 'INSTALLED\\n'\n");
@@ -472,7 +523,7 @@ run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status
 bin = ["bin"]
 commands = ["orbit"]
 [task.build]
-run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status\""]
+run = ["sh", "-c", "cat \"$WT_ROOT/.wt/build.status\" > \"$WT_ROOT/seen-status\""]
 "#,
     );
     h.json(&["build", "repo/work"]);
@@ -659,12 +710,12 @@ fn section_10_1_trailing_args_append_to_argv_root_only_and_are_reported() {
         "repo",
         r#"
 [task.dependency]
-run=['${root()}/record-args', 'dependency', 'declared']
+run=['{{root()}}/record-args', 'dependency', 'declared']
 [task.argv]
-run=['${root()}/record-args', 'root', 'base']
+run=['{{root()}}/record-args', 'root', 'base']
 needs=['dependency']
 [task.test]
-run=['${root()}/record-args', 'alias', 'declared']
+run=['{{root()}}/record-args', 'alias', 'declared']
 "#,
     );
     common::write_executable(
@@ -889,7 +940,7 @@ fn section_10_1_trailing_args_cross_single_scope_composite() {
         "repo",
         r#"
 [dirs."d1".task.check]
-run=['${root()}/record-args', 'check']
+run=['{{root()}}/record-args', 'check']
 "#,
     );
     wt_sys::fsx::create_private_dir(&repo.join("d1")).unwrap();
@@ -1636,7 +1687,7 @@ fn register_repair_restores_only_a_replaced_canonical_checkout() {
     let h = Harness::new();
     let repo = h.repo(
         "repo",
-        "[files.'.wt/generated']\ncontent='restored ${target()}'\n[task.service]\nrun='true'\nexists='false'\ndestroy='true'\ntied_to='tree'\n",
+        "[files.'.wt/generated']\ncontent='restored {{target()}}'\n[task.service]\nrun='true'\nexists='false'\ndestroy='true'\ntied_to='tree'\n",
     );
     let registered = h.register(&repo);
     let tree_id = registered["data"]["tree"]["tree_id"]
@@ -2829,11 +2880,11 @@ ports=['http']
 bin=['bin']
 copy=['secret.txt']
 [vars]
-app_port="${ports.http}"
+app_port="{{ports.http}}"
 [env]
-APP_PORT='${app_port}'
+APP_PORT='{{app_port}}'
 [files.".wt/app.conf"]
-content='port=${app_port}'
+content='port={{app_port}}'
 [task.service]
 run='touch "$WT_ROOT/.service"'
 exists='test -f "$WT_ROOT/.service"'
@@ -3444,7 +3495,7 @@ run='touch "$WT_ROOT/.service"'
 exists='test -f "$WT_ROOT/.service"'
 destroy='rm -f "$WT_ROOT/.service"'
 tied_to='tree'
-name='${{name()}}'
+name='{{{{name()}}}}'
 [task.long]
 exists='false'
 destroy='true'

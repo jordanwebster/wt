@@ -22,11 +22,11 @@ expression: "normalize(value, &h.root)"
           },
           "dirs": {},
           "env": {
-            "APP_PORT": "${ports.http}"
+            "APP_PORT": "{{ports.http}}"
           },
           "files": {
             ".wt/generated": {
-              "content": "port=${ports.http}",
+              "content": "port={{ports.http}}",
               "marker": "#",
               "mode": "0644",
               "source": null

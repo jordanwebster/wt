@@ -1,7 +1,7 @@
 # wt — specification
 Normative specification for the clean re-implementation of `wt`. Read
 with `problem-statement.md` (requirements R1–R13) and
-`requirements-addendum.md` (binding decisions A1–A63);
+`requirements-addendum.md` (binding decisions A1–A66);
 `acceptance/*.wt.toml` are three representative configurations the
 implementation must accept unchanged.
 
@@ -67,7 +67,7 @@ TreeName   := /[A-Za-z0-9][A-Za-z0-9._-]{0,63}/ , not "." or ".." ; "canonical" 
 Target     := Label | Label "/" TreeName
 TaskId     := /[a-z0-9][a-z0-9._-]{0,63}/ ;  RelDir := "." | RelPath(dir)
 ScopedTask := (RelDir "/")? TaskId ; PrivateId := "@" AdapterId "/" ToolId "@" RelDir "/" TaskId
-PortName   := /[a-z][a-z0-9_]*/ → ${ports.<name>} in templates, not exported (A43) ; EnvKey := /[A-Za-z_][A-Za-z0-9_]*/ not /^WT_/ ; VarKey := /[a-z_][a-z0-9_]*/ ; CommandName := basename, no '/' or NUL
+PortName   := /[a-z][a-z0-9_]*/ → {{ports.<name>}} in templates, not exported (A43) ; EnvKey := /[A-Za-z_][A-Za-z0-9_]*/ not /^WT_/ ; VarKey := /[a-z_][a-z0-9_]*/ ; CommandName := basename, no '/' or NUL
 LockName   := /[a-z0-9][a-z0-9._-]{0,63}/ ; Duration := /[0-9]+(ms|s|m|h)/ ; TreeId := /[0-9a-f]{32}/
 ScopeEnc   := RelDir with "/" → "%2F", "." for root
 ```
@@ -146,12 +146,12 @@ Scope   := { bin?: [RelPath], commands?: [CommandName] | Map<CommandName,bool> �
              task?: Map<TaskId, Task|false>, adapters?: Map<AdapterId, { tool?: ToolId, disabled?: bool }> }
 Detect  := { depth?: 0|1|2 (1), ignore?: [RelPath] }
 LockCfg := { slots?: u16 (1, minimum 1), wait?: Duration }
-File    := { content?: Template, source?: RelPath, marker?: String ("#"; "" = no header), mode?: OctalString ★ ("0644") }
+File    := { content?: Template, source?: RelPath, template?: bool (true), marker?: String ("#"; "" = no header), mode?: OctalString ★ ("0644") }
 Task    := { run?: Cmd, exists?: Cmd, destroy?: Cmd, needs?: [ScopedTask|PrivateId], lock?: LockName, name?: Template,
              tied_to?: "tree"|"repo"|"machine", exclusive?: "repo"|"machine", env?: Map<EnvKey, Template>, cwd?: RelPath, timeout?: Duration, description?: String,
              ready_within?: Duration ★, snapshot_env?: [EnvKey] ★ }
-Cmd     := String | [String]          // `sh -c`: NEVER templated, every character is the shell's | argv: each element templated
-Template:= String                      // ${name} reads a var, ${ports.n} a declared port; ${fn()} calls; $$ is a literal $; `$` before a non-name character is literal
+Cmd     := String | [String]          // shell: whole string templated, then `sh -c`; argv: each element templated
+Template:= String                      // {{name}} reads a var, {{ports.n}} a declared port, {{fn()}} calls; no interior whitespace
 ```
 Every task declares at least one of `run`, `destroy`, or `needs`. A task with
 `needs` and neither `run` nor `destroy` is an aggregate and accepts only
@@ -178,11 +178,20 @@ fixed when the name is first declared and repeats identically. `ports` is a
 reserved `VarKey`. Any other call, or `ports.<name>` for a name absent from
 `ports`, is `CONFIG_INVALID` naming the offending reference. `vars` resolve as a DAG within a scope — file order is not
 significant — and a cycle or unknown name is `CONFIG_INVALID` naming every key
-on the cycle. A legacy `$NAME` template spelling, including the former
-`$WT_*` names, is `CONFIG_INVALID` at its source location and names the new
-spelling where one exists (`$WT_PORT_HTTP` → `${ports.http}`, `$WT_ROOT` →
-`${root()}`). `env`, `files` and task `name` templates may read `vars` and call
-functions; `vars` may read `vars` and call functions. A shell-string recipe is never templated, so `${h%??}` and `$HOME` reach the shell untouched; a recipe needing a non-exported value (a port, a var) declares it in the task's own `env` and reads it as an ordinary shell variable. An argv-form recipe has no shell, so each element is templated. A rendered file that is itself a shell script is template text like any other: write `$$` for a literal dollar. `ALIAS_REFERENCES_ALIAS`
+on the cycle. `{{` always begins a template expression. The expression must
+close with `}}`, contain no whitespace, and name a declared `vars` key, a
+declared port, or a permitted function; malformed and unknown expressions are
+`CONFIG_INVALID` at their source location (unknown dependencies within the
+`vars` DAG retain the `VARS_UNKNOWN` rule below). `env`, files whose `template` is
+true, task `name`, task recipes, and `vars` may read `vars` and call functions.
+A shell-string recipe is templated before `sh -c`; substitutions are inserted
+verbatim, so path-valued substitutions must be quoted or expressed with argv.
+Each argv element is templated independently. `$` has no meaning to wt:
+`$HOME`, `${h%??}`, `${root()}`, and `$$` all pass through literally for the
+shell or rendered file to interpret. A file with `template = false` passes its
+content or source text through verbatim while retaining the ordinary rendering,
+hash-ownership, marker, and mode rules. Literal `{{` is unsupported in every
+other template string. `ALIAS_REFERENCES_ALIAS`
 is withdrawn: composition happens in `vars`.
 
 ### 5.3 Directory scopes (A7)
@@ -210,13 +219,13 @@ Settings := { schema?: 1, trees_dir?, agents?: Map<String, { start: Cmd, resume:
 Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ base ≤ 65535`; `1 ≤ stride ≤ 255`; `max_slots = (65536 − base)/stride ≥ 1`; `session.agent`, when set, names a declared agent. A configuration carrying the former top-level agent key is refused by the ordinary unknown-key rule, with no bespoke check naming its replacement (A51). At `register`, or on the first `new`, `open`, or `close` in a home that predates this setting, an absent `session.backend` is resolved once: wt checks for tmux ≥ 3.2, writes `"tmux"` when found and `"none"` otherwise, and prints `sessions: tmux <version> (set session.backend to change)` or its `none` equivalent on stderr. A non-table `session` declaration that cannot be extended without rewriting is refused with a remedy to rewrite it as `[session]`. No command detects a session backend again after the key is written. `doctor` reports the effective backend as `SESSION_BACKEND` (info). Geometry is per incarnation and immutable (§7); `assemble` uses `TreeRec.geometry`; settings changes affect only future allocations; doctor `GEOMETRY_CHANGED` (info). Per tree `ports.len() ≤ geometry.stride` else `CONFIG_INVALID`. Built-in agents: `claude` (`claude` / `claude --continue`), `codex` (`codex` / `codex resume --last`).
 
 ### 5.5 Tool variables (A15; ★ new)
-`WT_LABEL`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_TARGET`, `WT_BRANCH`, `WT_ROOT`, `WT_REPO` (canonical path), `WT_HOME` (resolved home), `WT_SLOT` ★, `WT_SESSION`, `WT_BIN` ★, `WT_PATH_PREFIX` ★ (the exact shim-plus-bin prefix), `WT_ACTIVATION` ★ (the marker, §8.1), `WT_TASK`, `WT_SELF`. `WT_PORT_BASE` and `WT_PORT_<NAME>` are **not** exported (A43): ports are configuration inputs reached by `${ports.<name>}` (§5.2) and reported by `status`, `list` and `env`. `WT_BRANCH` is the HEAD branch **at spawn** (empty if detached), read by one bounded `git symbolic-ref --short -q HEAD`; it is not updated while a shell or session lives (A31). All except `WT_ACTIVATION` are ordinary variables with a recorded prior (§8.1). **Tree-specific keys** (used by §10.3): `WT_ROOT`, `WT_TARGET`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_SLOT`, `WT_SESSION`, `WT_BIN`, `WT_PATH_PREFIX`, `PATH`.
+`WT_LABEL`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_TARGET`, `WT_BRANCH`, `WT_ROOT`, `WT_REPO` (canonical path), `WT_HOME` (resolved home), `WT_SLOT` ★, `WT_SESSION`, `WT_BIN` ★, `WT_PATH_PREFIX` ★ (the exact shim-plus-bin prefix), `WT_ACTIVATION` ★ (the marker, §8.1), `WT_TASK`, `WT_SELF`. `WT_PORT_BASE` and `WT_PORT_<NAME>` are **not** exported (A43): ports are configuration inputs reached by `{{ports.<name>}}` (§5.2) and reported by `status`, `list` and `env`. `WT_BRANCH` is the HEAD branch **at spawn** (empty if detached), read by one bounded `git symbolic-ref --short -q HEAD`; it is not updated while a shell or session lives (A31). All except `WT_ACTIVATION` are ordinary variables with a recorded prior (§8.1). **Tree-specific keys** (used by §10.3): `WT_ROOT`, `WT_TARGET`, `WT_NAME`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_SLOT`, `WT_SESSION`, `WT_BIN`, `WT_PATH_PREFIX`, `PATH`.
 
 ### 5.6 Validation: static vs late-bound
 | Check | When | Error |
 |---|---|---|
-| grammar, unknown keys, identifiers, lexical paths (§5.7), durations, modes, template syntax; every `${…}` names a declared `vars` key or a permitted function with a declared port argument (§5.2); `destroy ⇒ exists ∧ tied_to`; `ready_within ⇒ exists`; `run ∨ destroy ∨ needs`; an aggregate carries only `needs` and `description`; one of `content`/`source`; port names unique; `ports.len() ≤ stride`; `commands` entries unique and basenames; a `copy` entry that is also a `files` key | parse/validate | `CONFIG_INVALID` (5) with `path:line:col` |
-| `vars` DAG acyclic and fully resolvable within the effective scope → `VARS_CYCLE` / `VARS_UNKNOWN` naming every key involved; `${NAME}` in a task `env` map naming another key of the same map → `TASK_ENV_SELF_REFERENCE` | resolve | `CONFIG_INVALID` |
+| grammar, unknown keys, identifiers, lexical paths (§5.7), durations, modes, template syntax in every enabled Template and every Cmd element; every `{{…}}` names a declared `vars` key or a permitted function with a declared port argument (§5.2); `destroy ⇒ exists ∧ tied_to`; `ready_within ⇒ exists`; `run ∨ destroy ∨ needs`; an aggregate carries only `needs` and `description`; one of `content`/`source`; port names unique; `ports.len() ≤ stride`; `commands` entries unique and basenames; a `copy` entry that is also a `files` key | parse/validate | `CONFIG_INVALID` (5) with `path:line:col` |
+| `vars` DAG acyclic and fully resolvable within the effective scope → `VARS_CYCLE` / `VARS_UNKNOWN` naming every key involved; an unknown `{{NAME}}` elsewhere → `CONFIG_INVALID`; `{{NAME}}` in a task `env` map naming another key of the same map → `TASK_ENV_SELF_REFERENCE` | resolve | `CONFIG_INVALID` |
 | `needs` resolvable/acyclic; `tied_to = repo` templates and recipes reference no tree-specific key (§5.5); `tied_to = machine` templates and recipes additionally reference neither `WT_LABEL`/`WT_REPO` nor `label()`/`repo()` | resolve | `CONFIG_INVALID` |
 | `bin`/`cwd` existence, `source` readability | door (`bin`: doctor, A50) | `BIN_DIR_MISSING` (doctor finding), `CWD_MISSING` (5), `FILE_SOURCE_MISSING` (5) |
 
@@ -246,7 +255,7 @@ Selection per scanned dir: user/repo `adapters.<id>.tool` > lockfile > sniff > `
 | go/go | `go.mod` | `go mod download` | `go build ./...` | `go test ./...` | `go vet ./...` | `gofmt -l -w .` | `go.sum`, `go.mod` |
 | submodules | `.gitmodules` | `git submodule update --init --recursive` (`sys_locks: [RepoGit]`, git class `submodule`) | — | — | — | — | `.gitmodules` |
 
-† only when `package.json` declares the script. Nudges: `node: if npm → pnpm`; `python: if pip|poetry → uv`; `cargo: sccache, used_if_env = ["RUSTC_WRAPPER=sccache"], used_if_file = [{~/.cargo/config.toml, build.rustc-wrapper ∋ sccache}]`; doctor evaluates `used_if_env` against the effective door env and each `used_if_file` rule (a sniff over a machine config file, `~/` via HOME, dotted `toml_key` walk, `contains` against the value) against the file's content → `ACCELERATOR_INACTIVE` (warn) / `ACCELERATOR_AVAILABLE` / `ACCELERATOR_MISSING` (info); never applied (R7). R7 mechanisms applied: worktree object sharing and `wt list --disk`. **Adapters own per-ecosystem cheapness (A46, A53)** and express it as ordinary layer-0 configuration. Both cargo tools set `CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}/${name_short()}"`, one build directory per tree grouped under the repository, while leaving `CARGO_TARGET_DIR` unset so each tree owns its binaries under its own `target/` (§9.2a). The directory is per-tree, never shared between trees (A64): Cargo's unit hashes omit the workspace path, so two checkouts of one workspace would write the same slots and corrupt each other's build-script output and mtime freshness; cross-tree reuse belongs to content-addressed layers (the sccache nudge, `CARGO_HOME`). `remove` deletes the directory with the tree (§11.4 step 11) and `prune` reaps orphans (§12). pnpm uses its content-addressed store and uv its global cache. Repository and user `env` layers override the cargo value by the ordinary merge rule, and the door reports inherited values it displaces. An adapter *may* contribute `commands`, and the merge and delete rules treat such a contribution like any other layer-0 key; no built-in adapter declares any today, because the names live in a manifest rather than in the static catalog, so a repository declares its own. `wt` is never a legal claim (§5.6): a name that refuses until built would make `wt build` unrunnable.
+† only when `package.json` declares the script. Nudges: `node: if npm → pnpm`; `python: if pip|poetry → uv`; `cargo: sccache, used_if_env = ["RUSTC_WRAPPER=sccache"], used_if_file = [{~/.cargo/config.toml, build.rustc-wrapper ∋ sccache}]`; doctor evaluates `used_if_env` against the effective door env and each `used_if_file` rule (a sniff over a machine config file, `~/` via HOME, dotted `toml_key` walk, `contains` against the value) against the file's content → `ACCELERATOR_INACTIVE` (warn) / `ACCELERATOR_AVAILABLE` / `ACCELERATOR_MISSING` (info); never applied (R7). R7 mechanisms applied: worktree object sharing and `wt list --disk`. **Adapters own per-ecosystem cheapness (A46, A53)** and express it as ordinary layer-0 configuration. Both cargo tools set `CARGO_BUILD_BUILD_DIR = "{{home()}}/cache/cargo-build/{{label()}}/{{name_short()}}"`, one build directory per tree grouped under the repository, while leaving `CARGO_TARGET_DIR` unset so each tree owns its binaries under its own `target/` (§9.2a). The directory is per-tree, never shared between trees (A64): Cargo's unit hashes omit the workspace path, so two checkouts of one workspace would write the same slots and corrupt each other's build-script output and mtime freshness; cross-tree reuse belongs to content-addressed layers (the sccache nudge, `CARGO_HOME`). `remove` deletes the directory with the tree (§11.4 step 11) and `prune` reaps orphans (§12). pnpm uses its content-addressed store and uv its global cache. Repository and user `env` layers override the cargo value by the ordinary merge rule, and the door reports inherited values it displaces. An adapter *may* contribute `commands`, and the merge and delete rules treat such a contribution like any other layer-0 key; no built-in adapter declares any today, because the names live in a manifest rather than in the static catalog, so a repository declares its own. `wt` is never a legal claim (§5.6): a name that refuses until built would make `wt build` unrunnable.
 
 ### 6.2 Composition and private ids
 Every adapter hit at scope `d` contributes private nodes `@<adapter>/<tool>@<d>/<k>` (`cwd = d`, origin `adapter`), never overridden by layers, addressable by `needs` and `wt tasks --private`. Public: at a non-root scope `d`, `d/k` is the layer task if declared there, else an alias of the private node; at root, `k` is the layer task if declared at root, else the composite `{ needs: [@submodules/git@./k?, @<root adapter>@./k?, d1/k, d2/k …] }` over sorted scopes with an effective `d/k`; an empty composite does not exist. A user-declared needs-only task is the same composite node shape, retaining its layer origin (A57). `verify` = `test` else `build` else absent (`NO_VERIFY`). orbitcloud before the repo layer: `sync` = composite over `@dotnet/dotnet@./sync`, `frontend/sync`, `website/sync`; after `[task.sync]`, `sync` is the repo task and all others remain addressable.
@@ -294,13 +303,13 @@ EnvOutput  := { env, activation, activation_json, render: [Render], report }
    alias_rule(k, v): set(k, v); report.(overrode|set) += k   // A42: a declared value always wins; the prior is recorded and restored on deactivation
 7. task door only: set(WT_TASK, id); if resource: set(WT_SELF, expand(name, env)); for (k, tpl) in task.env sorted: set(k, expand(tpl, env))   // ends with this node
 8. activation = { v:1, target, home, applied, prior: prior_map }; activation_json = canonical JSON (sorted keys, compact); env[WT_ACTIVATION] = activation_json   // not via set()
-9. files: for (path, f) sorted: render += Render{ path, content: expand(text, env), mode, header }
+9. files: for (path, f) sorted: body = if f.template then expand(text, env) else text; render += Render{ path, content: body, mode, header }
 10. report = { set, overrode, missing_bins, restored: dreport.restored }
 ```
 Every assignment is owned (in `applied`), including task env and contributed env (the A5 exception: they are tool-set and replaced by nested doors). `report.kept` and `force_env` are withdrawn (A42): a declared alias is a claim, so it always wins, and `overrode` names every inherited value it displaced. `wt env` shows both the applied and the prior value for an overridden key so the displacement is visible rather than silent.
 
 ### 8.3 Rendering and ownership (A30.1, A31)
-Tree state records `materialized: [ { path, kind: rendered|copied, hash|null, tracked_checked_at } ]`. Rendering runs **inside the tree-state RMW hold** (level 6): observe → decide → write → record, with no subprocess inside the hold. The tracked check (`git ls-files --error-unmatch -- <paths>`, one call) runs **before** the hold, only for paths without a record and at every `new`/`register`/`adopt`/`sync`; doors otherwise trust the record. Decision `render::decide(observed, record, new_bytes)`:
+Tree state records `materialized: [ { path, kind: rendered|copied, hash|null, tracked_checked_at } ]`. For `files` with `template = true`, `new_bytes` are the expanded content or source; with `template = false`, they are the verbatim content or source, in both cases with the configured marker header when enabled. Rendering runs **inside the tree-state RMW hold** (level 6): observe → decide → write → record, with no subprocess inside the hold. The tracked check (`git ls-files --error-unmatch -- <paths>`, one call) runs **before** the hold, only for paths without a record and at every `new`/`register`/`adopt`/`sync`; doors otherwise trust the record. Decision `render::decide(observed, record, new_bytes)`:
 
 | Target | Record | Decision |
 |---|---|---|
@@ -405,8 +414,8 @@ lock_plan(node, held) -> ascending [ Tree(shared) unless held, RepoGit if "RepoG
 before X1, and before `--dry-run` prints its plan. Starting at the invoked root,
 a node with a `run` recipe is the resolved argument target. Arguments reach
 only that recipe; nodes that run before it never receive them. An argv recipe
-appends them element-wise after templating. A shell-string recipe is unchanged
-and is spawned as `sh -c <recipe> <task-id> <args…>`, so the recipe places them
+appends them element-wise after templating. A shell-string recipe is templated
+and then spawned as `sh -c <expanded-recipe> <task-id> <args…>`, so the recipe places them
 through positional parameters. With arguments present, a lexical scan must
 find `$@`, `$*`, `${@`, `${*`, or `$<digit>` in the shell text, else
 `ARGS_UNSUPPORTED` (2) names `"$@"` as the fix; a match in a comment is an
@@ -482,7 +491,7 @@ CmdExpanded := { shell: String } | { argv: [String] }
 ResourceRecord := { key, declaration: ResourceSnapshot, instance: ResourceSnapshot|null, state: declared|present|orphaned, reason|null,
                     external: bool, undeclared: bool, last_probe: {at, result}|null, last_error: {at, event, message, child|null}|null, since }
 ```
-Probes, runs and destroys use `instance` when present, else `declaration` (§10.5). The **instance is frozen** from the fresh declaration (i) immediately before wt spawns `run` (durable before the spawn, so a crash mid-run still leaves a teardown snapshot) or (ii) at the first Present probe when `instance` is null (`external = true`); it is cleared only by a confirmed-absent probe. `Destroy` carries `teardown` (true inside `remove`, `unregister`, `prune`). Every state write is durable before the next effect; a `Failed` probe never triggers `run` or `destroy`. There are no persisted in-progress states: the resource lock (§10.2) serialises transitions and the next probe decides after a crash (principle 4). `name` default: tree-tied `${WT_NAME_SHORT}_<name_snake(ScopedTask)>`, repo-tied `${WT_LABEL}_<name_snake(ScopedTask)>`, machine-tied `machine_<name_snake(ScopedTask)>`; `WT_SELF` is the expanded value.
+Probes, runs and destroys use `instance` when present, else `declaration` (§10.5). The **instance is frozen** from the fresh declaration (i) immediately before wt spawns `run` (durable before the spawn, so a crash mid-run still leaves a teardown snapshot) or (ii) at the first Present probe when `instance` is null (`external = true`); it is cleared only by a confirmed-absent probe. `Destroy` carries `teardown` (true inside `remove`, `unregister`, `prune`). Every state write is durable before the next effect; a `Failed` probe never triggers `run` or `destroy`. There are no persisted in-progress states: the resource lock (§10.2) serialises transitions and the next probe decides after a crash (principle 4). `name` default: tree-tied `{{name_short()}}_<name_snake(ScopedTask)>`, repo-tied `{{label()}}_<name_snake(ScopedTask)>`, machine-tied `machine_<name_snake(ScopedTask)>`; `WT_SELF` is the expanded value.
 
 | State | Run | Probe (`list`/`status --probe`) | Destroy | Refresh |
 |---|---|---|---|---|

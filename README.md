@@ -61,17 +61,17 @@ bin      = ["target/debug"]       # where its binaries are built
 ports    = ["http", "db"]         # allocated per worktree
 
 [vars]                            # private: never leaves this file
-db_name = "orbit_${name_snake()}"
-db_url  = "postgres://localhost:${ports.db}/${db_name}"
+db_name = "orbit_{{name_snake()}}"
+db_url  = "postgres://localhost:{{ports.db}}/{{db_name}}"
 
 [env]                             # claimed: what your app actually sees
-DATABASE_URL = "${db_url}"
-PORT         = "${ports.http}"
+DATABASE_URL = "{{db_url}}"
+PORT         = "{{ports.http}}"
 
 [files."config/local.yaml"]       # rendered fresh for each worktree
 content = """
-database: ${db_url}
-port: ${ports.http}
+database: {{db_url}}
+port: {{ports.http}}
 """
 ```
 
@@ -86,51 +86,48 @@ generated name doesn't become ambient state in every process you launch.
 
 ## Values and functions
 
-Anything in `${…}` is evaluated. A bare name is a constant you defined; a name
+Anything in `{{…}}` is evaluated. A bare name is a constant you defined; a name
 with parentheses is a function `wt` provides.
 
 | | |
 |---|---|
-| `${db_url}` | a constant from your own `[vars]` |
-| `${name()}` | the worktree's name |
-| `${name_snake()}` | the same, safe for identifiers |
-| `${label()}` | the repository's label |
-| `${name_short()}` | a short unique name, stable for the worktree's life |
-| `${target()}` | `label/name`, how you address it |
-| `${branch()}` | the branch checked out when the process started |
-| `${home()}` | the resolved wt home |
-| `${root()}` | the worktree's absolute path |
-| `${repo()}` | the registered checkout's absolute path |
-| `${ports.http}` | the port you named `http` |
+| `{{db_url}}` | a constant from your own `[vars]` |
+| `{{name()}}` | the worktree's name |
+| `{{name_snake()}}` | the same, safe for identifiers |
+| `{{label()}}` | the repository's label |
+| `{{name_short()}}` | a short unique name, stable for the worktree's life |
+| `{{target()}}` | `label/name`, how you address it |
+| `{{branch()}}` | the branch checked out when the process started |
+| `{{home()}}` | the resolved wt home |
+| `{{root()}}` | the worktree's absolute path |
+| `{{repo()}}` | the registered checkout's absolute path |
+| `{{ports.http}}` | the port you named `http` |
 
-Ports are a lookup, not an allocation: `${ports.db}` is the port you named
+Ports are a lookup, not an allocation: `{{ports.db}}` is the port you named
 `db` in the `ports` list, it returns the same number every time, and a name
 keeps its number when the list is reordered or extended.
 
-**Recipes are never touched.** A task's `run`, `exists` or `destroy` written as
-a shell string belongs entirely to the shell — `${h%??}` and `$HOME` mean what
-bash says they mean. When a recipe needs a port or a private value, hand it
-over by name:
+Shell-string and argv recipes use the same templates. Shell strings are filled
+before `sh -c`, with substitutions inserted verbatim, so quote path-valued
+substitutions. Dollar signs belong entirely to the shell: `${h%??}`, `$HOME`,
+and `$$` reach it unchanged.
 
 ```toml
-[task.check.env]
-DB_PORT = "${ports.db}"
-
 [task.check]
-run = "psql -p $DB_PORT -c 'select 1'"
+run = "psql -p '{{ports.db}}' -c 'select 1'"
 ```
 
 Written as a list instead of a string there is no shell to collide with, so
 each element is filled in directly:
 
 ```toml
-run = ["psql", "-p", "${ports.db}", "-c", "select 1"]
+run = ["psql", "-p", "{{ports.db}}", "-c", "select 1"]
 ```
 
-Use `$$` for a literal dollar sign — including inside a `files` entry that
-generates a shell script, where `$${h%??}` keeps the dollar for bash. `wt config <target>` shows every value
-with the layer it came from, which is the fastest way to answer "why is it
-that?".
+Every `{{` starts a template expression; whitespace inside an expression is
+invalid. Set `template = false` on a `files` entry whose content or source uses
+literal `{{` syntax, such as Jinja, Helm, or GitHub Actions. `wt config
+<target>` shows every value with the layer it came from.
 
 ## Install
 
@@ -308,7 +305,7 @@ Top-level keys:
   until it is built would make `wt build` unrunnable.
 - `bin`: relative directories prepended to `PATH`. Where the binaries are;
   `commands` is which names they provide.
-- `ports`: named ports, reachable as `${ports.<name>}`.
+- `ports`: named ports, reachable as `{{ports.<name>}}`.
 - `vars`: private values, composed from functions and from each other. Never
   exported. Evaluated as a dependency graph, so order in the file does not
   matter; a cycle or an unknown name is an error naming the keys involved.
@@ -351,9 +348,9 @@ runs in a background tmux window, or synchronously when the session backend is
 ```toml
 [task.database]
 tied_to = "tree"
-exists  = "psql -lqt | cut -d'|' -f1 | grep -qw ${db_name}"
-run     = "createdb ${db_name} && sqlx migrate run"
-destroy = "dropdb ${db_name}"
+exists  = "psql -lqt | cut -d'|' -f1 | grep -qw '{{db_name}}'"
+run     = "createdb '{{db_name}}' && sqlx migrate run"
+destroy = "dropdb '{{db_name}}'"
 
 [task.build]
 run   = "cargo build"
@@ -466,7 +463,7 @@ any default.
 A fresh worktree starts warm **in that ecosystem's own terms**, not by copying
 build output around. Cargo 1.91+ separates build intermediates from outputs;
 the adapter gives every tree its own
-`${home()}/cache/cargo-build/${label()}/${name_short()}` build directory —
+`{{home()}}/cache/cargo-build/{{label()}}/{{name_short()}}` build directory —
 private, because Cargo's unit hashes ignore the workspace path, so trees
 sharing one directory would corrupt each other's generated code and
 freshness — while each tree keeps its binaries in its own `target/`. The

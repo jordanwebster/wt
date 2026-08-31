@@ -563,7 +563,7 @@ mod tests {
         assert!(contribution.sync_inputs.contains(&"Cargo.toml".to_owned()));
         assert_eq!(
             contribution.env["CARGO_BUILD_BUILD_DIR"],
-            "${home()}/cache/cargo-build/${label()}/${name_short()}"
+            "{{home()}}/cache/cargo-build/{{label()}}/{{name_short()}}"
         );
         assert!(!contribution.env.contains_key("CARGO_TARGET_DIR"));
         assert!(contribution
