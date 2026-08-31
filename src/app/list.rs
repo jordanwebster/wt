@@ -6,8 +6,8 @@ use wt_core::config::TiedTo;
 use wt_core::lifecycle::{DerivedPhase, RepoState};
 use wt_core::model::{Label, TreeRec};
 use wt_core::report::{
-    DirtyReport, LastErrorReport, LastProbeReport, ListData, PortReport, ResourceReport,
-    SyncTreeReport, TreeReport, UpstreamReport, VerifyTreeReport,
+    BuildTreeReport, DirtyReport, LastErrorReport, LastProbeReport, ListData, PortReport,
+    ResourceReport, SyncTreeReport, TreeReport, UpstreamReport, VerifyTreeReport,
 };
 use wt_core::resource::{ProbeResult, ResourceKey, ResourceRecord, ResourceState};
 use wt_core::CoreError;
@@ -180,6 +180,23 @@ fn tree_report_with_shared(
         (None, None, None, None, None, Vec::new())
     };
     let session = session_state(context, tree);
+    let build = state
+        .as_ref()
+        .and_then(|state| state.build.as_ref())
+        .map(|build| {
+            let status = Path::new(tree.path.as_str()).join(".wt/build.status");
+            wt_sys::fsx::read_string(&status).map(|value| BuildTreeReport {
+                state: value
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| matches!(*value, "running" | "ok" | "failed"))
+                    .unwrap_or("unknown")
+                    .to_owned(),
+                started: build.started.clone(),
+                log: build.log.clone(),
+            })
+        })
+        .transpose()?;
     let mut ports = tree
         .ports
         .iter()
@@ -274,6 +291,7 @@ fn tree_report_with_shared(
             ok: verify.ok,
             at: verify.at.clone(),
         }),
+        build,
         session,
         session_name: tree.session_name.clone(),
         agent: tree.agent.clone(),

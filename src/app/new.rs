@@ -891,6 +891,7 @@ fn ready_report(
         resumed,
         sync,
         verify,
+        build: None,
     })?
     .with_notices(notices))
 }

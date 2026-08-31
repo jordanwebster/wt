@@ -248,6 +248,9 @@ fn render_status(data: StatusData, notices: &[Notice]) -> String {
             format!("{} modified, {} untracked", dirty.modified, dirty.untracked),
         ));
     }
+    if let Some(build) = data.tree.build {
+        facts.push(("build", format!("{} (log {})", build.state, build.log)));
+    }
     if !data.tree.meta.is_empty() {
         facts.push((
             "meta",

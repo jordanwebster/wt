@@ -112,6 +112,33 @@ fn tree_findings(
             "re-run `wt new --verify` for this tree",
         ));
     }
+    if let Some(build) = &report.build {
+        match build.state.as_str() {
+            "running" => findings.push(finding(
+                Severity::Info,
+                "BUILD_RUNNING",
+                &report.target,
+                format!("automatic build is running; log: {}", build.log),
+                "wait for completion or inspect the build log",
+            )),
+            "failed" => findings.push(finding(
+                Severity::Warn,
+                "BUILD_FAILED",
+                &report.target,
+                format!("automatic build failed; log: {}", build.log),
+                "inspect the log and run `wt build` to retry",
+            )),
+            "unknown" => findings.push(finding(
+                Severity::Warn,
+                "BUILD_STATUS_MISSING",
+                &report.target,
+                format!("automatic build status is unavailable; log: {}", build.log),
+                "inspect the log and run `wt build` to establish a fresh status",
+            )),
+            "ok" => {}
+            _ => unreachable!("list normalises build status values"),
+        }
+    }
     if report.phase == "missing"
         && state
             .as_ref()

@@ -11,6 +11,7 @@ expression: "normalize(value, &h.root)"
         "agent": null,
         "behind_default": 0,
         "branch": "main",
+        "build": null,
         "cache_kb": null,
         "canonical": true,
         "detached_sha": null,
@@ -53,7 +54,7 @@ expression: "normalize(value, &h.root)"
           }
         ],
         "session": "no",
-        "session_name": "wt_repo_canonical_be9ff5d9",
+        "session_name": "repo",
         "slot": 0,
         "sync": {
           "at": null,

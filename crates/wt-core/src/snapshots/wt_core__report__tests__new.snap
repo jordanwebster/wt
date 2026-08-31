@@ -45,6 +45,7 @@ expression: envelope
         "ok": true,
         "at": "TIME"
       },
+      "build": null,
       "session": "no",
       "session_name": "session",
       "agent": null,
@@ -112,7 +113,8 @@ expression: envelope
           "duration_ms": 12
         }
       ]
-    }
+    },
+    "build": null
   },
   "notices": [
     {

@@ -207,8 +207,6 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
     let tool = BTreeMap::from([
         ("WT_LABEL".to_owned(), input.tree.label.to_string()),
         ("WT_NAME".to_owned(), input.tree.name.clone()),
-        ("WT_NAME_SNAKE".to_owned(), name_snake(&input.tree.name)),
-        ("WT_NAME_SHORT".to_owned(), input.tree.name_short.clone()),
         ("WT_TARGET".to_owned(), target.clone()),
         (
             "WT_BRANCH".to_owned(),
@@ -217,8 +215,6 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
         ("WT_ROOT".to_owned(), input.tree.root.clone()),
         ("WT_REPO".to_owned(), input.tree.repo.clone()),
         ("WT_HOME".to_owned(), input.home.to_owned()),
-        ("WT_SLOT".to_owned(), input.tree.slot.to_string()),
-        ("WT_SESSION".to_owned(), input.tree.session_name.clone()),
     ]);
     for (key, value) in &tool {
         state.set(key, value);
@@ -600,7 +596,7 @@ mod tests {
         let output = output(&EnvMap::new(), "a", None);
         assert_eq!(
             output.activation_json,
-            r#"{"applied":{"PATH":"/trees/a/bin","PORT":"20016","WT_BIN":"/trees/a/bin","WT_BRANCH":"a","WT_HOME":"/home","WT_LABEL":"repo","WT_NAME":"a","WT_NAME_SHORT":"repo_a_12345678","WT_NAME_SNAKE":"a","WT_PATH_PREFIX":"/trees/a/bin","WT_REPO":"/repo","WT_ROOT":"/trees/a","WT_SESSION":"wt_repo_a_12345678","WT_SLOT":"1","WT_TARGET":"repo/a"},"home":"/home","prior":{"PATH":null,"PORT":null,"WT_BIN":null,"WT_BRANCH":null,"WT_HOME":null,"WT_LABEL":null,"WT_NAME":null,"WT_NAME_SHORT":null,"WT_NAME_SNAKE":null,"WT_PATH_PREFIX":null,"WT_REPO":null,"WT_ROOT":null,"WT_SESSION":null,"WT_SLOT":null,"WT_TARGET":null},"target":"repo/a","v":1}"#
+            r#"{"applied":{"PATH":"/trees/a/bin","PORT":"20016","WT_BIN":"/trees/a/bin","WT_BRANCH":"a","WT_HOME":"/home","WT_LABEL":"repo","WT_NAME":"a","WT_PATH_PREFIX":"/trees/a/bin","WT_REPO":"/repo","WT_ROOT":"/trees/a","WT_TARGET":"repo/a"},"home":"/home","prior":{"PATH":null,"PORT":null,"WT_BIN":null,"WT_BRANCH":null,"WT_HOME":null,"WT_LABEL":null,"WT_NAME":null,"WT_PATH_PREFIX":null,"WT_REPO":null,"WT_ROOT":null,"WT_TARGET":null},"target":"repo/a","v":1}"#
         );
         assert_eq!(output.env[ACTIVATION_KEY], output.activation_json);
     }

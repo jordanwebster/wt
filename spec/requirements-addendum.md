@@ -287,8 +287,10 @@ git's own open is documented and not defended against. (Settles R5.)
 
 Repo-tied recipes may not reference tree-specific variables (already a
 validation rule); their snapshot `env` therefore excludes `WT_ROOT`,
-`WT_TARGET`, `WT_NAME*`, `WT_SLOT`, `WT_PORT_*`, `WT_SESSION`, `WT_BIN`,
-`PATH` and is compared for agreement on what remains. (Settles R6/S5.)
+`WT_TARGET`, `WT_NAME`, `WT_BRANCH`, `WT_BIN`, `WT_PATH_PREFIX`, and `PATH`,
+and is compared for agreement on what remains. A70 removed the older
+tree-specific exports rather than leaving inert stripping rules for them.
+(Settles R6/S5; export list updated by A70.)
 
 ## A29. Path-derived resource identities are shared by whatever occupies the path
 
@@ -740,7 +742,7 @@ ones: capacity for a named lock is a machine fact expressed through the
 ordinary layer merge (A59), an exclusive resource occupies one slot of a wider
 arena (A60), and a machine-tied task is a resource whose arena is the host
 (A61). The stripping rule generalises: a repo-scoped snapshot carries no
-tree-specific keys (A28); a machine-scoped snapshot additionally carries no
+current tree-specific keys (A28/A70); a machine-scoped snapshot additionally carries no
 repo-specific keys (`WT_LABEL`, `WT_REPO`, and the `label()` / `repo()`
 functions). Rationale: three consumer requests — lock capacity, exclusive
 holders, machine-scoped onboarding — are one missing concept; naming the axis
@@ -846,8 +848,8 @@ and the consent gate cannot be built inside a recipe.
 docker running, an authenticated CLI, a base database every repository
 shares. Records live in `$WT_HOME/state/_machine.json`, keyed by
 `ScopedTask` exactly as `_repo.json` is; two labels declaring the same
-scoped task share the record. Declarations are stripped of tree- and
-repo-specific keys (A56), and the invoking context's stripped declaration is
+scoped task share the record. Declarations are stripped of the current tree-
+and repo-specific keys (A56/A70), and the invoking context's stripped declaration is
 effective until an instance is frozen — exactly as A31 reads A28 for repo
 scope, with no cross-repo agreement mechanism. Machine-tied templates and
 recipes may reference neither tree-specific nor repo-specific keys
@@ -977,3 +979,68 @@ a declared value in a shell recipe could silently expand to empty in the shell,
 while a rendered shell or Compose file needed a wt-specific dollar escape.
 Using syntax disjoint from the shell gives every string one rule and leaves `$`
 entirely to the shell or rendered format.
+
+## A67. Session names are sanitised target strings
+
+For a new allocation, `session_name` is the target's display form — `label` for
+the canonical tree and `label/name` otherwise — with `.` and `:` mapped to `_`.
+There is no `wt_` prefix, truncation, or hash fallback. A collision with any
+live or tombstoned session name is `IDENTITY_COLLISION` with the existing
+choose-another-tree-name remedy. Existing persisted names and tombstone
+inheritance are untouched. Every tmux operation addressing a target uses
+tmux's `=name` exact-match form, because an unadorned target prefix-matches.
+
+This supersedes the §3.1 hashed `session_name` formula. A collision now means
+two display names differ only where tmux cannot preserve their punctuation; it
+is rare enough that refusing the ambiguity is clearer than hiding it behind a
+generated suffix.
+
+## A68. `open` is universal and the canonical tree is an anchor
+
+With `session.backend = "none"`, a per-tree `open` performs the ordinary door
+and execs the same interactive shell program, arguments, environment, and cwd
+as `wt shell`; `close` is an exit-zero no-op carrying `closed:false` and a
+sessions-disabled notice. `open --all` remains tmux-only and tells callers to
+open trees individually otherwise. On tmux it skips canonical trees: the
+canonical checkout is an explicit anchor, not another fleet session.
+
+The `session.agent` default likewise does not select an agent for an explicit
+canonical open. An explicit `--agent` works there, and a recorded agent resumes
+as before. The attachment predicate, startup observation window, and
+agent-to-shell wrapper are unchanged. This supersedes §9.4's
+`SESSION_DISABLED` refusal for per-tree open and close.
+
+## A69. Automatic build has a backend-independent detached supervisor
+
+After a tree becomes ready, `new` launches its effective `build` task through a
+setsid/double-fork supervisor on both backends. The supervisor invokes the
+ordinary task path, so `needs`, locks, environment assembly, logging, and
+foreground `wt build` behavior remain one implementation. It writes `running`
+before launch and atomically replaces the status with `ok` or `failed` after
+the originating CLI has exited. Human output reports that the build started and
+names its log; JSON carries `{started, log}` and never waits.
+
+Build failure is subsequently surfaced by `status`, `doctor`, and owned-command
+shims. The tree state contains no window field and tmux owns no setup window.
+This supersedes A47's window mechanism and synchronous none-backend build;
+A47's automatic task choice, `--no-build` behavior, and task-graph rationale
+remain in force.
+
+## A70. Exported environment separates interface from mechanism
+
+The stable interface is `WT_TARGET`, `WT_LABEL`, `WT_NAME`, `WT_ROOT`,
+`WT_REPO`, `WT_HOME`, and `WT_BRANCH`. The mechanism tier —
+`WT_ACTIVATION`, `WT_PATH_PREFIX`, `WT_BIN`, `WT_SELF`, and `WT_TASK` — may
+change as door implementation changes. This supersedes the previous §5.5
+export list: `WT_SESSION`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, and `WT_SLOT` are
+deleted exports. Snapshot minimisation strips the remaining tree-specific keys,
+including `WT_BRANCH`, at repo and machine scope as appropriate.
+
+Derivations belong to template functions such as `{{name_snake()}}` and
+`{{name_short()}}`, which remain. A session name is redundant with the target
+after A67; a script addressing its own pane has tmux's `$TMUX_PANE`, and fleet
+lookup belongs through `wt list --json`. Shell initialisation therefore keeps
+completion and the PATH guard, removes the `wtcd` and `wtsh` helpers, and adds
+a guarded `(<target>) ` prompt prefix that is inert outside a door. The built-in
+Claude start recipe names the bare tree with
+`["claude", "--name", "{{name()}}"]`.

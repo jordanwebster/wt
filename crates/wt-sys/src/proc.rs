@@ -222,12 +222,7 @@ fn recorded_build_progress(root: &Path, target: &str) -> Option<String> {
     let state: serde_json::Value = serde_json::from_slice(&std::fs::read(state_path).ok()?).ok()?;
     let build = state.get("build")?.as_object()?;
     let log = build.get("log")?.as_str()?;
-    let window = build.get("window").and_then(serde_json::Value::as_str);
-    let location = window.map_or_else(
-        || format!("log `{log}`"),
-        |window| format!("window `{window}`; watch log `{log}`"),
-    );
-    Some(format!("; the build is in progress in {location}"))
+    Some(format!("; the build is in progress; watch log `{log}`"))
 }
 
 fn shim_refusal(message: String) -> i32 {
@@ -378,6 +373,110 @@ pub fn run(
     tee: Tee,
 ) -> Result<ProcessOutput> {
     run_with_header(request, log, None, timeout, tee)
+}
+
+/// Starts a process in a new session through an intermediate child, so the
+/// launched process is reparented and outlives the invoking CLI.
+pub fn spawn_detached(request: &CommandRequest) -> Result<()> {
+    trace_spawn(request)?;
+    let mut pipe = [0; 2];
+    // SAFETY: `pipe` points to two writable integers.
+    if unsafe { libc::pipe(pipe.as_mut_ptr()) } < 0 {
+        return Err(io_error("create detached-spawn pipe")(
+            std::io::Error::last_os_error(),
+        ));
+    }
+    for fd in pipe {
+        // SAFETY: both descriptors were just created by `pipe`.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            // SAFETY: both descriptors remain owned by this process.
+            unsafe {
+                libc::close(pipe[0]);
+                libc::close(pipe[1]);
+            }
+            return Err(io_error("mark detached-spawn pipe close-on-exec")(
+                std::io::Error::last_os_error(),
+            ));
+        }
+    }
+    // SAFETY: fork duplicates this process. The child performs only the
+    // bounded session/fork/exec sequence below and exits with `_exit`.
+    let first = unsafe { libc::fork() };
+    if first < 0 {
+        // SAFETY: both descriptors were created by `pipe` and remain owned here.
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
+        return Err(io_error("fork detached supervisor")(
+            std::io::Error::last_os_error(),
+        ));
+    }
+    if first == 0 {
+        // SAFETY: the child owns its duplicated descriptors.
+        unsafe { libc::close(pipe[0]) };
+        if unsafe { libc::setsid() } < 0 {
+            detached_child_error(pipe[1], "setsid failed");
+        }
+        // SAFETY: the second fork creates the reparented supervisor process.
+        let second = unsafe { libc::fork() };
+        if second < 0 {
+            detached_child_error(pipe[1], "second fork failed");
+        }
+        if second > 0 {
+            // SAFETY: the intermediate child must not run Rust destructors.
+            unsafe { libc::_exit(0) };
+        }
+        let mut command = build_command(request, false);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let error = command.exec();
+        detached_child_error(pipe[1], &format!("exec failed: {error}"));
+    }
+
+    // SAFETY: the parent no longer writes to the exec-status pipe.
+    unsafe { libc::close(pipe[1]) };
+    let mut status = 0;
+    // SAFETY: `first` is this process's direct child and `status` is writable.
+    if unsafe { libc::waitpid(first, &mut status, 0) } < 0 {
+        // SAFETY: close the still-owned read descriptor on the error path.
+        unsafe { libc::close(pipe[0]) };
+        return Err(io_error("wait for detached supervisor")(
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: the read descriptor is uniquely owned here and transferred to File.
+    let mut reader = unsafe { File::from_raw_fd(pipe[0]) };
+    let mut error = String::new();
+    reader
+        .read_to_string(&mut error)
+        .map_err(io_error("read detached-spawn status"))?;
+    if error.is_empty() {
+        Ok(())
+    } else {
+        Err(CoreError::new(
+            ExitClass::External,
+            "SPAWN_FAILED",
+            format!(
+                "could not spawn detached `{}`: {error}",
+                request.program.to_string_lossy()
+            ),
+            "verify that the command is executable and retry",
+        ))
+    }
+}
+
+fn detached_child_error(fd: RawFd, message: &str) -> ! {
+    let bytes = message.as_bytes();
+    // SAFETY: `fd` is the child's live pipe descriptor and `bytes` is valid for
+    // the duration of the write. `_exit` avoids unwinding after fork.
+    unsafe {
+        libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+        libc::_exit(127)
+    }
 }
 
 /// Runs a child like [`run`] and writes a header only to the task log.

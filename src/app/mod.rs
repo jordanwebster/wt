@@ -129,15 +129,17 @@ pub fn main(cli: Cli) -> i32 {
         Ok(mut output) => {
             if json {
                 if let Some(AfterRender::Build { target }) = output.after_render.take() {
-                    if let Err(error) = open::start_build(
+                    match open::start_build(
                         opened_context
                             .as_mut()
                             .expect("deferred actions require an open context"),
                         &target,
                     ) {
-                        output = output
-                            .with_notices([open::build_failure_notice(&target, &error)])
-                            .with_failure(error);
+                        Ok(build) => {
+                            output.data["build"] =
+                                serde_json::to_value(build).expect("build state always serializes");
+                        }
+                        Err(error) => output = output.with_failure(error),
                     }
                 }
             }
@@ -188,11 +190,12 @@ pub fn main(cli: Cli) -> i32 {
                             emit_session_warning(&target, &error);
                         }
                     }
-                    AfterRender::Build { target } => {
-                        if let Err(error) = open::start_build(context, &target) {
-                            return render_error(&command, json, color, error, Vec::new());
+                    AfterRender::Build { target } => match open::start_build(context, &target) {
+                        Ok(build) => println!("build started  {}", build.log),
+                        Err(error) => {
+                            return render_error(&command, json, color, error, Vec::new())
                         }
-                    }
+                    },
                     AfterRender::Attach { session } => {
                         if let Err(error) = open::attach(context, &session) {
                             return render_error(&command, json, color, error, Vec::new());

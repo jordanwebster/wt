@@ -168,7 +168,7 @@ impl Harness {
 s="$WT_SHIM_STATE/tmux"; mkdir -p "$s"
 case "$1" in
   -V) echo "tmux 3.4" ;;
-  has-session) [ -d "$s/$3" ] ;;
+  has-session) n=${3#=}; [ -d "$s/$n" ] ;;
   new-session)
     shift; n=""; c="."
     while [ $# -gt 0 ]; do
@@ -182,7 +182,7 @@ case "$1" in
     done
     mkdir -p "$s/$n"; printf '%s\n' "$c" > "$s/$n/cwd"; printf '%s\n' "$@" > "$s/$n/argv" ;;
   set-option) : ;;
-  kill-session) rm -rf "$s/$3" ;;
+  kill-session) n=${3#=}; rm -rf "$s/$n" ;;
   switch-client|attach-session) : ;;
 esac
 "#,

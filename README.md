@@ -38,7 +38,7 @@ The guarantee runs both ways. If this worktree hasn't built `orbit` yet, `wt`
 
 ```console
 $ orbit serve
-orbit: this worktree's build isn't ready yet (still building, see window wt:setup).
+orbit: this worktree's build isn't ready yet (still building; see the reported log).
        Run /usr/local/bin/orbit if you meant the installed copy.
 ```
 
@@ -182,10 +182,10 @@ Created orbit/fix-scrolling
 ```
 
 You land inside the worktree, in its own session, with its environment live.
-With tmux, the repository's `build` task runs in a second window in the
-background; with `session.backend = "none"`, it runs synchronously. While a
-build is running, a command this worktree owns says so instead of running the
-wrong one.
+On either session backend, the repository's `build` task starts in a detached
+supervisor and reports its log path without making `wt new` wait. While a build
+is running, a command this worktree owns says so instead of running the wrong
+one; `wt status` and `wt doctor` report completion or failure.
 
 ```sh
 wt new orbit/review-42 --from pr:42 --no-attach   # provision, don't enter
@@ -203,7 +203,7 @@ cannot read them, and no behaviour depends on them. Keys match
 a key spelled `JIRA-ID` is refused for the capitals and the dash.
 
 Worktrees live under `$WT_HOME/trees/<label>/<name>` by default. `wt path`
-prints the exact root, and `wtcd` from shell initialization changes to it.
+prints the exact root.
 
 ### Doors: `run`, `exec`, `shell`, and sessions
 
@@ -239,6 +239,12 @@ wt open orbit/fix-scrolling --agent codex
 wt open --all
 wt close orbit/fix-scrolling
 ```
+
+With `session.backend = "none"`, a per-tree `open` enters the same interactive
+shell as `wt shell`; `open --all` is tmux-only. With tmux, `open --all` skips
+the canonical checkout, which is the repository anchor and can be opened
+explicitly. The configured `session.agent` default likewise does not apply to
+that canonical checkout; an explicit `--agent` still does.
 
 A coding agent starts only when `wt` *creates* a session, never when it
 attaches to one that already exists — a session is provisioning, and an agent
@@ -342,8 +348,8 @@ needs = ["cli-login", "database", "build"]
 ```
 
 **The task named `build` runs automatically after a worktree is created.** It
-runs in a background tmux window, or synchronously when the session backend is
-`none`. Give it `needs` to pull in whatever else setup requires:
+runs under the same detached supervisor on either session backend. Give it
+`needs` to pull in whatever else setup requires:
 
 ```toml
 [task.database]
@@ -419,11 +425,18 @@ separately, so cap what one repository's worktrees may run at once.
 
 ## Environment rules
 
-Inside a worktree, `wt` sets its identity — `WT_LABEL`, `WT_NAME`,
-`WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_TARGET`, `WT_BRANCH`, `WT_ROOT`,
-`WT_REPO`, `WT_HOME`, `WT_SLOT`, `WT_SESSION`, `WT_BIN` — so `cd $WT_ROOT`
-works and scripts can find their bearings. `WT_TASK` is set while a task runs;
-`WT_SELF` in resource recipes.
+Inside a worktree, `wt` exports two tiers:
+
+| Tier | Variables | Change policy |
+| --- | --- | --- |
+| Interface | `WT_TARGET`, `WT_LABEL`, `WT_NAME`, `WT_ROOT`, `WT_REPO`, `WT_HOME`, `WT_BRANCH` | Stable scripting interface; changes are announced deliberately. |
+| Mechanism | `WT_ACTIVATION`, `WT_PATH_PREFIX`, `WT_BIN`, `WT_SELF`, `WT_TASK` | Internal door/task plumbing; may change as the mechanism evolves. |
+
+Name transformations belong in template functions such as `{{name_snake()}}`
+and `{{name_short()}}`, not environment variables. `WT_SESSION`,
+`WT_NAME_SNAKE`, `WT_NAME_SHORT`, and `WT_SLOT` are not exported. Inside tmux,
+use tmux's `$TMUX_PANE` for the current pane and `wt list --json` for registry
+lookup.
 
 Ports are **not** exported. They are an input to your configuration, not part
 of your application's environment: your app reads `PORT` or `DATABASE_URL`
@@ -533,9 +546,9 @@ $WT_HOME/
 ```
 
 Useful maintenance commands: `wt list --probe --disk`, `wt doctor`, `wt locks`,
-`wt prune`, and `wt unregister <label> --yes`. `shell-init` emits `wtcd`,
-`wtsh`, completion support, and a guard that restores a worktree's binary
-prefix if a shell startup file reordered `PATH`:
+`wt prune`, and `wt unregister <label> --yes`. `shell-init` keeps completion
+support, restores a worktree's binary prefix if a shell startup file reordered
+`PATH`, and adds a guarded `(<target>) ` prompt prefix inside door shells:
 
 ```sh
 eval "$(wt shell-init zsh)"

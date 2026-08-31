@@ -1,6 +1,6 @@
 ---
 source: tests/human_transcripts.rs
-expression: "normalize(h, &output.stdout)"
+expression: normalized
 ---
 repo/work is ready
   path       <ROOT>/wt-home/trees/repo/work
@@ -8,5 +8,6 @@ repo/work is ready
   sync       never
   session    yes
   changes    0 modified, 0 untracked
+  build      ok (log <ROOT>/wt-home/trees/repo/work/.wt/logs/wt-setup.log)
   resources  1
   tasks      8

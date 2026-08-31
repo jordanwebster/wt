@@ -564,15 +564,7 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                 let shell_tree_reference = shell_references.iter().any(|name| {
                     matches!(
                         name.as_str(),
-                        "WT_ROOT"
-                            | "WT_TARGET"
-                            | "WT_NAME"
-                            | "WT_NAME_SNAKE"
-                            | "WT_NAME_SHORT"
-                            | "WT_SLOT"
-                            | "WT_SESSION"
-                            | "WT_BIN"
-                            | "PATH"
+                        "WT_ROOT" | "WT_TARGET" | "WT_NAME" | "WT_BRANCH" | "WT_BIN" | "PATH"
                     ) || name.starts_with("WT_PORT_")
                 });
                 let machine = task.tied_to == Some(TiedTo::Machine);

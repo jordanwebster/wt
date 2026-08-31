@@ -583,7 +583,7 @@ fn agents_start_only_for_new_sessions_and_open_all_resumes_recorded_agents() {
     private.harness.json(&["close", "repo/one"]);
 
     let all = private.harness.json(&["open", "--all"]);
-    assert_eq!(all["data"]["sessions"].as_array().unwrap().len(), 3);
+    assert_eq!(all["data"]["sessions"].as_array().unwrap().len(), 2);
     for session in all["data"]["sessions"].as_array().unwrap() {
         let marker = if session["target"] == "repo/one" {
             "__AGENT_resume__"
@@ -594,7 +594,7 @@ fn agents_start_only_for_new_sessions_and_open_all_resumes_recorded_agents() {
     }
     let events = private.agent_events();
     assert_eq!(events.iter().filter(|event| *event == "resume").count(), 1);
-    assert_eq!(events.iter().filter(|event| *event == "start").count(), 3);
+    assert_eq!(events.iter().filter(|event| *event == "start").count(), 2);
     common::proof_capture("B3", format!("agent events: {}", events.join(", ")));
 
     let non_json = private
@@ -866,24 +866,46 @@ fn backend_none_never_invokes_tmux_for_truth_or_teardown() {
     );
 
     harness.json(&["list"]);
+    let shell_probe = harness.shims.join("shell-probe");
+    write_executable(
+        &shell_probe,
+        "#!/bin/sh\nprintf 'target=%s cwd=%s args=%s\\n' \"$WT_TARGET\" \"$PWD\" \"$*\"\n",
+    );
+    write(
+        &harness.home.join("config.toml"),
+        &format!(
+            "[session]\nbackend='none'\n[shell]\nprogram='{}'\n",
+            shell_probe.display()
+        ),
+    );
+    harness
+        .wt()
+        .args(["open", "repo/work"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("target=repo/work"))
+        .stdout(predicates::str::contains("args=-i"));
+    let close = harness.json(&["close", "repo/work"]);
+    assert_eq!(close["data"]["sessions"][0]["closed"], false);
+    assert!(close["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "SESSIONS_DISABLED"));
+    harness
+        .wt()
+        .args(["open", "--all"])
+        .assert()
+        .code(5)
+        .stderr(predicates::str::contains("wt open <target>"));
     harness.json(&["remove", "repo/work", "--yes", "--force"]);
     harness.json(&["prune", "--yes"]);
-    assert_eq!(wt_sys::fsx::read_string(&record).unwrap(), None);
-    for verb in ["open", "close"] {
-        harness
-            .wt()
-            .args([verb, "repo"])
-            .assert()
-            .code(5)
-            .stderr(predicates::str::contains("session.backend"))
-            .stderr(predicates::str::contains("backend = \"tmux\""));
-    }
     assert_eq!(wt_sys::fsx::read_string(&record).unwrap(), None);
     common::proof_capture("B7", "list/remove/prune/open/close tmux invocations: 0");
 }
 
 #[test]
-fn new_starts_build_in_setup_window_and_shims_report_progress_and_failure() {
+fn new_starts_detached_build_and_shims_report_progress_and_failure() {
     let Some(private) = PrivateTmux::new(false, false) else {
         eprintln!("skipping private-tmux build test: tmux is not installed");
         return;
@@ -969,7 +991,7 @@ run = ["{}", "build", "{}", "{}"]
         progress_text.contains("build is in progress"),
         "{progress_text}"
     );
-    assert!(progress_text.contains("wt:setup"), "{progress_text}");
+    assert!(!progress_text.contains("wt:setup"), "{progress_text}");
     assert!(progress_text.contains("wt-setup.log"), "{progress_text}");
     assert!(
         progress_text.contains("wt build repo/work"),
@@ -1034,15 +1056,13 @@ run = ["{}", "build", "{}", "{}"]
     .unwrap()
     .unwrap();
     let build = state.build.unwrap();
-    assert_eq!(build.window.as_deref(), Some("wt:setup"));
     assert!(Path::new(&build.log).exists());
     assert_eq!(state.phase, wt_core::lifecycle::StatePhase::Ready);
     common::proof_capture(
         "D2",
         format!(
-            "events:\n{}state window: {:?}\nstate log: {}",
+            "events:\n{}state log: {}",
             std::fs::read_to_string(&events).unwrap(),
-            build.window,
             build.log
         )
         .replace(

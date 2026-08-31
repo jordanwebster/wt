@@ -5,6 +5,10 @@ expression: "normalize(value, &h.root)"
 {
   "command": "new",
   "data": {
+    "build": {
+      "log": "<log>",
+      "started": "<started>"
+    },
     "created": true,
     "resumed": false,
     "sync": null,
@@ -12,6 +16,7 @@ expression: "normalize(value, &h.root)"
       "agent": null,
       "behind_default": 0,
       "branch": "work",
+      "build": null,
       "cache_kb": null,
       "canonical": false,
       "detached_sha": null,
@@ -54,7 +59,7 @@ expression: "normalize(value, &h.root)"
         }
       ],
       "session": "yes",
-      "session_name": "wt_repo_work_38e4c9ab",
+      "session_name": "repo/work",
       "slot": 1,
       "sync": {
         "at": null,

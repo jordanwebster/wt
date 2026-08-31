@@ -163,7 +163,11 @@ impl Default for Settings {
                 (
                     "claude".to_owned(),
                     Agent {
-                        start: Command::Argv(vec!["claude".to_owned()]),
+                        start: Command::Argv(vec![
+                            "claude".to_owned(),
+                            "--name".to_owned(),
+                            "{{name()}}".to_owned(),
+                        ]),
                         resume: Command::Argv(vec!["claude".to_owned(), "--continue".to_owned()]),
                     },
                 ),
@@ -413,6 +417,14 @@ mod tests {
             }
         );
         assert!(settings.agents.contains_key("claude"));
+        assert_eq!(
+            settings.agents["claude"].start,
+            Command::Argv(vec![
+                "claude".to_owned(),
+                "--name".to_owned(),
+                "{{name()}}".to_owned(),
+            ])
+        );
         assert_eq!(settings.logs.keep, 20);
         assert_eq!(settings.git.timeouts.query.as_deref(), Some("30s"));
         assert_eq!(settings.task.probe_timeout.as_deref(), Some("10s"));

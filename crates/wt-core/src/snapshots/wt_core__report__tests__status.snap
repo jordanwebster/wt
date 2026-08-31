@@ -44,6 +44,7 @@ expression: envelope
       "ok": true,
       "at": "TIME"
     },
+    "build": null,
     "session": "no",
     "session_name": "session",
     "agent": null,

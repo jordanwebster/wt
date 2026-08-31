@@ -57,8 +57,8 @@ fn committed_tmux_stub_records_argv_and_obeys_state() {
     assert!(record.contains("\t--\t/bin/sh\t-c\t"));
     assert!(record.contains("\twt\texec\t;\tpipe-pane"));
     assert!(record.contains("\t-e\tWT_HOME="));
-    assert!(record.contains("tmux\tswitch-client\t-t\tnew"));
-    assert!(record.contains("tmux\tkill-session\t-t\tnew"));
+    assert!(record.contains("tmux\tswitch-client\t-t\t=new"));
+    assert!(record.contains("tmux\tkill-session\t-t\t=new"));
 }
 
 #[test]
