@@ -274,6 +274,12 @@ refused rather than guessed at. The other destructive commands — `unregister`,
 `destroy`, `refresh`, `prune` — prompt on a terminal and require `--yes`
 otherwise.
 
+Targets use the same address rules as every other command: a bare name first
+resolves within the current repository label, then as a label itself; an
+unresolved name reports fully qualified candidates. Repeating removal with an
+explicit `label/name` after it has been tombstoned succeeds as an explained
+no-op.
+
 ```sh
 wt rm orbit/fix-scrolling            # asks only if there is work to lose
 wt rm orbit/fix-scrolling --force    # discards it without asking

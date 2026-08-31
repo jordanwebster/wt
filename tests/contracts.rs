@@ -284,6 +284,64 @@ fn new_run_and_remove_form_an_idempotent_lifecycle() {
 }
 
 #[test]
+fn remove_resolves_bare_names_and_reports_unresolved_addresses() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+
+    h.json(&["new", "repo/inside", "--no-sync"]);
+    let output = h
+        .wt()
+        .current_dir(std::fs::canonicalize(&repo).unwrap())
+        .args(["remove", "inside", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let removed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(removed["data"]["target"], "repo/inside");
+    assert_eq!(removed["data"]["removed"], true);
+
+    h.json(&["new", "repo/outside", "--no-sync"]);
+    let output = h
+        .wt()
+        .current_dir(&h.root)
+        .args(["remove", "outside", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let unresolved: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(unresolved["error"]["code"], "NOT_FOUND");
+    assert_eq!(
+        unresolved["error"]["details"]["candidates"],
+        serde_json::json!(["repo/outside"])
+    );
+    assert!(unresolved["error"]["remedy"]
+        .as_str()
+        .unwrap()
+        .contains("repo/outside"));
+
+    let output = h
+        .wt()
+        .current_dir(&h.root)
+        .args(["remove", "repo/unknown", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let unknown: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(unknown["error"]["code"], "NOT_FOUND");
+    assert_eq!(
+        unknown["error"]["details"]["candidates"],
+        serde_json::json!([])
+    );
+    h.wt()
+        .current_dir(&h.root)
+        .args(["remove", "repo/unknown"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("NOT_FOUND — target is not live"));
+}
+
+#[test]
 fn backend_none_runs_build_plan_after_ready_and_respects_suppression() {
     let h = Harness::new();
     configure_backend_none(&h);
@@ -1285,6 +1343,17 @@ fn tty_consent_accepts_and_declines_through_a_pseudoterminal() {
     assert!(shown.contains("discards uncommitted work"), "{shown}");
     assert!(shown.contains("1 file (1 untracked)"), "{shown}");
     assert!(shown.contains("Remove it? [y/N]"), "{shown}");
+    assert!(shown.contains("REMOVE_DECLINED"), "{shown}");
+    assert!(
+        shown.contains("Removal of `repo/work` was declined; nothing changed"),
+        "{shown}"
+    );
+    assert!(path.exists());
+
+    let output = h.pty_output(&["remove", "repo/work", "--json"], b"n\n");
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert!(shown.contains("\"code\":\"REMOVE_DECLINED\""), "{shown}");
+    assert!(shown.contains("\"removed\":false"), "{shown}");
     assert!(path.exists());
 
     assert_eq!(h.pty_status(&["remove", "repo/work"], b"y\n").code, Some(0));
@@ -3328,10 +3397,22 @@ fn remove_is_idempotent_and_text_run_preserves_child_status() {
         h.json(&["remove", "repo/work", "--yes"])["data"]["removed"],
         true
     );
-    assert_eq!(
-        h.json(&["remove", "repo/work", "--yes"])["data"]["removed"],
-        false
-    );
+    let repeated = h.json(&["remove", "repo/work", "--yes"]);
+    assert_eq!(repeated["data"]["removed"], false);
+    assert_eq!(repeated["notices"][0]["code"], "ALREADY_REMOVED");
+    assert_eq!(repeated["notices"][0]["subject"], "repo/work");
+    assert!(repeated["notices"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("No live tree exists"));
+
+    h.wt()
+        .args(["remove", "repo/work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+        "No live tree exists for `repo/work`; its tombstone records that it was already removed",
+    ));
 }
 
 #[test]

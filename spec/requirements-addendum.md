@@ -931,3 +931,19 @@ removal. `prune` reaps `CACHE_ORPHAN` entries — anything under
 `name_short`, which also migrates the retired per-repository layout — and
 `doctor` reports them. `list --disk` sizes each tree's cache as `cache_kb`,
 because the 77 GB accumulated precisely while attributed to nothing.
+
+## A65. Every `removed: false` carries its reason
+
+`wt remove` resolves addresses by the same §3.2 rules as every other verb. An
+unresolvable address is `NOT_FOUND` (3) with the ordinary candidate remedy. The
+one idempotent exception is an explicit `label/name` with no live tree and a
+matching tombstone: it exits 0 with `removed: false` and an `ALREADY_REMOVED`
+info notice. Declining the work-loss prompt likewise exits 0 with
+`removed: false` and a `REMOVE_DECLINED` info notice naming the target and
+saying that nothing changed. Human output states these reasons.
+
+The old parser silently interpreted a bare tree name as a label and returned
+an unexplained success when that fabricated target was absent. Shared address
+resolution makes removal agree with the rest of the CLI, while the narrowly
+tombstone-backed exception preserves safe script idempotence without hiding a
+mistyped or contextless address.

@@ -434,7 +434,11 @@ fn render_remove(data: RemoveData, notices: &[Notice]) -> String {
     let headline = if data.removed {
         format!("Removed {}", data.target)
     } else {
-        format!("{} was not removed", data.target)
+        notices
+            .iter()
+            .find(|notice| matches!(notice.code.as_str(), "ALREADY_REMOVED" | "REMOVE_DECLINED"))
+            .map(|notice| notice.message.clone())
+            .unwrap_or_else(|| format!("Removal of {} did not proceed", data.target))
     };
     let mut facts = Vec::new();
     if !data.destroyed.is_empty() {

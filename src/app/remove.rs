@@ -13,25 +13,25 @@ use crate::cli::Remove;
 use super::{door, executor, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreError> {
-    let target = wt_core::model::Target::parse(&args.target)?;
-    let Some(tree) = context
-        .registry
-        .trees
-        .iter()
-        .find(|tree| tree.label == target.label && tree.name == target.name)
-        .cloned()
-    else {
-        return Output::data(RemoveData {
-            target: target.to_string(),
-            removed: false,
-            destroyed: Vec::new(),
-            orphans_kept: Vec::new(),
-            branch_deleted: false,
-            branch_kept: None,
-            session_closed: false,
-            cache_deleted: None,
-        });
+    let target = match context.resolve(Some(&args.target)) {
+        Ok(target) => target,
+        Err(error) => {
+            if let Some(target) = (error.code.0 == "NOT_FOUND")
+                .then(|| tombstoned_target(context, &args.target))
+                .flatten()
+            {
+                return not_removed(
+                    &target,
+                    "ALREADY_REMOVED",
+                    format!(
+                        "No live tree exists for `{target}`; its tombstone records that it was already removed"
+                    ),
+                );
+            }
+            return Err(error);
+        }
     };
+    let tree = context.tree(&target)?;
     let state = context.read_state(&target)?;
     let dir_exists = matches!(
         wt_sys::fsx::path_kind(Path::new(tree.path.as_str()))?,
@@ -68,16 +68,11 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
     if wt_core::remove::gate(&plan, context.tty.stdin)? == Consent::Prompt
         && !context.confirm_loss(&consent_plan(&tree, &observed, &plan), "Remove it?")?
     {
-        return Output::data(RemoveData {
-            target: target.to_string(),
-            removed: false,
-            destroyed: Vec::new(),
-            orphans_kept: Vec::new(),
-            branch_deleted: false,
-            branch_kept: None,
-            session_closed: false,
-            cache_deleted: None,
-        });
+        return not_removed(
+            &target,
+            "REMOVE_DECLINED",
+            format!("Removal of `{target}` was declined; nothing changed"),
+        );
     }
 
     let session_closed = if session_live {
@@ -297,6 +292,42 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         cache_deleted,
     })?
     .with_notices(notices))
+}
+
+fn tombstoned_target(context: &Context, address: &str) -> Option<wt_core::model::Target> {
+    if !address.contains('/') {
+        return None;
+    }
+    context.registry.tombstones.iter().find_map(|tombstone| {
+        let target = wt_core::model::Target {
+            label: tombstone.label.clone(),
+            name: tombstone.name.clone(),
+        };
+        (target.to_string() == address).then_some(target)
+    })
+}
+
+fn not_removed(
+    target: &wt_core::model::Target,
+    code: &str,
+    message: String,
+) -> Result<Output, CoreError> {
+    Ok(Output::data(RemoveData {
+        target: target.to_string(),
+        removed: false,
+        destroyed: Vec::new(),
+        orphans_kept: Vec::new(),
+        branch_deleted: false,
+        branch_kept: None,
+        session_closed: false,
+        cache_deleted: None,
+    })?
+    .with_notices([Notice {
+        level: NoticeLevel::Info,
+        code: code.to_owned(),
+        subject: Some(target.to_string()),
+        message,
+    }]))
 }
 
 /// Deletes the tree's per-tree build cache once the tree itself is gone. The
