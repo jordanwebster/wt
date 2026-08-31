@@ -391,7 +391,37 @@ pub struct TreeRec {
     pub session_name: String,
     pub created_at: String,
     pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub meta: BTreeMap<String, String>,
     pub source: TreeSource,
+}
+
+pub fn validate_meta(key: &str, value: &str) -> Result<(), CoreError> {
+    if !valid_meta_key(key) {
+        return Err(CoreError::new(
+            ExitClass::Usage,
+            "META_INVALID",
+            format!("invalid metadata key `{key}`"),
+            "use a key matching [a-z_][a-z0-9_]*",
+        ));
+    }
+    if value.len() > 1024 {
+        return Err(CoreError::new(
+            ExitClass::Usage,
+            "META_INVALID",
+            format!("metadata value for `{key}` is longer than 1024 bytes"),
+            "shorten the value to at most 1024 bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_meta_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -466,6 +496,20 @@ impl Registry {
                 format!("unsupported registry schema {}", self.schema),
                 "delete the corrupt registry and re-register the affected checkouts",
             ));
+        }
+        for tree in &self.trees {
+            if tree
+                .meta
+                .iter()
+                .any(|(key, value)| !valid_meta_key(key) || value.len() > 1024)
+            {
+                return Err(CoreError::new(
+                    ExitClass::State,
+                    "REGISTRY_CORRUPT",
+                    format!("tree {}/{} metadata is invalid", tree.label, tree.name),
+                    "delete the corrupt registry and re-register the affected checkouts",
+                ));
+            }
         }
         validate_registry(&self.invariant_view())
     }
@@ -712,6 +756,7 @@ mod tests {
                 session_name: "wt_repo_canonical_deadbeef".to_owned(),
                 created_at: "TIME".to_owned(),
                 agent: Some("codex".to_owned()),
+                meta: BTreeMap::from([("ticket".to_owned(), "ABC-123".to_owned())]),
                 source: TreeSource {
                     kind: SourceKind::Canonical,
                     branch: Some("main".to_owned()),
@@ -740,6 +785,31 @@ mod tests {
         let json = serde_json::to_string(&registry).unwrap();
         let decoded: Registry = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, registry);
+
+        let mut legacy = serde_json::to_value(&registry).unwrap();
+        legacy["trees"][0].as_object_mut().unwrap().remove("meta");
+        let decoded: Registry = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.trees[0].meta.is_empty());
+
+        let mut invalid = registry.clone();
+        invalid.trees[0]
+            .meta
+            .insert("Bad".to_owned(), "value".to_owned());
+        assert_eq!(invalid.validate().unwrap_err().code.0, "REGISTRY_CORRUPT");
+    }
+
+    #[test]
+    fn tree_metadata_validation_matches_the_registry_schema() {
+        for key in ["ticket", "_owner", "x1"] {
+            validate_meta(key, "value").unwrap();
+        }
+        for key in ["", "Ticket", "1ticket", "ticket-id"] {
+            let error = validate_meta(key, "value").unwrap_err();
+            assert_eq!(error.code.0, "META_INVALID");
+        }
+        validate_meta("note", &"x".repeat(1024)).unwrap();
+        let error = validate_meta("note", &"x".repeat(1025)).unwrap_err();
+        assert_eq!(error.code.0, "META_INVALID");
     }
 
     #[test]

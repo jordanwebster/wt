@@ -72,6 +72,111 @@ fn truth_and_inspection_verbs_match_the_registered_tree() {
 }
 
 #[test]
+fn section_4_1_tree_metadata_sets_lists_unsets_and_round_trips() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo("repo", "");
+    h.register(&repo);
+
+    let created = h.json(&[
+        "new",
+        "repo/work",
+        "--no-sync",
+        "--no-open",
+        "--meta",
+        "ticket=ABC-123",
+        "--meta",
+        "owner=alice",
+    ]);
+    assert_eq!(
+        created["data"]["tree"]["meta"],
+        serde_json::json!({"owner": "alice", "ticket": "ABC-123"})
+    );
+    h.wt()
+        .args(["meta", "repo/work"])
+        .assert()
+        .success()
+        .stdout("owner=alice\nticket=ABC-123\n");
+
+    let updated = h.json(&[
+        "meta",
+        "repo/work",
+        "ticket=ABC-124",
+        "reviewer=bob",
+        "owner=",
+    ]);
+    assert_eq!(updated["data"]["target"], "repo/work");
+    assert_eq!(
+        updated["data"]["meta"],
+        serde_json::json!({"reviewer": "bob", "ticket": "ABC-124"})
+    );
+    let repeated = h.json(&["meta", "repo/work", "owner="]);
+    assert_eq!(repeated["data"]["meta"], updated["data"]["meta"]);
+
+    let status = h.json(&["status", "repo/work"]);
+    assert_eq!(status["data"]["meta"], updated["data"]["meta"]);
+    let list = h.json(&["list"]);
+    let work = list["data"]["trees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tree| tree["target"] == "repo/work")
+        .unwrap();
+    assert_eq!(work["meta"], updated["data"]["meta"]);
+    h.wt()
+        .args(["status", "repo/work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "meta     reviewer=bob, ticket=ABC-124",
+        ));
+
+    let registry: wt_core::model::Registry =
+        serde_json::from_str(&std::fs::read_to_string(h.home.join("registry.json")).unwrap())
+            .unwrap();
+    let stored = registry
+        .trees
+        .iter()
+        .find(|tree| tree.name == "work")
+        .unwrap();
+    assert_eq!(
+        stored.meta,
+        serde_json::from_value(updated["data"]["meta"].clone()).unwrap()
+    );
+}
+
+#[test]
+fn section_4_1_tree_metadata_validation_refuses_before_registry_write() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo("repo", "");
+    h.register(&repo);
+    let registry_path = h.home.join("registry.json");
+    let before = std::fs::read(&registry_path).unwrap();
+    let oversized = format!("note={}", "x".repeat(1025));
+
+    h.wt()
+        .args(["new", "repo/bad", "--meta", "Bad=value"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("META_INVALID"))
+        .stderr(predicate::str::contains("[a-z_][a-z0-9_]*"));
+    h.wt()
+        .args(["meta", "repo", "missing_equals"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("META_INVALID"))
+        .stderr(predicate::str::contains("missing `=`"));
+    h.wt()
+        .args(["meta", "repo", &oversized])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("META_INVALID"))
+        .stderr(predicate::str::contains("1024 bytes"));
+    assert_eq!(std::fs::read(registry_path).unwrap(), before);
+}
+
+#[test]
 fn env_and_exec_transport_the_same_coordinates() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
@@ -528,6 +633,7 @@ printf '\n' >> "$WT_ROOT/.recorded-args"
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["data"]["args"], serde_json::json!(["a b", "*.rs"]));
+    assert_eq!(value["data"]["args_target"], "argv");
     assert_eq!(
         std::fs::read_to_string(repo.join(".recorded-args")).unwrap(),
         "dependency:<declared>\nroot:<base><a b><*.rs>\n"
@@ -553,6 +659,7 @@ printf '\n' >> "$WT_ROOT/.recorded-args"
     assert!(dry.status.success());
     let dry: serde_json::Value = serde_json::from_slice(&dry.stdout).unwrap();
     assert_eq!(dry["data"]["args"], serde_json::json!(["dry arg"]));
+    assert_eq!(dry["data"]["args_target"], "argv");
     h.wt()
         .args(["run", "argv", "repo", "--dry-run", "--", "visible arg"])
         .assert()
@@ -567,9 +674,14 @@ printf '\n' >> "$WT_ROOT/.recorded-args"
     assert!(alias.status.success());
     let alias: serde_json::Value = serde_json::from_slice(&alias.stdout).unwrap();
     assert_eq!(alias["data"]["args"], serde_json::json!(["alias arg"]));
+    assert_eq!(alias["data"]["args_target"], "test");
     assert!(std::fs::read_to_string(repo.join(".recorded-args"))
         .unwrap()
         .ends_with("alias:<declared><alias arg>\n"));
+    assert_eq!(
+        h.json(&["run", "argv", "repo", "--dry-run"])["data"]["args_target"],
+        serde_json::Value::Null
+    );
 }
 
 #[test]

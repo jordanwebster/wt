@@ -61,6 +61,7 @@ fn every_verb_has_a_normalized_json_contract_snapshot() {
     snapshot(&h, "open", &["open", "repo", "--no-attach"]);
     snapshot(&h, "close", &["close", "repo"]);
     snapshot(&h, "new", &["new", "repo/work", "--no-sync"]);
+    snapshot(&h, "meta", &["meta", "repo/work", "ticket=ABC-123"]);
     snapshot(&h, "remove", &["remove", "repo/work", "--yes"]);
     snapshot(&h, "prune", &["prune", "--yes"]);
 

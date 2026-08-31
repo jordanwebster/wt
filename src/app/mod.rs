@@ -13,6 +13,7 @@ mod executor;
 mod human;
 mod list;
 mod locks;
+mod meta;
 mod new;
 mod open;
 mod path;
@@ -296,6 +297,7 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Adopt(args) => adopt::run(context, args),
         Command::List(args) => list::run(context, args),
         Command::Status(args) => status::run(context, args),
+        Command::Meta(args) => meta::run(context, args),
         Command::Path(args) => path::run(context, args),
         Command::Run(args) => run::run(context, args),
         Command::Sync(args) => sync::run(context, args),

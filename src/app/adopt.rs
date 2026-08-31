@@ -137,6 +137,7 @@ pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreErro
         session_name: coordinates.session_name,
         created_at: now,
         agent: None,
+        meta: std::collections::BTreeMap::new(),
         source: TreeSource {
             kind: SourceKind::Adopted,
             branch: git.head_branch(&path)?,

@@ -277,6 +277,7 @@ fn tree_report_with_shared(
         session,
         session_name: tree.session_name.clone(),
         agent: tree.agent.clone(),
+        meta: tree.meta.clone(),
         resources,
         ports,
         disk_kb: disk

@@ -48,6 +48,9 @@ expression: envelope
       "session": "no",
       "session_name": "session",
       "agent": null,
+      "meta": {
+        "ticket": "ABC-123"
+      },
       "resources": [
         {
           "scope": ".",

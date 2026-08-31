@@ -24,6 +24,7 @@ expression: "normalize(value, &h.root)"
           "stride": 16
         },
         "label": "repo",
+        "meta": {},
         "name": "canonical",
         "path": "$ROOT/repos/repo",
         "phase": "ready",

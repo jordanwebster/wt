@@ -201,6 +201,7 @@ pub struct TreeReport {
     pub session: String,
     pub session_name: String,
     pub agent: Option<String>,
+    pub meta: BTreeMap<String, String>,
     pub resources: Vec<ResourceReport>,
     pub ports: Vec<PortReport>,
     pub disk_kb: Option<u64>,
@@ -233,6 +234,7 @@ pub struct DryRunStepReport {
 pub struct DryRunData {
     pub task: String,
     pub args: Vec<String>,
+    pub args_target: Option<String>,
     pub steps: Vec<DryRunStepReport>,
 }
 
@@ -372,10 +374,17 @@ pub struct RunData {
     pub target: String,
     pub task: String,
     pub args: Vec<String>,
+    pub args_target: Option<String>,
     pub child: Option<ChildReport>,
     pub log: Option<String>,
     pub displaced: Option<String>,
     pub steps: Vec<StepReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MetaData {
+    pub target: String,
+    pub meta: BTreeMap<String, String>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResourceActionData {
@@ -749,6 +758,7 @@ mod tests {
             session: "no".to_owned(),
             session_name: "session".to_owned(),
             agent: None,
+            meta: BTreeMap::from([("ticket".to_owned(), "ABC-123".to_owned())]),
             resources: vec![ResourceReport {
                 scope: ".".to_owned(),
                 task: "db".to_owned(),
@@ -955,6 +965,7 @@ mod tests {
                 target: "repo/work".into(),
                 task: "test".into(),
                 args: vec!["test_file.rs".into()],
+                args_target: Some("test".into()),
                 child: Some(ChildReport {
                     code: Some(0),
                     signal: None,
@@ -969,6 +980,7 @@ mod tests {
             DryRunData {
                 task: "test".into(),
                 args: vec!["test_file.rs".into()],
+                args_target: Some("test".into()),
                 steps: vec![DryRunStepReport {
                     id: "test".into(),
                     scope: ".".into(),

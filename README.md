@@ -193,9 +193,17 @@ wrong one.
 ```sh
 wt new orbit/review-42 --from pr:42 --no-attach   # provision, don't enter
 wt new orbit/scratch --no-open                    # no session at all
+wt new orbit/ticket-42 --meta ticket=ABC-42       # attach opaque fleet data
 wt list
 wt status orbit/fix-scrolling
 ```
+
+Metadata is a small string map on the tree record. `wt status` shows it,
+`wt meta orbit/ticket-42` prints it, and `wt meta orbit/ticket-42 owner=alice
+ticket=` sets `owner` and removes `ticket`. Keys are opaque to `wt`: templates
+cannot read them, and no behaviour depends on them. Keys match
+`[a-z_][a-z0-9_]*` and values stay under 1 KiB — `ticket=PRO-123` fits, while
+a key spelled `JIRA-ID` is refused for the capitals and the dash.
 
 Worktrees live under `$WT_HOME/trees/<label>/<name>` by default. `wt path`
 prints the exact root, and `wtcd` from shell initialization changes to it.
@@ -208,6 +216,7 @@ claims, and renders the same managed files before starting the child.
 ```sh
 wt run build orbit/fix-scrolling   # declared task, captured log
 wt test orbit/fix-scrolling        # aliases: test/lint/fmt/build
+wt test orbit/fix-scrolling -- tests/api.rs -q
 wt exec orbit/fix-scrolling -- env # one-shot command; child's stdio/status
 wt shell orbit/fix-scrolling       # interactive, non-login shell
 wt which orbit/fix-scrolling orbit # resolve a name through this worktree
@@ -215,6 +224,15 @@ wt which orbit/fix-scrolling orbit # resolve a name through this worktree
 
 `exec` and `shell` hand the terminal to the child and therefore do not support
 `--json`. Use `wt env --json` to inspect what a child will receive.
+
+Arguments after `--` go to one resolved task recipe only; its dependencies do
+not receive them. An argv recipe gets the arguments appended. A shell recipe
+must place `"$@"` where they belong, or `wt` refuses instead of guessing. A
+composite that fans out to several tasks also refuses and names the leaf tasks
+you can invoke directly; an aggregate you declared yourself refuses however
+many needs it has, and a resource never takes arguments. Built-in adapters
+forward test arguments where their placement is unambiguous — `go test ./...`
+is the exception and refuses.
 
 `open` creates or enters a session with the environment active:
 
@@ -229,6 +247,12 @@ A coding agent starts only when `wt` *creates* a session, never when it
 attaches to one that already exists — a session is provisioning, and an agent
 is work. Leave `session.agent` unset and sessions get your shell; start an
 agent yourself once you are inside.
+
+When an agent exits, its pane becomes the same interactive shell `wt shell`
+would start, in the same tree and environment. A command that never starts is
+different: shell statuses 126 and 127 tear the pane down during the startup
+window, so `wt open` reports `SESSION_CREATE_FAILED` with the captured output
+instead of turning a configuration error into a prompt.
 
 ```toml
 [session]
@@ -291,6 +315,7 @@ Top-level keys:
 - `copy`: paths that **must** be present — a local secret, an editor setting.
   Populated from the registered checkout at creation by a recursive byte copy.
 - `task`: declared tasks and resources.
+- `locks."name"`: capacity and wait policy for a named task lock.
 - `dirs."path"`: a directory scope for monorepos. Nearer settings win; root
   tasks compose subproject tasks.
 - `adapters`: choose a tool or disable an adapter for a scope.
@@ -303,6 +328,15 @@ A task accepts `run`, `exists`, `needs`, `lock`, `env`, `cwd`, `timeout`, and
 `description`. `needs` forms an acyclic graph, so a task runs after everything
 it depends on. `exists` exits 0 when present, 1 when absent, and 2 or greater
 when it cannot tell.
+
+A task with only `needs` and an optional `description` is an aggregate. It is
+useful as a named entry point without a placeholder `run = "true"`:
+
+```toml
+[task.setup]
+description = "prepare this machine and this checkout"
+needs = ["cli-login", "database", "build"]
+```
 
 **The task named `build` runs automatically after a worktree is created.** It
 runs in a background tmux window, or synchronously when the session backend is
@@ -325,6 +359,8 @@ A task with `destroy` is a resource, and also requires `exists` and `tied_to`:
 - `tied_to = "tree"` gives each worktree its own.
 - `tied_to = "repo"` shares one across the repository; it is destroyed at
   `wt unregister`, not at ordinary removal.
+- `tied_to = "machine"` shares one host-wide, even across registered labels;
+  only explicit `wt destroy` or `wt refresh` tears it down.
 - `name` supplies `WT_SELF` to that resource's recipes.
 - `snapshot_env` names extra parent values teardown must retain.
 - `ready_within` polls after `run` until the resource is present.
@@ -333,6 +369,50 @@ A task with `destroy` is a resource, and also requires `exists` and `tied_to`:
 discovers it, and removal still destroys it. A failed probe never triggers
 `run` or `destroy`. Use `wt tasks` to inspect the effective graph and `wt run
 --dry-run` for one execution.
+
+Machine resources make the task graph an executable onboarding check. An
+aggregate such as `setup` can depend on host facts and ordinary tree work using
+the same `needs` list:
+
+```toml
+[task.cli-login]
+tied_to = "machine"
+exists  = "acme auth status >/dev/null 2>&1"
+run     = "acme auth login"
+destroy = "acme auth logout"
+
+[task.setup]
+needs = ["cli-login", "build"]
+```
+
+For a tree-tied resource that must have only one live instance in a wider
+arena, set `exclusive = "repo"` or `exclusive = "machine"`. The arena records
+the holder tree. Another tree's `run` reports `RESOURCE_HELD` without probing
+or destroying that holder; `wt run server other/tree --take` explicitly tears
+down the holder through its recorded snapshot, claims the arena, and reports
+which tree it displaced. `--take` is the consent and never prompts.
+
+### Named lock capacity
+
+A task's `lock` can be a mutex or a bounded slot pool:
+
+```toml
+[locks.integration]
+slots = 2
+wait = "30s"
+
+[task.integration]
+lock = "integration"
+run = "./test-integration"
+```
+
+Without a `locks."name"` entry the lock has one slot. The default wait now
+comes from `task.lock_wait` and is honoured; with the default `0s`, contention
+fails fast instead of queueing invisibly. Use the per-lock `wait`, `wt run
+--wait`, or `--wait forever` when queueing is intentional. `wt locks` shows
+`held n/N` and the holder of each occupied slot. The pool is scoped to the
+repository: two labels declaring the same lock name count their slots
+separately, so cap what one repository's worktrees may run at once.
 
 ## Environment rules
 
@@ -429,6 +509,7 @@ $WT_HOME/
   registry.json               registered repositories, trees, allocations
   state/<label>/<name>.json   per-tree lifecycle and resource snapshots
   state/<label>/_repo.json    repository-tied resource state
+  state/_machine.json         machine-tied resource state
   trees/<label>/<name>/       linked worktrees (unless trees_dir overrides it)
   locks/                      bounded coordination locks and holder records
 

@@ -11,7 +11,10 @@ pub(crate) fn run(context: &mut Context, args: Run) -> Result<Output, CoreError>
     let args_target = executor::validate_args(&plan, &args.args)?;
     executor::validate_take(&plan, args.take)?;
     if args.dry_run {
-        return Ok(Output::data(executor::dry_run(&plan, &args.args))?.with_notices(notices));
+        return Ok(
+            Output::data(executor::dry_run(&plan, &args.args, args_target.as_deref()))?
+                .with_notices(notices),
+        );
     }
     let execution = executor::execute_plan(
         context,

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use wt_core::lifecycle::{Materialized, MaterializedKind, StatePhase, SyncState, VerifyState};
@@ -19,12 +20,13 @@ struct NewFinish {
 }
 
 pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError> {
+    let meta = super::meta::parse_creation(&args.meta)?;
     let backend_notice = register::resolve_session_backend(context)?;
     let target = args.target.clone();
     let no_open = args.no_open;
     let no_attach = args.no_attach;
     let no_build = args.no_build;
-    let mut output = create_tree(context, args)?;
+    let mut output = create_tree(context, args, meta)?;
     if let Some(notice) = backend_notice {
         output = output.with_notices([notice]);
     }
@@ -65,7 +67,11 @@ fn has_build_task(context: &Context, target: &str) -> Result<bool, CoreError> {
     Ok(context.task_catalog(&tree, &config)?.contains_key("build"))
 }
 
-fn create_tree(context: &mut Context, args: New) -> Result<Output, CoreError> {
+fn create_tree(
+    context: &mut Context,
+    args: New,
+    meta: BTreeMap<String, String>,
+) -> Result<Output, CoreError> {
     let target = Target::parse(&args.target)?;
     if target.name == "canonical" {
         return Err(CoreError::new(
@@ -148,7 +154,7 @@ fn create_tree(context: &mut Context, args: New) -> Result<Output, CoreError> {
                 return verify_ready(context, existing, args, resumed)
             }
             wt_core::new::Decision::FreshIncarnation { .. } => {
-                return fresh_incarnation(context, existing, canonical, args)
+                return fresh_incarnation(context, existing, canonical, args, meta)
             }
             wt_core::new::Decision::Resume { start } => {
                 return resume(context, existing, canonical, args, start)
@@ -185,7 +191,7 @@ fn create_tree(context: &mut Context, args: New) -> Result<Output, CoreError> {
             remedy,
         ));
     }
-    create(context, target, path, canonical, args)
+    create(context, target, path, canonical, args, meta)
 }
 
 fn create(
@@ -194,6 +200,7 @@ fn create(
     path: PathBuf,
     canonical: TreeRec,
     args: New,
+    meta: BTreeMap<String, String>,
 ) -> Result<Output, CoreError> {
     let holder = context.holder(target.to_string(), "new")?;
     let token = lock::tree(
@@ -227,6 +234,7 @@ fn create(
         session_name: coordinates.session_name,
         created_at: now,
         agent: None,
+        meta,
         source: TreeSource {
             kind: if pr.is_some() {
                 SourceKind::Pr
@@ -804,6 +812,7 @@ fn fresh_incarnation(
     mut tree: TreeRec,
     canonical: TreeRec,
     args: New,
+    meta: BTreeMap<String, String>,
 ) -> Result<Output, CoreError> {
     let target = target_of(&tree);
     let holder = context.holder(target.to_string(), "new")?;
@@ -819,6 +828,7 @@ fn fresh_incarnation(
     context.write_state(&target, &state, &holder)?;
     tree.tree_id = tree_id;
     tree.created_at = now;
+    tree.meta = meta;
     context.mutate_registry(&holder, |registry| {
         let record = registry
             .trees

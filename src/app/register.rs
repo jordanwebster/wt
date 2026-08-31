@@ -234,6 +234,7 @@ fn perform_with_backend(
         session_name: coordinates.session_name,
         created_at: now.clone(),
         agent: None,
+        meta: std::collections::BTreeMap::new(),
         source: TreeSource {
             kind: SourceKind::Canonical,
             branch: git.head_branch(&path)?,

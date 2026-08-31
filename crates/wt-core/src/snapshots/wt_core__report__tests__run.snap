@@ -15,6 +15,7 @@ expression: envelope
     "args": [
       "test_file.rs"
     ],
+    "args_target": "test",
     "child": {
       "code": 0,
       "signal": null

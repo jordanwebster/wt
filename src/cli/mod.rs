@@ -73,6 +73,8 @@ pub enum Command {
     List(List),
     /// Report one tree's state and tasks.
     Status(Status),
+    /// Show or edit a tree's user metadata.
+    Meta(Meta),
     /// Print a tree root.
     Path(TargetArg),
     /// Run a declared task.
@@ -141,6 +143,7 @@ impl Command {
             Self::Adopt(_) => "adopt",
             Self::List(_) => "list",
             Self::Status(_) => "status",
+            Self::Meta(_) => "meta",
             Self::Path(_) => "path",
             Self::Run(_) => "run",
             Self::Sync(_) => "sync",
@@ -222,6 +225,9 @@ pub struct New {
     pub no_attach: bool,
     #[arg(long)]
     pub no_build: bool,
+    /// Attach opaque metadata to the new tree.
+    #[arg(long = "meta", value_name = "k=v")]
+    pub meta: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -252,6 +258,14 @@ pub struct Status {
     pub target: Option<String>,
     #[arg(long)]
     pub probe: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = "Example: wt meta project/feature ticket=ABC-123")]
+pub struct Meta {
+    pub target: String,
+    #[arg(value_name = "k=v")]
+    pub edits: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -457,6 +471,7 @@ pub fn parse() -> Cli {
         "adopt",
         "list",
         "status",
+        "meta",
         "path",
         "run",
         "sync",

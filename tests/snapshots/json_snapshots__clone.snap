@@ -38,6 +38,7 @@ expression: "normalize(value, &h.root)"
         "stride": 16
       },
       "label": "clone",
+      "meta": {},
       "name": "canonical",
       "path": "$ROOT/clone",
       "phase": "ready",

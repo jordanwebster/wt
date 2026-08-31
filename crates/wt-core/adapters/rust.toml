@@ -21,7 +21,7 @@ run = "cargo fetch"
 [tools.cargo.task.build]
 run = "cargo build --all-targets"
 [tools.cargo.task.test]
-run = "cargo test"
+run = '''if [ "$#" -gt 0 ]; then cargo test "$@"; else cargo test; fi'''
 [tools.cargo.task.lint]
 run = "cargo clippy --all-targets -- -D warnings"
 [tools.cargo.task.fmt]
@@ -48,7 +48,7 @@ run = "cargo fetch"
 [tools.cargo-nightly-fmt.task.build]
 run = "cargo build --all-targets"
 [tools.cargo-nightly-fmt.task.test]
-run = "cargo test"
+run = '''if [ "$#" -gt 0 ]; then cargo test "$@"; else cargo test; fi'''
 [tools.cargo-nightly-fmt.task.lint]
 run = "cargo clippy --all-targets -- -D warnings"
 [tools.cargo-nightly-fmt.task.fmt]

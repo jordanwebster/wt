@@ -6,6 +6,7 @@ expression: "normalize(value, &h.root)"
   "command": "lint",
   "data": {
     "args": [],
+    "args_target": null,
     "child": {
       "code": 0,
       "signal": null

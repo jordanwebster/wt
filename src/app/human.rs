@@ -17,6 +17,7 @@ pub(crate) enum HumanKind {
     Adopt,
     List,
     Status,
+    Meta,
     Path,
     Run,
     Sync,
@@ -47,6 +48,7 @@ impl From<&Command> for HumanKind {
             Command::Adopt(_) => Self::Adopt,
             Command::List(_) => Self::List,
             Command::Status(_) => Self::Status,
+            Command::Meta(_) => Self::Meta,
             Command::Path(_) => Self::Path,
             Command::Run(_)
             | Command::Test(_)
@@ -96,7 +98,9 @@ impl HumanKind {
                 .path
                 .unwrap_or_else(|| "not found".to_owned()),
             Self::Run => render_run(value, notices),
-            Self::Path | Self::Exec | Self::Shell | Self::Env | Self::Script => String::new(),
+            Self::Path | Self::Meta | Self::Exec | Self::Shell | Self::Env | Self::Script => {
+                String::new()
+            }
             Self::Locks => render_locks(decode(value), notices),
         }
     }
@@ -242,6 +246,17 @@ fn render_status(data: StatusData, notices: &[Notice]) -> String {
         facts.push((
             "changes",
             format!("{} modified, {} untracked", dirty.modified, dirty.untracked),
+        ));
+    }
+    if !data.tree.meta.is_empty() {
+        facts.push((
+            "meta",
+            data.tree
+                .meta
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(", "),
         ));
     }
     if !data.tree.ports.is_empty() {

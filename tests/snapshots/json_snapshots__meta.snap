@@ -1,0 +1,20 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "meta",
+  "data": {
+    "meta": {
+      "ticket": "ABC-123"
+    },
+    "target": "repo/work"
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

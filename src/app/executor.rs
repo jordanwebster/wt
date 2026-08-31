@@ -89,10 +89,11 @@ pub(crate) fn plan(context: &Context, door: &Door, root: &str) -> Result<TaskPla
     wt_core::task::plan(root, &catalog)
 }
 
-pub(crate) fn dry_run(plan: &TaskPlan, args: &[String]) -> DryRunData {
+pub(crate) fn dry_run(plan: &TaskPlan, args: &[String], args_target: Option<&str>) -> DryRunData {
     DryRunData {
         task: plan.root.clone(),
         args: args.to_vec(),
+        args_target: args_target.map(str::to_owned),
         steps: plan
             .nodes
             .iter()
@@ -291,6 +292,7 @@ pub(crate) fn execute_plan(
             target: door.target.to_string(),
             task: plan.root.clone(),
             args: resolved_args.map_or_else(Vec::new, |(_, args)| args.to_vec()),
+            args_target: resolved_args.map(|(target, _)| target.to_owned()),
             child: last_child,
             log: last_log,
             displaced,

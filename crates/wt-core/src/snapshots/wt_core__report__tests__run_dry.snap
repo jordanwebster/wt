@@ -14,6 +14,7 @@ expression: envelope
     "args": [
       "test_file.rs"
     ],
+    "args_target": "test",
     "steps": [
       {
         "id": "test",

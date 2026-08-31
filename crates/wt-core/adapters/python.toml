@@ -20,7 +20,7 @@ sync_inputs = ["uv.lock", "pyproject.toml"]
 [tools.uv.task.sync]
 run = "uv sync --frozen"
 [tools.uv.task.test]
-run = "uv run pytest"
+run = '''if [ "$#" -gt 0 ]; then uv run pytest "$@"; else uv run pytest; fi'''
 [tools.uv.task.lint]
 run = "uv run ruff check ."
 [tools.uv.task.fmt]
@@ -36,7 +36,7 @@ sync_inputs = ["poetry.lock", "pyproject.toml"]
 [tools.poetry.task.sync]
 run = "poetry install"
 [tools.poetry.task.test]
-run = "poetry run pytest"
+run = '''if [ "$#" -gt 0 ]; then poetry run pytest "$@"; else poetry run pytest; fi'''
 [tools.poetry.task.lint]
 run = "poetry run ruff check ."
 [tools.poetry.task.fmt]
@@ -51,7 +51,7 @@ sync_inputs = ["requirements.txt", "pyproject.toml"]
 [tools.pip.task.sync]
 run = '''test -d .venv || python3 -m venv .venv; if [ -f requirements.txt ]; then .venv/bin/pip install -r requirements.txt; else .venv/bin/pip install -e . 2>/dev/null || true; fi'''
 [tools.pip.task.test]
-run = ".venv/bin/pytest"
+run = '''if [ "$#" -gt 0 ]; then .venv/bin/pytest "$@"; else .venv/bin/pytest; fi'''
 [tools.pip.task.lint]
 run = ".venv/bin/ruff check ."
 [tools.pip.task.fmt]

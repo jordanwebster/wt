@@ -639,4 +639,41 @@ mod tests {
         assert!(catalog.contains_key("@node/npm@./test"));
         assert!(!catalog.contains_key("@node/npm@./build"));
     }
+
+    #[test]
+    fn built_in_test_recipes_forward_only_where_argument_placement_is_unambiguous() {
+        let adapters = builtins()
+            .unwrap()
+            .into_iter()
+            .map(|adapter| (adapter.name.clone(), adapter))
+            .collect::<BTreeMap<_, _>>();
+        let cases = [
+            ("cargo", "cargo", "cargo test", "cargo test"),
+            ("cargo", "cargo-nightly-fmt", "cargo test", "cargo test"),
+            ("node", "npm", "npm test --", "npm test"),
+            ("node", "pnpm", "pnpm test", "pnpm test"),
+            ("node", "yarn", "yarn test", "yarn test"),
+            ("node", "bun", "bun test", "bun test"),
+            ("dotnet", "dotnet", "dotnet test", "dotnet test"),
+            ("python", "uv", "uv run pytest", "uv run pytest"),
+            ("python", "poetry", "poetry run pytest", "poetry run pytest"),
+            ("python", "pip", ".venv/bin/pytest", ".venv/bin/pytest"),
+        ];
+        for (adapter, tool, with_args, without_args) in cases {
+            let Some(Command::Shell(recipe)) =
+                adapters[adapter].tools[tool].task["test"].run.as_ref()
+            else {
+                panic!("{adapter}/{tool} test must be a shell recipe");
+            };
+            assert_eq!(
+                recipe,
+                &format!("if [ \"$#\" -gt 0 ]; then {with_args} \"$@\"; else {without_args}; fi"),
+                "{adapter}/{tool}"
+            );
+        }
+        assert_eq!(
+            adapters["go"].tools["go"].task["test"].run,
+            Some(Command::Shell("go test ./...".to_owned()))
+        );
+    }
 }

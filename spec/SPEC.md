@@ -105,10 +105,15 @@ Registry  := { schema: 1, labels: Map<Label, LabelRec>, trees: [TreeRec], tombst
 LabelRec  := { path (canonicalised), gitdir_id, common_gitdir, registered_at, trees_dir|null, default_branch|null }
 TreeRec   := { tree_id, label, name, canonical, path (canonicalised), slot, geometry: {base, stride, port_base},
                ports: Map<PortName, u8>, name_short, session_name, created_at, agent|null,
-               source: { kind, branch|null, pr|null, start|null } }
+               meta: Map<VarKey, String>, source: { kind, branch|null, pr|null, start|null } }
 Tombstone := { label, name, slot, geometry, ports, name_short, session_name, path, materialized: [RelPath], removed_at, reason }
 ```
 Invariants (load-time; violation → `REGISTRY_CORRUPT` 5): slots unique and port ranges pairwise disjoint across `trees ∪ tombstones`; `(label,name)` unique across `trees ∪ tombstones` — an address is either live or tombstoned, never both; `tree_id` unique; **path uniqueness** holds over (label paths) ∪ (non-canonical tree paths) — the canonical tree shares its label's path; `gitdir_id` unique across labels; one canonical tree per label; `name_short` and `session_name` unique across distinct addresses. `register` of a path already registered under the **same** label with identical arguments is idempotent (`registered: false`, exit 0, §11.6); `PATH_REGISTERED` (4) fires only when the path is registered under a different label, or when `--label` names an existing label bound to another path; `register`/`adopt` of a path whose common gitdir equals a registered label's → `GITDIR_REGISTERED` (4), remedy "use `wt adopt <path> --label L`"; `adopt` of a worktree of label `L` forces `--label L`.
+
+`TreeRec.meta` is an opaque sorted string map. Keys match
+`[a-z_][a-z0-9_]*`; values are at most 1024 bytes. Both are validated before
+a write. Metadata is data only: templates cannot read it and no wt behaviour
+depends on it (A63).
 
 **Identity file and identity check.** Every tree carries `<tree>/.wt/tree_id` (the incarnation's `tree_id` + newline), written at S1/I1 of `new`/`register`/`adopt` (§11). The **identity check** `ID(path, entry)` is: read `<path>/.wt/tree_id` (`O_NOFOLLOW`) and compare with `entry.tree_id`; a missing or different value is `TREE_REPLACED` (5): wt neither renders into, runs in, nor removes that directory; phase `replaced` (§11.1); remedy in order: `wt prune --records <target>`, `wt remove <target>` (records-only path, §11.4), `wt adopt <path>`. Callers: the door algorithm (§9.1 D0), `remove`/`unregister` (§11.4 step 6, immediately before the first mutation), `sync`, `status`/`list`. A non-wt actor replacing the directory between the check and git's own open is an accepted residual (A27).
 
@@ -227,16 +232,16 @@ Selection per scanned dir: user/repo `adapters.<id>.tool` > lockfile > sniff > `
 
 | Adapter/tool | Selected by | sync | build | test | lint | fmt | sync inputs |
 |---|---|---|---|---|---|---|---|
-| cargo/cargo | `Cargo.toml` | `cargo fetch` | `cargo build --all-targets` | `cargo test` | `cargo clippy --all-targets -- -D warnings` | `cargo fmt` | `Cargo.lock`, `Cargo.toml` |
+| cargo/cargo | `Cargo.toml` | `cargo fetch` | `cargo build --all-targets` | `if [ "$#" -gt 0 ]; then cargo test "$@"; else cargo test; fi` | `cargo clippy --all-targets -- -D warnings` | `cargo fmt` | `Cargo.lock`, `Cargo.toml` |
 | cargo/cargo-nightly-fmt | `rustfmt.toml`/`.rustfmt.toml` parsed as TOML with top-level `unstable_features`/`group_imports`/`imports_granularity` | same | same | same | same | `cargo +nightly fmt` | same |
-| node/npm | `package-lock.json`/`npm-shrinkwrap.json`; default with `NO_LOCKFILE` (then `npm install`) | `npm ci` | `npm run build`† | `npm test` (args: `npm test -- "$@"`) | `npm run lint`† | `npm run format`† | lockfile, `package.json` |
-| node/pnpm | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` | † | † | † | † | idem |
-| node/yarn | `yarn.lock` | `yarn install --immutable` (`.yarnrc.yml`) / `--frozen-lockfile` | † | † | † | † | idem |
-| node/bun | `bun.lock(b)` | `bun install --frozen-lockfile` | † | † | † | † | idem |
-| dotnet/dotnet | `*.sln`, `*.slnx`, `*.csproj`, `*.fsproj` | `dotnet restore` | `dotnet build --no-restore` | `dotnet test` | `dotnet format --verify-no-changes` | `dotnet format` | `*.csproj`, `packages.lock.json`, `Directory.Packages.props` |
-| python/uv | `uv.lock` | `uv sync --frozen` | `uv build` | `uv run pytest` | `uv run ruff check .` | `uv run ruff format .` | `uv.lock`, `pyproject.toml` |
-| python/poetry | `poetry.lock` | `poetry install` | `poetry build` | `poetry run pytest` | `poetry run ruff check .` | `poetry run ruff format .` | `poetry.lock`, `pyproject.toml` |
-| python/pip | `requirements.txt`/`setup.py`/`pyproject.toml` without lockfile | venv + `pip install -r requirements.txt` (or `-e .`) | — | `.venv/bin/pytest` | `.venv/bin/ruff check .` | `.venv/bin/ruff format .` | `requirements*.txt`, `pyproject.toml` |
+| node/npm | `package-lock.json`/`npm-shrinkwrap.json`; default with `NO_LOCKFILE` (then `npm install`) | `npm ci` | `npm run build`† | `if [ "$#" -gt 0 ]; then npm test -- "$@"; else npm test; fi` | `npm run lint`† | `npm run format`† | lockfile, `package.json` |
+| node/pnpm | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` | † | `if [ "$#" -gt 0 ]; then pnpm test "$@"; else pnpm test; fi`† | † | † | idem |
+| node/yarn | `yarn.lock` | `yarn install --immutable` (`.yarnrc.yml`) / `--frozen-lockfile` | † | `if [ "$#" -gt 0 ]; then yarn test "$@"; else yarn test; fi`† | † | † | idem |
+| node/bun | `bun.lock(b)` | `bun install --frozen-lockfile` | † | `if [ "$#" -gt 0 ]; then bun test "$@"; else bun test; fi`† | † | † | idem |
+| dotnet/dotnet | `*.sln`, `*.slnx`, `*.csproj`, `*.fsproj` | `dotnet restore` | `dotnet build --no-restore` | `if [ "$#" -gt 0 ]; then dotnet test "$@"; else dotnet test; fi` | `dotnet format --verify-no-changes` | `dotnet format` | `*.csproj`, `packages.lock.json`, `Directory.Packages.props` |
+| python/uv | `uv.lock` | `uv sync --frozen` | `uv build` | `if [ "$#" -gt 0 ]; then uv run pytest "$@"; else uv run pytest; fi` | `uv run ruff check .` | `uv run ruff format .` | `uv.lock`, `pyproject.toml` |
+| python/poetry | `poetry.lock` | `poetry install` | `poetry build` | `if [ "$#" -gt 0 ]; then poetry run pytest "$@"; else poetry run pytest; fi` | `poetry run ruff check .` | `poetry run ruff format .` | `poetry.lock`, `pyproject.toml` |
+| python/pip | `requirements.txt`/`setup.py`/`pyproject.toml` without lockfile | venv + `pip install -r requirements.txt` (or `-e .`) | — | `if [ "$#" -gt 0 ]; then .venv/bin/pytest "$@"; else .venv/bin/pytest; fi` | `.venv/bin/ruff check .` | `.venv/bin/ruff format .` | `requirements*.txt`, `pyproject.toml` |
 | go/go | `go.mod` | `go mod download` | `go build ./...` | `go test ./...` | `go vet ./...` | `gofmt -l -w .` | `go.sum`, `go.mod` |
 | submodules | `.gitmodules` | `git submodule update --init --recursive` (`sys_locks: [RepoGit]`, git class `submodule`) | — | — | — | — | `.gitmodules` |
 
@@ -551,10 +556,14 @@ TreeState := { schema: 1, tree_id, label, name, phase: initialising|bootstrappin
 
 ### 11.2 `new`
 ```
-wt new <label>/<name> [--branch B] [--from REF] [--detach] [--no-sync] [--verify] [--no-fetch] [--no-open] [--no-attach] [--no-build]
+wt new <label>/<name> [--branch B] [--from REF] [--detach] [--meta k=v]… [--no-sync] [--verify] [--no-fetch] [--no-open] [--no-attach] [--no-build]
 REF := <local branch> | <remote>/<branch> | pr:N | <PR URL> | <rev>
 ```
 `--from` bare `X`: `refs/heads/X` → `refs/remotes/origin/X` → rev; both present and different → local wins with `FROM_LOCAL_SHADOWS_REMOTE`; `origin/X` forces remote. Default start `origin/<default>` after a bounded fetch (`--no-fetch` skips; unpushed local default-branch commits need `--from main`). Default branch: `origin/HEAD` → `main`/`master`/`trunk` → HEAD, cached, refreshed on fetch. PR refspec by origin host: github `refs/pull/N/head`; gitlab `refs/merge-requests/N/head`; bitbucket `refs/pull-requests/N/from`; unknown: pull then merge-requests; fetched as `refs/wt/pr/N`, local branch `pr/N`, default name `pr-N`. A PR URL selects the label whose normalised origin (https or scp-style ssh, `.git` stripped) matches host and `owner/repo`; zero/many → error with remedy. `B` defaults to `<name>`; `--branch feature/x` without a name → `feature-x`. `AddSpec`: existing branch · `-b B <start>` with `--no-track` unless start is `refs/remotes/*` · `--detach`.
+
+Each repeatable `--meta k=v` initializes one §4.1 metadata entry. Repeated keys
+take their last value. The option affects a newly allocated or fresh
+incarnation; resuming an existing incarnation retains its recorded map.
 
 Decision (inside the registry transaction, under the exclusive tree lock):
 
@@ -712,11 +721,12 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 | `wt register [path] [--label L] [--move-to PATH] [--repair]` | yes (resumes/repairs) | §11.6 |
 | `wt unregister <label> [--yes] [--force]` | yes | §11.5 |
 | `wt clone <url> [--label L] [--path P]` | yes | `git clone` (class `clone`) to `P` (default `$PWD/<stem>`), then §11.6 |
-| `wt new <label>/<name> [--branch B] [--from REF] [--detach] [--no-sync] [--verify] [--no-fetch] [--no-open] [--no-attach] [--no-build]` | yes (phase-aware) | §11.2 |
+| `wt new <label>/<name> [--branch B] [--from REF] [--detach] [--meta k=v]… [--no-sync] [--verify] [--no-fetch] [--no-open] [--no-attach] [--no-build]` | yes (phase-aware) | §11.2 |
 | `wt adopt <path> [--label L] [--name N]` ★ | yes | §11.6 |
 | `wt remove <target> [--yes] [--force] [--delete-branch] [--keep-branch] [--keep-orphans] [--wait d]` | yes | §11.4 |
 | `wt sync [target] [--force]` | yes | §11.3 |
 | `wt list [label] [--probe] [--fast] [--disk]`, `wt status [target] [--probe]` ★ | — | §12 |
+| `wt meta <target> [k=v\|k=]…` ★ | yes; prompt-free (destroys nothing) | §4.1 |
 | `wt prune [label] [--yes] [--merged] [--gone] [--records T]` | yes | §12 |
 | `wt run <task> [target] … [--take] [-- <args…>]` (aliases `test lint fmt build`); `wt destroy <ScopedTask> [target]`, `wt refresh <ScopedTask> [target]` | per task / per §10.4 | §10.1, §10.4 |
 | `wt exec [target] [--no-gate] -- <cmd…>` | — | §9.1–9.2; `--help`: "passthrough door; not a task (see `wt run`); no `--json` (A20)" |
@@ -765,7 +775,7 @@ Child    := { code: i32|null, signal: i32|null }
 Tree     := { target, label, name, canonical, tree_id, path, slot, geometry: {base, stride, port_base}, phase, branch|null, detached_sha|null,
               dirty: {modified, untracked}|null, upstream: {ahead, behind}|null, behind_default|null,
               sync: {state, at|null, changed: [RelPath], drift: [RelPath]}, verify: {ok, at}|null,
-              session: "yes"|"no"|"unknown", session_name, agent|null, resources: [Resource], ports: [ {name, port, bound|null} ], disk_kb|null }
+              session: "yes"|"no"|"unknown", session_name, agent|null, meta: Map<String,String>, resources: [Resource], ports: [ {name, port, bound|null} ], disk_kb|null }
 Resource := { scope, task, tied_to, name, state, reason|null, external, undeclared, has_instance, holder|null, last_probe: {at, result}|null, last_error: {at, event, message}|null }
 StepRep  := { id, scope, status, child|null, duration_ms }
 ```
@@ -783,11 +793,12 @@ shapes — open, closed, and failed — even though `open` emits open/failed and
 | `new` / `adopt` | `{ tree, created, resumed, sync: StepRep[]|null, verify: {ok, steps: StepRep[]}|null }` / `{ tree, adopted, resumed }` |
 | `remove` | `{ target, removed, destroyed: [ {scope, task, state, child|null} ], orphans_kept: [ScopedTask], branch_deleted, branch_kept: string|null, session_closed }` |
 | `sync` | `{ target, ran, steps: StepRep[], inputs: [ {path, hash} ] }` |
-| `run` | `{ target, task, args: [String], child|null, log|null, displaced: target|null, steps: StepRep[] }`; `--dry-run`: `{ task, args: [String], steps: [ {id, scope, origin, cwd, run, exists, lock, sys_locks, resource, tied_to} ] }` |
+| `run` | `{ target, task, args: [String], args_target: string|null, child|null, log|null, displaced: target|null, steps: StepRep[] }`; `--dry-run`: `{ task, args: [String], args_target: string|null, steps: [ {id, scope, origin, cwd, run, exists, lock, sys_locks, resource, tied_to} ] }` |
 | `destroy` / `refresh` | `{ target, scope, task, before, after, child|null }` |
 | `open` (non-attaching) / `close` | shared `{ sessions: [ {target, name, created, existing, agent|null, foreground} | {target, session, closed} | {target, name, failed:true, code, message, remedy} ] }`; `open` emits open/failed, `close` emits closed, and only `open --all` may return `ok:false` with this data retained |
 | `env` | `{ target, set, overrode, restored, missing_bins, rendered, bins: [ {dir, exists, executables} ], ports: [ {name, port} ], env: Map, activation: Activation }` |
 | `list` | `{ trees: [Tree], locks: [ {name, label, holder: {pid, target, verb, since}} ] }`; `status` | `Tree & { tasks: [TaskInfo], config_errors }` |
+| `meta` | `{ target, meta: Map<String,String> }` |
 | `path` / `which` | `{ target, path }` / `{ target, cmd, path|null, in_bin }` |
 | `tasks` / `config` / `locks` | `{ target, tasks: [ {id, scope, origin, cwd, needs, resource, tied_to|null, lock|null, description|null} ] }` / `{ target, entries: [ {key, scope, layer, value} ] }` (env values shown as keys only) / `{ locks: [ {level, name, path, held, holder|null, held_slots?:u16, slots?:u16, holders?:[ {slot, path, holder|null} ]} ] }`; `held_slots` and `slots` are present for named locks, `holders` lists the held slots in ascending order and is omitted when empty, and human output renders `held n/N` with per-slot holders |
 | `prune` | `{ applied: bool, items: [ {target, reasons: [String], action, result|null} ] }` |
@@ -807,7 +818,7 @@ Redaction: environment values appear only in `env` output; `ResourceSnapshot.env
 | `notices` / `doctor.findings` | `(level: warn, info; code; subject; message)` / `(severity: error, warn, info; code; subject)` |
 | `open.sessions`, `prune.items` / `list.locks`, `locks.locks` / `config.entries` / `*.config_errors` | `(target)` / `(level, name)` / `(key, scope, layer precedence)` / `(path, line, col, message)` |
 | any other array | sorted lexically by canonical JSON of its elements |
-| maps | sorted keys |
+| maps, including `Tree.meta` and `meta.meta` | sorted keys |
 
 Byte stability is claimed only after normalising the declared nondeterministic fields: `wt.version`, every `at`/`since`/`started`/`recorded_at`/`removed_at`, `duration_ms`, `log`, `pid`, `tree_id`, `disk_kb`, `holder.since`, `last_probe.at`, `last_error.at`.
 
@@ -867,7 +878,8 @@ Levels **U** (wt-core), **I** (wt-sys/app on temp repos with shims: tmux, docker
 | §9.4 + §11.4 step 5 | attached `open` then `remove --yes` → session killed, lock acquired, removal completes; a `wt shell` in the tree → `TREE_IN_USE` naming the shell; two concurrent `open`s → one session | I |
 | §9.4 (A62) | an agent start or resume exits → the pane remains as the configured or default interactive shell with the assembled environment (`WT_TARGET`, tree cwd); a later `open` reports the session already open, attaches when eligible, and starts no second agent; a shell-only session keeps its direct launch argv; a nonexistent agent command → `SESSION_CREATE_FAILED` (7) with pane output and no recorded agent; an agent that runs then exits nonzero → surviving shell | I |
 | §10.1 | `lock_plan` order asserted by a lock-order tracer (out-of-order acquisition panics in test builds); task env not contributed; present resource env contributed; log retention keeps 20 per task | I |
-| §10.1, §14.1, §14.4 (A58) | argv arguments append after templating and shell arguments appear at `"$@"`, only on the resolved target; an adapter-composed root forwards to the single adapter recipe; a two-scope composite refuses and names the public scoped tasks; a user aggregate refuses regardless of fan-out; no-parameter shell and resource refusals have their specified usage codes and remedies; absent arguments preserve behaviour; aliases accept `--`; log header, dry-run, and JSON carry the exact argument vector; arguments without `--` name the delimiter | C |
+| §10.1, §14.1, §14.4 (A58) | argv arguments append after templating and shell arguments appear at `"$@"`, only on the resolved target; an adapter-composed root forwards to the single adapter recipe; a two-scope composite refuses and names the public scoped tasks; a user aggregate refuses regardless of fan-out; no-parameter shell and resource refusals have their specified usage codes and remedies; absent arguments preserve behaviour; aliases accept `--`; log header, dry-run, and JSON carry the exact argument vector and resolved `args_target` (`null` without arguments); arguments without `--` name the delimiter | C |
+| §4.1, §11.2, §14.1, §14.4–14.5 (A63) | `new --meta` and prompt-free `meta` set, list and idempotently unset metadata through a registry round trip; invalid keys, oversized values and missing `=` refuse before a write; status text shows the map and Tree/meta JSON carry it with sorted keys | U, C |
 | §4, §5.2–5.3, §13.3, §14.4 (A59) | named-lock config parses, validates `slots`/`wait`, is root-only, and merges by name; two holders fill two ordered slot files, a third gets `LOCK_HELD 2/2` naming both holders and both remedies, and a bounded waiter proceeds after release; an absent entry means one slot and the §13.3 default wait (previously unimplemented, now honoured — the announced A59 behaviour change); `wt locks` reports `held n/N` and per-slot holders | U, I, C |
 | §4, §5.2, §5.6, §10.2–10.5, §11.4–11.5, §12, §14.5 (A61) | machine-tied validation rejects tree- and repo-specific keys/functions and snapshot stripping removes both sets; two labels declaring one `ScopedTask` share one `_machine.json` record with `label: null`; machine RMW/resource lock paths are used; remove and unregister leave the machine store byte-identical; destroy prompts on a TTY and requires `--yes` without one; refresh works from either label; `list --probe` probes shared repo- and machine-tied `ResourceKey`s once per pass and reuses each result across trees; status/list JSON order resources tree, repo, machine | U, I, C |
 | §5.2, §10.1–10.4, §11.4, §12, §14.1, §14.4 (A60) | exclusive grammar is restricted to tree-tied resources; repo and machine arenas serialise holder claims; a second tree gets `RESOURCE_HELD`; `--take` destroys through the holder's frozen snapshot without holding two resource locks, reports the displaced target in text/JSON, and flips the holder; non-holder remove/probe run no recipe, including when its checkout predates the exclusive declaration, and a skip names the holder in `RESOURCE_HELD_BY`; an unrelated label's same-named non-exclusive task is unaffected by another label's machine arena entry; holder teardown and confirmed absence clear ownership; a present unheld resource is adopted as external; stale holders are treated as absent and their arena entries are collected by `prune`; `--take` on a non-exclusive target is a usage error | U, I, C |

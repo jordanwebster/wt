@@ -25,6 +25,7 @@ expression: "normalize(value, &h.root)"
         "stride": 16
       },
       "label": "repo",
+      "meta": {},
       "name": "work",
       "path": "$ROOT/wt-home/trees/repo/work",
       "phase": "ready",

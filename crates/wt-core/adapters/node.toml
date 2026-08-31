@@ -31,7 +31,7 @@ sync_inputs = ["pnpm-lock.yaml", "package.json"]
 [tools.pnpm.task.sync]
 run = "pnpm install --frozen-lockfile"
 [tools.pnpm.task.test]
-run = "pnpm test"
+run = '''if [ "$#" -gt 0 ]; then pnpm test "$@"; else pnpm test; fi'''
 [tools.pnpm.task.lint]
 run = "pnpm run lint"
 [tools.pnpm.task.fmt]
@@ -47,7 +47,7 @@ sync_inputs = ["yarn.lock", "package.json"]
 [tools.yarn.task.sync]
 run = "yarn install --immutable"
 [tools.yarn.task.test]
-run = "yarn test"
+run = '''if [ "$#" -gt 0 ]; then yarn test "$@"; else yarn test; fi'''
 [tools.yarn.task.lint]
 run = "yarn run lint"
 [tools.yarn.task.fmt]
@@ -63,7 +63,7 @@ sync_inputs = ["bun.lockb", "bun.lock", "package.json"]
 [tools.bun.task.sync]
 run = "bun install --frozen-lockfile"
 [tools.bun.task.test]
-run = "bun test"
+run = '''if [ "$#" -gt 0 ]; then bun test "$@"; else bun test; fi'''
 [tools.bun.task.lint]
 run = "bun run lint"
 [tools.bun.task.fmt]
