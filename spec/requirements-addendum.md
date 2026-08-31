@@ -870,8 +870,14 @@ starts only when wt creates a session), tmux remains the session's liveness
 truth (A24), and a session whose agent has ended is A33's statement
 continued — a session without an agent is a shell. A dead agent therefore
 leaves a prompt in the right directory instead of a vanished session, and
-`wt open` remains idempotent. Rationale: agents crash and exit; recreating
-their context is the cost the session existed to avoid.
+`wt open` remains idempotent. An agent that never started is not an exit:
+the wrapper propagates the shell's could-not-start statuses (126, 127) as
+pane death, so A49's observation window still reports the misconfiguration
+with the captured pane output and no agent is recorded — a config error
+must fail loudly, not become a prompt. An agent binary that itself ends
+with 126 or 127 is treated as never started; that residual is accepted and
+named. Rationale: agents crash and exit; recreating their context is the
+cost the session existed to avoid — but only for agents that ran.
 
 ## A63. A tree carries user metadata
 

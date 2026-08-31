@@ -38,7 +38,7 @@ impl PrivateTmux {
         write_executable(
             &agent_path,
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"{}\"\nprintf '__AGENT_%s__\\n' \"$1\"\nexec /bin/sh -i\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"{}\"\nprintf '__AGENT_%s__\\n' \"$1\"\n",
                 agent_log.display()
             ),
         );
@@ -216,17 +216,16 @@ fn open_reports_a_session_that_dies_during_startup() {
         eprintln!("skipping private-tmux startup test: tmux is not installed");
         return;
     };
-    let dead_agent = private.harness.shims.join("dead-agent");
+    let dead_shell = private.harness.shims.join("dead-shell");
     write_executable(
-        &dead_agent,
-        "#!/bin/sh\nprintf 'DEAD_AGENT_OUTPUT\\n'\nexit 9\n",
+        &dead_shell,
+        "#!/bin/sh\nprintf 'DEAD_SHELL_OUTPUT\\n'\nexit 9\n",
     );
     write(
         &private.harness.home.join("config.toml"),
         &format!(
-            "[session]\nbackend='tmux'\nattach=false\n[agents.dead]\nstart=['{}']\nresume=['{}']\n",
-            dead_agent.display(),
-            dead_agent.display()
+            "[session]\nbackend='tmux'\nattach=false\n[shell]\nprogram='{}'\n",
+            dead_shell.display()
         ),
     );
     let repo = private.harness.repo("repo", "");
@@ -234,7 +233,7 @@ fn open_reports_a_session_that_dies_during_startup() {
     let output = private
         .harness
         .wt()
-        .args(["open", "repo", "--agent", "dead", "--no-attach", "--json"])
+        .args(["open", "repo", "--no-attach", "--json"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(7));
@@ -242,7 +241,7 @@ fn open_reports_a_session_that_dies_during_startup() {
     assert_eq!(envelope["error"]["code"], "SESSION_CREATE_FAILED");
     let message = envelope["error"]["message"].as_str().unwrap();
     assert!(message.contains("startup observation window"), "{message}");
-    assert!(message.contains("DEAD_AGENT_OUTPUT"), "{message}");
+    assert!(message.contains("DEAD_SHELL_OUTPUT"), "{message}");
     let session = wt_core::session::name("repo", "canonical");
     assert!(!private.has_session(&session));
     common::proof_capture(
@@ -252,6 +251,173 @@ fn open_reports_a_session_that_dies_during_startup() {
             output.status.code().unwrap(),
             message
         ),
+    );
+}
+
+#[test]
+fn nonexistent_agent_fails_startup_without_recording_and_later_open_creates_a_shell() {
+    let Some(private) = PrivateTmux::new(false, false) else {
+        eprintln!("skipping private-tmux missing-agent test: tmux is not installed");
+        return;
+    };
+    let missing_agent = "wt-a62-agent-command-does-not-exist";
+    write(
+        &private.harness.home.join("config.toml"),
+        &format!(
+            "[session]\nbackend='tmux'\nattach=false\n[agents.missing]\nstart=['{missing_agent}']\nresume=['{missing_agent}']\n"
+        ),
+    );
+    let repo = private.harness.repo("repo", "");
+    private.harness.register(&repo);
+
+    let output = private
+        .harness
+        .wt()
+        .args([
+            "open",
+            "repo",
+            "--agent",
+            "missing",
+            "--no-attach",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "SESSION_CREATE_FAILED");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(message.contains("startup observation window"), "{message}");
+    assert!(message.contains(missing_agent), "{message}");
+    let session = wt_core::session::name("repo", "canonical");
+    assert!(!private.has_session(&session));
+
+    let registry = wt_sys::fsx::read_json::<wt_core::model::Registry>(
+        &private.harness.home.join("registry.json"),
+        "REGISTRY_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    let tree = registry
+        .trees
+        .iter()
+        .find(|tree| tree.label.as_str() == "repo" && tree.name == "canonical")
+        .unwrap();
+    assert_eq!(tree.agent, None);
+
+    write(
+        &private.harness.home.join("config.toml"),
+        "[session]\nbackend='tmux'\nattach=false\n[shell]\nprogram='/bin/sh'\n",
+    );
+    let reopened = private.harness.json(&["open", "repo", "--no-attach"]);
+    assert_eq!(reopened["data"]["sessions"][0]["created"], true);
+    assert_eq!(
+        reopened["data"]["sessions"][0]["agent"],
+        serde_json::Value::Null
+    );
+    assert!(private.has_session(&session));
+}
+
+#[test]
+fn agent_exit_leaves_an_assembled_shell_and_open_stays_idempotent() {
+    let Some(private) = PrivateTmux::new(true, true) else {
+        eprintln!("skipping private-tmux agent continuation test: tmux is not installed");
+        return;
+    };
+    let repo = private.harness.repo("repo", "");
+    private.harness.register(&repo);
+
+    let created = private
+        .harness
+        .json(&["new", "repo/work", "--no-sync", "--no-attach"]);
+    let session = created["data"]["tree"]["session_name"].as_str().unwrap();
+    private.wait_for_pane(session, "__AGENT_start__");
+    assert!(private.has_session(session));
+    assert!(private
+        .tmux(&["resize-window", "-t", session, "-x", "240", "-y", "60"])
+        .success());
+    private.send_line(
+        session,
+        "printf '__AFTER_AGENT__ TARGET=%s CWD=%s\\n' \"$WT_TARGET\" \"$PWD\"",
+    );
+    let pane = private.wait_for_pane(session, "__AFTER_AGENT__");
+    let tree = private.harness.home.join("trees/repo/work");
+    assert!(
+        pane.contains(&format!(
+            "__AFTER_AGENT__ TARGET=repo/work CWD={}",
+            tree.display()
+        )),
+        "post-agent shell did not retain the assembled environment:\n{pane}"
+    );
+    assert_eq!(private.agent_events(), ["start"]);
+
+    let reopened = private.harness.json(&["open", "repo/work", "--no-attach"]);
+    assert_eq!(reopened["data"]["sessions"][0]["created"], false);
+    assert_eq!(reopened["data"]["sessions"][0]["existing"], true);
+    assert_eq!(private.agent_events(), ["start"]);
+
+    let request = private.harness.pty_request(&["open", "repo/work"]);
+    let child = std::thread::spawn(move || {
+        wt_sys::proc::pty_capture(&request, b"", Duration::from_secs(15)).unwrap()
+    });
+    private.wait_for_client(session);
+    assert_eq!(private.agent_events(), ["start"]);
+    private.send_line(session, "printf '__ATTACHED_AFTER_AGENT__\\n'");
+    private.wait_for_pane(session, "__ATTACHED_AFTER_AGENT__");
+    private.send_line(session, "exit");
+    let output = child.join().unwrap();
+    assert_eq!(output.child.code, Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("already open"));
+}
+
+#[test]
+fn agent_that_runs_and_exits_nonzero_leaves_a_shell() {
+    let Some(private) = PrivateTmux::new(false, false) else {
+        eprintln!("skipping private-tmux nonzero-agent test: tmux is not installed");
+        return;
+    };
+    write(
+        &private.harness.home.join("config.toml"),
+        "[session]\nbackend='tmux'\nattach=false\n[shell]\nprogram='/bin/sh'\n[agents.nonzero]\nstart=['/bin/sh','-c',\"printf '__AGENT_EXIT_3__\\\\n'; exit 3\"]\nresume=['/bin/sh','-c','exit 3']\n",
+    );
+    let repo = private.harness.repo("repo", "");
+    private.harness.register(&repo);
+
+    let opened = private
+        .harness
+        .json(&["open", "repo", "--agent", "nonzero", "--no-attach"]);
+    let session = opened["data"]["sessions"][0]["name"].as_str().unwrap();
+    private.wait_for_pane(session, "__AGENT_EXIT_3__");
+    assert!(private.has_session(session));
+    private.send_line(session, "printf '__SHELL_AFTER_EXIT_3__\\n'");
+    private.wait_for_pane(session, "__SHELL_AFTER_EXIT_3__");
+    assert!(private.has_session(session));
+}
+
+#[test]
+fn shell_only_session_keeps_its_direct_launch_argv() {
+    let harness = Harness::new();
+    write(
+        &harness.home.join("config.toml"),
+        "[session]\nbackend='tmux'\nattach=false\n[shell]\nprogram='/bin/sh'\n",
+    );
+    let repo = harness.repo("repo", "");
+    harness.register(&repo);
+
+    let opened = harness.json(&["open", "repo", "--no-attach"]);
+    let session = opened["data"]["sessions"][0]["name"].as_str().unwrap();
+    let argv =
+        wt_sys::fsx::read_string(&harness.shim_state.join("tmux").join(session).join("argv"))
+            .unwrap()
+            .unwrap();
+    let argv = argv.lines().collect::<Vec<_>>();
+    let command_end = argv
+        .iter()
+        .position(|arg| *arg == ";")
+        .expect("tmux command separator");
+    assert_eq!(
+        &argv[command_end - 6..command_end],
+        &["exec", "--no-gate", "repo", "--", "/bin/sh", "-i"]
     );
 }
 

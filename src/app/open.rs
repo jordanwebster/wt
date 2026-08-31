@@ -444,11 +444,36 @@ fn agent_launch(
     } else {
         &definition.start
     };
+    let mut argv = vec![
+        OsString::from("sh"),
+        OsString::from("-c"),
+        OsString::from(agent_shell_script(
+            context
+                .settings
+                .shell
+                .program
+                .as_ref()
+                .map(|path| path.as_str()),
+        )),
+        OsString::from("wt-agent"),
+    ];
+    argv.extend(command_argv(command));
     Ok(Launch {
-        argv: command_argv(command),
+        argv,
         agent: Some(agent.to_owned()),
         record_agent: record.then(|| agent.to_owned()),
     })
+}
+
+fn agent_shell_script(configured_program: Option<&str>) -> String {
+    let program = configured_program
+        .map(shell_quote)
+        .unwrap_or_else(|| r#""${SHELL:-/bin/sh}""#.to_owned());
+    format!(r#""$@"; s=$?; case "$s" in 126|127) exit "$s";; esac; exec {program} -i"#)
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'"'"'"#))
 }
 
 fn command_argv(command: &Command) -> Vec<OsString> {
@@ -510,5 +535,21 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn agent_shell_script_embeds_a_configured_program() {
+        assert_eq!(
+            agent_shell_script(Some("/tmp/a shell's path")),
+            r#""$@"; s=$?; case "$s" in 126|127) exit "$s";; esac; exec '/tmp/a shell'"'"'s path' -i"#
+        );
+    }
+
+    #[test]
+    fn agent_shell_script_defers_the_default_to_agent_exit() {
+        assert_eq!(
+            agent_shell_script(None),
+            r#""$@"; s=$?; case "$s" in 126|127) exit "$s";; esac; exec "${SHELL:-/bin/sh}" -i"#
+        );
     }
 }
