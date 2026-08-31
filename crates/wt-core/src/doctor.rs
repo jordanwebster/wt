@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 pub const CODES: &[&str] = &[
     "STATE_ORPHAN",
+    "CACHE_ORPHAN",
     "REPO_PATH_MISSING",
     "TREE_REPLACED",
     "TREE_MISSING",
@@ -157,6 +158,7 @@ pub fn adapter_findings(
     contribution: &AdapterContribution,
     available_binaries: &BTreeSet<String>,
     effective_env: &EnvMap,
+    machine_files: &std::collections::BTreeMap<String, String>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     for requirement in &contribution.requirements {
@@ -182,12 +184,15 @@ pub fn adapter_findings(
             assignment
                 .split_once('=')
                 .is_some_and(|(key, value)| effective_env.get(key).is_some_and(|set| set == value))
-        });
+        }) || nudge
+            .used_if_file
+            .iter()
+            .any(|sniff| crate::adapters::sniff_content_matches(sniff, machine_files));
         let available = available_binaries.contains(&nudge.want);
         if active && available {
             continue;
         }
-        if available && !nudge.used_if_env.is_empty() {
+        if available && !(nudge.used_if_env.is_empty() && nudge.used_if_file.is_empty()) {
             findings.push(Finding::new(
                 Severity::Warn,
                 "ACCELERATOR_INACTIVE",
@@ -223,6 +228,16 @@ pub fn state_orphan(subject: &str, path: &str) -> Finding {
         subject,
         format!("state file `{path}` has no live registry entry"),
         "run `wt prune` to delete the orphaned state file",
+    )
+}
+
+pub fn cache_orphan(subject: &str, path: &str) -> Finding {
+    Finding::new(
+        Severity::Info,
+        "CACHE_ORPHAN",
+        subject,
+        format!("cache path `{path}` belongs to no live worktree"),
+        "run `wt prune` to delete the orphaned cache",
     )
 }
 
@@ -271,6 +286,11 @@ mod tests {
                 want: "sccache".to_owned(),
                 hint: "install sccache".to_owned(),
                 used_if_env: vec!["RUSTC_WRAPPER=sccache".to_owned()],
+                used_if_file: vec![crate::adapters::Sniff {
+                    file: "~/.cargo/config.toml".to_owned(),
+                    toml_key: Some("build.rustc-wrapper".to_owned()),
+                    contains: Some("sccache".to_owned()),
+                }],
             }],
             selected_tools: BTreeSet::from(["cargo".to_owned()]),
             ..AdapterContribution::default()
@@ -280,6 +300,7 @@ mod tests {
             &contribution,
             &BTreeSet::from(["sccache".to_owned()]),
             &EnvMap::new(),
+            &std::collections::BTreeMap::new(),
         );
         assert!(findings
             .iter()
@@ -288,11 +309,28 @@ mod tests {
             .iter()
             .any(|finding| finding.code == "ACCELERATOR_INACTIVE"));
 
+        // A machine config file that names the wrapper activates the nudge
+        // exactly as the environment assignment would.
+        let via_file = adapter_findings(
+            "repo",
+            &contribution,
+            &BTreeSet::from(["cargo".to_owned(), "sccache".to_owned()]),
+            &EnvMap::new(),
+            &std::collections::BTreeMap::from([(
+                "~/.cargo/config.toml".to_owned(),
+                "[build]\nrustc-wrapper = \"sccache\"\n".to_owned(),
+            )]),
+        );
+        assert!(!via_file
+            .iter()
+            .any(|finding| finding.code.starts_with("ACCELERATOR_")));
+
         let missing = adapter_findings(
             "repo",
             &contribution,
             &BTreeSet::new(),
             &EnvMap::from([("RUSTC_WRAPPER".to_owned(), "sccache".to_owned())]),
+            &std::collections::BTreeMap::new(),
         );
         assert!(missing
             .iter()
@@ -304,6 +342,7 @@ mod tests {
                 want: "pnpm".to_owned(),
                 hint: "use pnpm".to_owned(),
                 used_if_env: Vec::new(),
+                used_if_file: Vec::new(),
             }],
             selected_tools: BTreeSet::from(["npm".to_owned()]),
             ..AdapterContribution::default()
@@ -313,6 +352,7 @@ mod tests {
             &available,
             &BTreeSet::from(["pnpm".to_owned()]),
             &EnvMap::new(),
+            &std::collections::BTreeMap::new(),
         )
         .iter()
         .any(|finding| finding.code == "ACCELERATOR_AVAILABLE"));
@@ -323,6 +363,7 @@ mod tests {
                 want: "pnpm".to_owned(),
                 hint: "use pnpm".to_owned(),
                 used_if_env: Vec::new(),
+                used_if_file: Vec::new(),
             }],
             selected_tools: BTreeSet::from(["pnpm".to_owned()]),
             ..AdapterContribution::default()
@@ -332,6 +373,7 @@ mod tests {
             &wrong_tool,
             &BTreeSet::from(["pnpm".to_owned()]),
             &EnvMap::new(),
+            &std::collections::BTreeMap::new(),
         )
         .is_empty());
         assert!(CODES.iter().all(|code| is_code(code)));

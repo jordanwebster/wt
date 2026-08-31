@@ -182,6 +182,23 @@ impl Context {
         self.home.join(format!("locks/git/{gitdir_id}.lock"))
     }
 
+    /// Root under which adapters key per-tree build caches.
+    pub fn cache_root(&self) -> PathBuf {
+        self.home.join("cache")
+    }
+
+    /// The per-tree build cache directory contributed by the Rust adapter
+    /// (`cache/cargo-build/<label>/<name_short>`). wt owns this layout so
+    /// that removal and prune can reap what the adapter's env value creates;
+    /// a repo or user override that moves the cache elsewhere also takes
+    /// over its lifecycle.
+    pub fn tree_cache_dir(&self, label: &str, name_short: &str) -> PathBuf {
+        self.cache_root()
+            .join("cargo-build")
+            .join(label)
+            .join(name_short)
+    }
+
     pub fn read_state(&self, target: &Target) -> Result<Option<TreeState>, CoreError> {
         fsx::trace_budget("state_read", Some(&self.state_path(target)))?;
         fsx::read_json(&self.state_path(target), "STATE_CORRUPT")

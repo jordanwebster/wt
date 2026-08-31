@@ -12,6 +12,7 @@ expression: "normalize(value, &h.root)"
       "agent": null,
       "behind_default": 0,
       "branch": "work",
+      "cache_kb": null,
       "canonical": false,
       "detached_sha": null,
       "dirty": {

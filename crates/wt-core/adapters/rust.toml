@@ -5,16 +5,22 @@ default_tool = "cargo"
 [[nudge]]
 want = "sccache"
 used_if_env = ["RUSTC_WRAPPER=sccache"]
-hint = "install sccache and set RUSTC_WRAPPER=sccache in ~/.wt/config.toml [repos.<label>.env]; every tree then shares one compiled-crate cache, which is how a Rust tree starts warm"
+used_if_file = [{ file = "~/.cargo/config.toml", toml_key = "build.rustc-wrapper", contains = "sccache" }]
+hint = "install sccache and set rustc-wrapper = \"sccache\" in ~/.cargo/config.toml [build]; every repo and tree on the machine then shares one compiled-crate cache, which is how a Rust tree starts warm"
 
 [tools.cargo]
 requires = "cargo"
 sync_inputs = ["Cargo.lock", "Cargo.toml"]
 
-# Share Cargo intermediates per repository. CARGO_TARGET_DIR must remain unset
-# so each tree's binary stays in its own target directory (SPEC §9.2a).
+# One build directory per worktree, outside the tree so creation and removal
+# stay cheap. The directory is never shared between trees: Cargo's unit hashes
+# omit the workspace path, so two checkouts of one workspace write the same
+# slots and corrupt each other's build-script output and freshness state.
+# Cross-tree reuse belongs to content-addressed layers (sccache, CARGO_HOME)
+# instead. CARGO_TARGET_DIR must remain unset so each tree's binary stays in
+# its own target directory (SPEC §9.2a).
 [tools.cargo.env]
-CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}"
+CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}/${name_short()}"
 
 [tools.cargo.task.sync]
 run = "cargo fetch"
@@ -41,7 +47,7 @@ sniff = [
 
 # Keep output ownership identical to the regular cargo tool above.
 [tools.cargo-nightly-fmt.env]
-CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}"
+CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}/${name_short()}"
 
 [tools.cargo-nightly-fmt.task.sync]
 run = "cargo fetch"

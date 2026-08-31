@@ -458,12 +458,20 @@ any default.
 | Git submodules | `.gitmodules` | recursive initialization |
 
 A fresh worktree starts warm **in that ecosystem's own terms**, not by copying
-build output around. Cargo 1.91+ puts intermediates in the per-repository
-`${home()}/cache/cargo-build/${label()}` build directory contributed by the
-adapter, while each tree keeps its binaries in its own `target/`. pnpm
-hard-links packages from its content-addressed store, and uv hard-links from
-its global cache into `.venv`. `wt doctor` reports whether the relevant cache
-or accelerator is in use; it never switches tools for you.
+build output around. Cargo 1.91+ separates build intermediates from outputs;
+the adapter gives every tree its own
+`${home()}/cache/cargo-build/${label()}/${name_short()}` build directory —
+private, because Cargo's unit hashes ignore the workspace path, so trees
+sharing one directory would corrupt each other's generated code and
+freshness — while each tree keeps its binaries in its own `target/`. The
+directory is deleted with the tree, `wt prune` reaps orphans, and
+`wt list --disk` sizes it (`cache_kb`). Cross-tree warmth comes from
+content-addressed caches instead: install sccache and set
+`rustc-wrapper = "sccache"` in `~/.cargo/config.toml [build]`, and every tree
+compiles shared dependencies as cache hits. pnpm hard-links packages from its
+content-addressed store, and uv hard-links from its global cache into
+`.venv`. `wt doctor` reports whether the relevant cache or accelerator is in
+use; it never switches tools for you.
 
 And a cold first build is not a wait: the `build` task runs in the background
 after `wt new`, so you are working in the worktree while it compiles.
@@ -511,6 +519,7 @@ $WT_HOME/
   state/<label>/_repo.json    repository-tied resource state
   state/_machine.json         machine-tied resource state
   trees/<label>/<name>/       linked worktrees (unless trees_dir overrides it)
+  cache/cargo-build/<label>/<name_short>/   per-tree build intermediates; die with the tree
   locks/                      bounded coordination locks and holder records
 
 <tree>/.wt/

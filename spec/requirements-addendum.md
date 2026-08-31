@@ -668,7 +668,9 @@ verified with Cargo 1.94: intermediates went to the shared directory, the
 binary stayed in `./target/debug/`, concurrent warm rebuilds in two crates
 blocked zero times, and only the cold dependency build serialised. pnpm uses
 its content-addressed store and hard-links into `node_modules`; uv uses its
-global cache and hard-links into `.venv`.
+global cache and hard-links into `.venv`. (The per-repository keying of the
+cargo build directory proved unsound in production and is revised to
+per-tree by A64; the rest of this addendum stands.)
 
 The closed template function set adds `home()`, which resolves to the same wt
 home exposed as `WT_HOME`. A cold first build remains non-blocking because A47
@@ -891,3 +893,41 @@ tree, and the registry defines the fleet (A36), so fleet metadata belongs in
 it rather than in a side registry; but only as data, because a
 template-readable key would create an unset-key failure mode nothing needs
 yet.
+
+## A64. The cargo build directory is keyed per tree and dies with it
+
+A53 keyed `CARGO_BUILD_BUILD_DIR` per repository so every tree of a label
+shared one intermediates directory. Production falsified the premise that
+sharing is safe: Cargo's unit hashes deliberately omit the workspace path
+(that is what makes a build directory relocatable), so two checkouts of one
+workspace address the same unit slots. Build-script output generated from
+workspace-local inputs — protobuf codegen was the observed case — is then
+overwritten by whichever tree builds last, and `rerun-if-changed` freshness
+is mtime-based while git writes arbitrary mtimes, so the loser reuses the
+winner's generation and fails with errors that describe neither tree. The
+same collision covers workspace crates' fingerprints and rlibs. The shared
+directory also outlived every tree that fed it (77 GB observed for one
+repository, four trees), because nothing owned its lifecycle.
+
+Both cargo tools now set
+`CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}/${name_short()}"`:
+one directory per tree, grouped under the label so attribution and reaping
+are directory listings. `name_short` is deterministic in `(label, name)`, so
+recreating an address readopts its cache warm. wt does not attempt to make
+sharing safe with finer invalidation — that would need repository knowledge
+(which files feed which build scripts) wt cannot have; cross-tree reuse
+belongs to content-addressed layers instead, which is what the sccache nudge
+recommends (its `used_if_file` rule now recognises a machine-wide
+`~/.cargo/config.toml` `build.rustc-wrapper`, the recommended activation,
+alongside `RUSTC_WRAPPER`).
+
+Lifecycle follows the key. `remove` deletes the tree's cache at §11.4 step
+11 — only a path under `$WT_HOME/cache` whose final component is the tree's
+`name_short`, taken from the door's rendered value when a door exists, else
+from the adapter scheme; an override elsewhere keeps its own lifecycle, and
+a failed delete is a warn notice (`CACHE_DELETE_FAILED`), not a failed
+removal. `prune` reaps `CACHE_ORPHAN` entries — anything under
+`cache/cargo-build` that is no registered label's live or tombstoned
+`name_short`, which also migrates the retired per-repository layout — and
+`doctor` reports them. `list --disk` sizes each tree's cache as `cache_kb`,
+because the 77 GB accumulated precisely while attributed to nothing.

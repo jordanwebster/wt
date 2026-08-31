@@ -81,7 +81,8 @@ expression: envelope
           "bound": false
         }
       ],
-      "disk_kb": null
+      "disk_kb": null,
+      "cache_kb": null
     },
     "adopted": true,
     "resumed": false

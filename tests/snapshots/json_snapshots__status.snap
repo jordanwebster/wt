@@ -8,6 +8,7 @@ expression: "normalize(value, &h.root)"
     "agent": null,
     "behind_default": 0,
     "branch": "main",
+    "cache_kb": null,
     "canonical": true,
     "config_errors": [],
     "detached_sha": null,

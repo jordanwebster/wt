@@ -36,6 +36,7 @@ pub(crate) fn run(context: &mut Context, args: Doctor) -> Result<Output, CoreErr
         ));
     }
     state_orphan_findings(context, args.label.as_deref(), &mut findings)?;
+    cache_orphan_findings(context, args.label.as_deref(), &mut findings)?;
     for (label, record) in context.registry.labels.clone() {
         if args
             .label
@@ -425,11 +426,13 @@ fn config_findings(
     } else {
         let contribution = wt_core::adapters::contribution(&hits)?;
         let available = available_binaries(&context.parent_env);
+        let machine_files = nudge_file_contents(&contribution, &context.parent_env);
         findings.extend(wt_core::doctor::adapter_findings(
             &subject,
             &contribution,
             &available,
             &context.parent_env,
+            &machine_files,
         ));
         let has_lockfile = snapshot.names.iter().any(|name| {
             [
@@ -650,6 +653,57 @@ fn state_orphan_findings(
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+/// Contents of the machine config files named by nudge `used_if_file`
+/// rules, keyed by each rule's literal file string. `~/` resolves through
+/// the parent environment's HOME; an unreadable file counts as absent.
+fn nudge_file_contents(
+    contribution: &wt_core::adapters::AdapterContribution,
+    parent_env: &wt_core::model::EnvMap,
+) -> std::collections::BTreeMap<String, String> {
+    let mut contents = std::collections::BTreeMap::new();
+    for sniff in contribution
+        .nudges
+        .iter()
+        .flat_map(|nudge| &nudge.used_if_file)
+    {
+        if contents.contains_key(&sniff.file) {
+            continue;
+        }
+        let path = sniff
+            .file
+            .strip_prefix("~/")
+            .and_then(|rest| {
+                parent_env
+                    .get("HOME")
+                    .map(|home| Path::new(home).join(rest))
+            })
+            .unwrap_or_else(|| PathBuf::from(&sniff.file));
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            contents.insert(sniff.file.clone(), text);
+        }
+    }
+    contents
+}
+
+fn cache_orphan_findings(
+    context: &Context,
+    label_filter: Option<&str>,
+    findings: &mut Vec<Finding>,
+) -> Result<(), CoreError> {
+    for path in super::prune::cache_orphans(context, label_filter)? {
+        let subject = path
+            .strip_prefix(context.cache_root())
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        findings.push(wt_core::doctor::cache_orphan(
+            &subject,
+            &path.to_string_lossy(),
+        ));
     }
     Ok(())
 }

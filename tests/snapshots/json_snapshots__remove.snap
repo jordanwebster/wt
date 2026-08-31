@@ -1,6 +1,5 @@
 ---
 source: tests/json_snapshots.rs
-assertion_line: 128
 expression: "normalize(value, &h.root)"
 ---
 {
@@ -8,6 +7,7 @@ expression: "normalize(value, &h.root)"
   "data": {
     "branch_deleted": true,
     "branch_kept": null,
+    "cache_deleted": null,
     "destroyed": [
       {
         "child": null,

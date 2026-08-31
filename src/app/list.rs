@@ -283,6 +283,16 @@ fn tree_report_with_shared(
         disk_kb: disk
             .then(|| wt_sys::fsx::disk_kb(Path::new(tree.path.as_str())))
             .transpose()?,
+        cache_kb: disk
+            .then(|| {
+                let cache = context.tree_cache_dir(tree.label.as_str(), &tree.name_short);
+                match wt_sys::fsx::path_kind(&cache)? {
+                    wt_sys::fsx::PathKind::Missing => Ok(None),
+                    _ => wt_sys::fsx::disk_kb(&cache).map(Some),
+                }
+            })
+            .transpose()?
+            .flatten(),
     })
 }
 

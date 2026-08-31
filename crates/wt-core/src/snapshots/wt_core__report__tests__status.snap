@@ -81,6 +81,7 @@ expression: envelope
       }
     ],
     "disk_kb": null,
+    "cache_kb": null,
     "tasks": [
       {
         "id": "test",

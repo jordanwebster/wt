@@ -1470,6 +1470,60 @@ fn doctor_reports_and_prune_deletes_state_orphans() {
 }
 
 #[test]
+fn doctor_reports_and_prune_deletes_cache_orphans_and_remove_reaps_the_tree_cache() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+    h.json(&["new", "repo/work", "--no-sync"]);
+    let live = h
+        .home
+        .join("cache/cargo-build/repo")
+        .join(wt_core::model::name_short("repo", "work"));
+    wt_sys::fsx::create_private_dir(&live).unwrap();
+    common::write(&live.join("marker"), "built\n");
+    // Debris from the retired per-repository layout, and a label no longer
+    // registered: both are orphans; the live tree's directory is not.
+    let legacy = h.home.join("cache/cargo-build/repo/debug");
+    wt_sys::fsx::create_private_dir(&legacy).unwrap();
+    let foreign = h.home.join("cache/cargo-build/unregistered");
+    wt_sys::fsx::create_private_dir(&foreign).unwrap();
+
+    let findings = h.json(&["doctor"])["data"]["findings"].clone();
+    let orphaned = findings
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["code"] == "CACHE_ORPHAN")
+        .filter_map(|finding| finding["subject"].as_str().map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        orphaned,
+        BTreeSet::from([
+            "cargo-build/repo/debug".to_owned(),
+            "cargo-build/unregistered".to_owned(),
+        ])
+    );
+
+    let applied = h.json(&["prune", "--yes"]);
+    assert!(applied["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["action"] == "delete-cache" && item["result"]["deleted"] == true));
+    assert!(!legacy.exists());
+    assert!(!foreign.exists());
+    assert!(live.exists());
+
+    let removed = h.json(&["remove", "repo/work", "--yes", "--force"]);
+    assert_eq!(removed["data"]["removed"], true);
+    assert_eq!(
+        removed["data"]["cache_deleted"],
+        live.to_string_lossy().as_ref()
+    );
+    assert!(!live.exists());
+}
+
+#[test]
 fn remove_keep_orphans_leaves_a_missing_live_entry() {
     let h = Harness::new();
     let repo = h.repo(
@@ -2930,7 +2984,7 @@ fn copy_populates_declared_paths_and_refuses_tracked_sources() {
 }
 
 #[test]
-fn cargo_shares_intermediates_per_repository_but_keeps_tree_outputs_local() {
+fn cargo_keys_intermediates_per_tree_and_keeps_tree_outputs_local() {
     let h = Harness::new();
     configure_backend_none(&h);
     common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
@@ -2947,14 +3001,20 @@ fn cargo_shares_intermediates_per_repository_but_keeps_tree_outputs_local() {
     h.json(&["new", "repo/work", "--no-sync", "--no-build"]);
     let canonical_env = h.json(&["env", "repo"])["data"]["env"].clone();
     let linked_env = h.json(&["env", "repo/work"])["data"]["env"].clone();
-    let shared = h.home.join("cache/cargo-build/repo");
+    // One build directory per tree, grouped under the repository: Cargo's
+    // unit hashes ignore the workspace path, so trees sharing one directory
+    // would overwrite each other's build-script output and freshness state.
+    let repo_cache = h.home.join("cache/cargo-build/repo");
+    let canonical_dir = repo_cache.join(wt_core::model::name_short("repo", "canonical"));
+    let linked_dir = repo_cache.join(wt_core::model::name_short("repo", "work"));
+    assert_ne!(canonical_dir, linked_dir);
     assert_eq!(
         canonical_env["CARGO_BUILD_BUILD_DIR"],
-        shared.to_string_lossy().as_ref()
+        canonical_dir.to_string_lossy().as_ref()
     );
     assert_eq!(
         linked_env["CARGO_BUILD_BUILD_DIR"],
-        shared.to_string_lossy().as_ref()
+        linked_dir.to_string_lossy().as_ref()
     );
     let overridden = h
         .wt()
@@ -2966,7 +3026,7 @@ fn cargo_shares_intermediates_per_repository_but_keeps_tree_outputs_local() {
     let overridden: serde_json::Value = serde_json::from_slice(&overridden.stdout).unwrap();
     assert_eq!(
         overridden["data"]["env"]["CARGO_BUILD_BUILD_DIR"],
-        shared.to_string_lossy().as_ref()
+        canonical_dir.to_string_lossy().as_ref()
     );
     assert!(overridden["data"]["overrode"]
         .as_array()
@@ -2991,7 +3051,7 @@ fn cargo_shares_intermediates_per_repository_but_keeps_tree_outputs_local() {
     common::proof_capture(
         "D1",
         format!(
-            "canonical build dir: {}\nlinked build dir: {}\nCARGO_TARGET_DIR set: false\ncanonical target: {}\nlinked target: {}\nsync inputs: {}",
+            "canonical build dir (per-tree): {}\nlinked build dir (per-tree): {}\nCARGO_TARGET_DIR set: false\ncanonical target: {}\nlinked target: {}\nsync inputs: {}",
             canonical_env["CARGO_BUILD_BUILD_DIR"],
             linked_env["CARGO_BUILD_BUILD_DIR"],
             canonical_target.display(),
@@ -3511,6 +3571,7 @@ fn doctor_manufactures_repository_capacity_lock_and_tooling_conditions() {
 fn doctor_condition_contracts_cover_every_documented_code() {
     let covered = BTreeSet::from([
         "STATE_ORPHAN",
+        "CACHE_ORPHAN",
         "REPO_PATH_MISSING",
         "TREE_REPLACED",
         "TREE_MISSING",

@@ -39,6 +39,12 @@ pub struct Nudge {
     pub hint: String,
     #[serde(default)]
     pub used_if_env: Vec<String>,
+    /// Machine-level config files that also activate the accelerator, for
+    /// tools that read their own config rather than an environment variable
+    /// (cargo's `rustc-wrapper` in `~/.cargo/config.toml`). Same rule shape
+    /// as tool sniffs; the app layer supplies the file contents.
+    #[serde(default)]
+    pub used_if_file: Vec<Sniff>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -250,13 +256,34 @@ fn select_sniff(adapter: &Adapter, snapshot: &DirSnapshot) -> Option<String> {
 }
 
 fn sniff_matches(sniff: &Sniff, snapshot: &DirSnapshot) -> bool {
-    let Some(content) = snapshot.contents.get(&sniff.file) else {
+    sniff_content_matches(sniff, &snapshot.contents)
+}
+
+/// Applies one sniff rule to a map of file contents keyed by the rule's
+/// `file` string. `toml_key` walks dot-separated tables; with `contains` as
+/// well, the key must exist *and* its value's text must contain the needle.
+pub fn sniff_content_matches(sniff: &Sniff, contents: &BTreeMap<String, String>) -> bool {
+    let Some(content) = contents.get(&sniff.file) else {
         return false;
     };
     if let Some(key) = &sniff.toml_key {
-        return content
-            .parse::<toml::Table>()
-            .is_ok_and(|table| table.contains_key(key));
+        let Ok(table) = content.parse::<toml::Table>() else {
+            return false;
+        };
+        let mut value = &toml::Value::Table(table);
+        for segment in key.split('.') {
+            match value.as_table().and_then(|table| table.get(segment)) {
+                Some(next) => value = next,
+                None => return false,
+            }
+        }
+        return sniff.contains.as_ref().is_none_or(|needle| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string())
+                .contains(needle)
+        });
     }
     sniff
         .contains
@@ -536,7 +563,7 @@ mod tests {
         assert!(contribution.sync_inputs.contains(&"Cargo.toml".to_owned()));
         assert_eq!(
             contribution.env["CARGO_BUILD_BUILD_DIR"],
-            "${home()}/cache/cargo-build/${label()}"
+            "${home()}/cache/cargo-build/${label()}/${name_short()}"
         );
         assert!(!contribution.env.contains_key("CARGO_TARGET_DIR"));
         assert!(contribution

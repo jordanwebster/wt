@@ -88,7 +88,8 @@ expression: envelope
           "bound": false
         }
       ],
-      "disk_kb": null
+      "disk_kb": null,
+      "cache_kb": null
     },
     "declared": {
       "tasks": [

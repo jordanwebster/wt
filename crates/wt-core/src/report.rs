@@ -205,6 +205,9 @@ pub struct TreeReport {
     pub resources: Vec<ResourceReport>,
     pub ports: Vec<PortReport>,
     pub disk_kb: Option<u64>,
+    /// Size of the tree's build cache under `$WT_HOME/cache`, probed with the
+    /// tree itself on `--disk`; null when not probed or no cache exists.
+    pub cache_kb: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -355,6 +358,9 @@ pub struct RemoveData {
     /// The branch removal left behind, because no remote carries its commits.
     pub branch_kept: Option<String>,
     pub session_closed: bool,
+    /// The per-tree build cache under `$WT_HOME/cache` deleted with the tree,
+    /// absent when no adapter contributed one or nothing existed on disk.
+    pub cache_deleted: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SyncData {
@@ -786,6 +792,7 @@ mod tests {
                 bound: Some(false),
             }],
             disk_kb: None,
+            cache_kb: None,
         }
     }
 
@@ -945,6 +952,7 @@ mod tests {
                 branch_deleted: false,
                 branch_kept: Some("work".to_owned()),
                 session_closed: false,
+                cache_deleted: None,
             },
         );
         snap(

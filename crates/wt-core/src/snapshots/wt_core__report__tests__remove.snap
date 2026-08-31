@@ -1,6 +1,5 @@
 ---
 source: crates/wt-core/src/report.rs
-assertion_line: 839
 expression: envelope
 ---
 {
@@ -29,7 +28,8 @@ expression: envelope
     ],
     "branch_deleted": false,
     "branch_kept": "work",
-    "session_closed": false
+    "session_closed": false,
+    "cache_deleted": null
   },
   "notices": [
     {
