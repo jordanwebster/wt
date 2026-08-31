@@ -89,6 +89,7 @@ fn every_verb_has_a_normalized_json_contract_snapshot() {
             "adopted",
         ],
     );
+    snapshot(&h, "forget", &["forget", "repo/adopted", "--yes"]);
 
     let source = h.repo("source", "");
     let clone_path = h.root.join("clone");

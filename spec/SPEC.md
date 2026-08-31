@@ -28,7 +28,7 @@ Owning sections (the only place each mechanism is defined):
 | resource snapshot and `execute` | §10.3 |
 | resource state machine | §10.4 |
 | declaration refresh; repo-tied declarations | §10.5 |
-| `new` / `sync` / `remove` / `unregister` / `register` / `adopt` / `copy` | §11.2–11.7 |
+| `new` / `sync` / `rm` / `forget` / `unregister` / `register` / `adopt` / `copy` | §11.2–11.7 |
 | `list` drift, `prune`, doctor codes, log retention | §12 |
 | lock families, order, deadlines | §13 |
 
@@ -210,13 +210,13 @@ A resource's scope is the scope at which its effective task was declared.
 
 ### 5.4 Settings and geometry
 ```
-Settings := { schema?: 1, trees_dir?, agents?: Map<String, { start: Cmd, resume: Cmd }>,
+Settings := { schema?: 1, trees_dir?, editor?: Cmd, agents?: Map<String, { start: Cmd, resume: Cmd }>,
               ports?: { base?: u16 (20000), stride?: u8 (16) }, git?: { timeouts?: GitTimeouts }, task?: TaskDefaults,
               locks?: LockWaits, session?: { backend?: "tmux"|"none", attach?: bool (true), agent?: String|null,
                                             tmux_timeout?: Duration ("10s") },
               logs?: { keep?: u16 (20) } ★, shell?: { program?: AbsPath }, repos?: Map<Label, Config> }
 ```
-Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ base ≤ 65535`; `1 ≤ stride ≤ 255`; `max_slots = (65536 − base)/stride ≥ 1`; `session.agent`, when set, names a declared agent. A configuration carrying the former top-level agent key is refused by the ordinary unknown-key rule, with no bespoke check naming its replacement (A51). At `register`, or on the first `new`, `open`, or `close` in a home that predates this setting, an absent `session.backend` is resolved once: wt checks for tmux ≥ 3.2, writes `"tmux"` when found and `"none"` otherwise, and prints `sessions: tmux <version> (set session.backend to change)` or its `none` equivalent on stderr. A non-table `session` declaration that cannot be extended without rewriting is refused with a remedy to rewrite it as `[session]`. No command detects a session backend again after the key is written. `doctor` reports the effective backend as `SESSION_BACKEND` (info). Geometry is per incarnation and immutable (§7); `assemble` uses `TreeRec.geometry`; settings changes affect only future allocations; doctor `GEOMETRY_CHANGED` (info). Per tree `ports.len() ≤ geometry.stride` else `CONFIG_INVALID`. Built-in agents: `claude` (`claude --name {{name()}}` / `claude --continue`), `codex` (`codex` / `codex resume --last`).
+Validation at load (`u32` arithmetic) else `SETTINGS_INVALID` (5): `1024 ≤ base ≤ 65535`; `1 ≤ stride ≤ 255`; `max_slots = (65536 − base)/stride ≥ 1`; `session.agent`, when set, names a declared agent; `editor`, when set, is a non-empty templated `Cmd`. An unknown top-level settings key that is a valid repo-scope `Config` key has the ordinary unknown-key error plus the remedy "this is a repo-scope key; put it under `[repos.<label>]`". A configuration carrying the former top-level agent key is refused by the ordinary unknown-key rule, with no bespoke check naming its replacement (A51). At `register`, or on the first `new`, `open`, or `close` in a home that predates this setting, an absent `session.backend` is resolved once: wt checks for tmux ≥ 3.2, writes `"tmux"` when found and `"none"` otherwise, and prints `sessions: tmux <version> (set session.backend to change)` or its `none` equivalent on stderr. A non-table `session` declaration that cannot be extended without rewriting is refused with a remedy to rewrite it as `[session]`. No command detects a session backend again after the key is written. `doctor` reports the effective backend as `SESSION_BACKEND` (info). Geometry is per incarnation and immutable (§7); `assemble` uses `TreeRec.geometry`; settings changes affect only future allocations; doctor `GEOMETRY_CHANGED` (info). Per tree `ports.len() ≤ geometry.stride` else `CONFIG_INVALID`. Built-in agents: `claude` (`claude --name {{name()}}` / `claude --continue`), `codex` (`codex` / `codex resume --last`).
 
 ### 5.5 Tool variables (A15, A70)
 The stable **interface** tier is `WT_TARGET`, `WT_LABEL`, `WT_NAME`, `WT_ROOT`, `WT_REPO` (canonical path), `WT_HOME` (resolved home), and `WT_BRANCH`. The **mechanism** tier, which may change without compatibility notice, is `WT_ACTIVATION`, `WT_PATH_PREFIX` (the exact shim-plus-bin prefix), `WT_BIN`, `WT_SELF`, and `WT_TASK`. `WT_SESSION`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, and `WT_SLOT` are not exported (A70); the name derivations remain template functions. `WT_PORT_BASE` and `WT_PORT_<NAME>` are likewise not exported (A43): ports are configuration inputs reached by `{{ports.<name>}}` (§5.2) and reported by `status`, `list` and `env`. `WT_BRANCH` is the HEAD branch **at spawn** (empty if detached), read by one bounded `git symbolic-ref --short -q HEAD`; it is not updated while a shell or session lives (A31). All except `WT_ACTIVATION` are ordinary variables with a recorded prior (§8.1). **Tree-specific keys** (used by §10.3): `WT_ROOT`, `WT_TARGET`, `WT_NAME`, `WT_BRANCH`, `WT_BIN`, `WT_PATH_PREFIX`, `PATH`.
@@ -329,7 +329,7 @@ For any parent `p` without `WT_ACTIVATION` and `e = assemble(p, …).env`: **L1*
 
 ## 9. Doors
 ### 9.1 Door algorithm
-Used by `exec`, `run` (per plan, §10.1), `shell`, `open` and `env`. The door-equivalent steps inside `new`/`sync`/`register`/`adopt` run under that verb's exclusive tree lock and skip D0–D2.
+Used by `exec`, `edit`, `run` (per plan, §10.1), `shell`, `open` and `env`. The door-equivalent steps inside `new`/`sync`/`register`/`adopt` run under that verb's exclusive tree lock and skip D0–D2.
 
 | Step | Action | Lock |
 |---|---|---|
@@ -342,10 +342,10 @@ Used by `exec`, `run` (per plan, §10.1), `shell`, `open` and `env`. The door-eq
 | D6 | render (§8.3) and, if the materialised set changed, exclude (§4.2) | 6, 5 |
 | D7 | spawn (§9.2); for `env` print and release | — |
 
-cwd: caller's cwd if inside the tree, else the tree root (`run`: node cwd). A door emits no `BIN_DIR_MISSING` notice and no command summary carries a `next` guidance line (A50; `doctor`'s per-finding remedy line is unaffected): §9.2's shims remove the hazard the notice reported, and a missing declared `bin` directory is a `doctor` finding. Notices go to stderr on a TTY or `--verbose`, and always to `notices[]`. Each producer contributes its notice set once; renderers do not hide duplicate production. Port-bound findings are reported by `list`/`status`/`doctor` (§12), never by a door (§0).
+cwd: caller's cwd if inside the tree, else the tree root (`run`: node cwd; `edit`: tree root always). A door emits no `BIN_DIR_MISSING` notice and no command summary carries a `next` guidance line (A50; `doctor`'s per-finding remedy line is unaffected): §9.2's shims remove the hazard the notice reported, and a missing declared `bin` directory is a `doctor` finding. Notices go to stderr on a TTY or `--verbose`, and always to `notices[]`. Each producer contributes its notice set once; renderers do not hide duplicate production. Port-bound findings are reported by `ls`/`status`/`doctor` (§12), never by a door (§0).
 
 ### 9.2 Spawn: `execvp`, the `run` parent, `--no-gate`
-**Passthrough doors** (`exec`, `shell`): after D6 the wt process clears `FD_CLOEXEC` on the tree-lock and door-file fds and `execvp`s the child with the assembled env; the pid is unchanged, so the door file names the running process. `flock` is held by the open file description and survives `exec`; a child that closes every inherited fd releases the lock early — an accepted residual (A31; alongside A23/A27). Shells keep inherited fds, so `wt remove` of a tree someone is sitting in reports `TREE_IN_USE` naming the shell (A31 exception 1).
+**Passthrough doors** (`exec`, `edit`, `shell`): after D6 the wt process clears `FD_CLOEXEC` on the tree-lock and door-file fds and `execvp`s the child with the assembled env; the pid is unchanged, so the door file names the running process. `edit` resolves its command as settings `editor` → `$VISUAL` → `$EDITOR`; the settings command is templated, environment commands use shell form, and absence is `EDITOR_UNSET` (5) whose remedy names `editor`. `flock` is held by the open file description and survives `exec`; a child that closes every inherited fd releases the lock early — an accepted residual (A31; alongside A23/A27). Shells keep inherited fds, so `wt rm` of a tree someone is sitting in reports `TREE_IN_USE` naming the shell (A31 exception 1).
 
 **`run` nodes** keep a wt parent for the child's lifetime: it holds the lock fds (`FD_CLOEXEC` set, not inherited), spawns the child with inherited stdio (`--json`: stdout captured, §9.3), tees output to the log, enforces `timeout`, waits, and exits with the child's code or `128+n` on signal death.
 
@@ -367,7 +367,7 @@ A shim never falls through to the rest of PATH: interposing on every invocation 
 ### 9.3 Machine protocol per door (A20)
 | Door | `--json` | stdout / stderr | exit status |
 |---|---|---|---|
-| `exec`, `shell` | refused: `JSON_UNSUPPORTED` (2), remedy "passthrough doors have no envelope: use `wt env --json` or `wt run --json`" | child's | child's |
+| `exec`, `edit`, `shell` | refused: `JSON_UNSUPPORTED` (2), remedy "passthrough doors have no envelope: use `wt env --json` or `wt run --json`" | child's | child's |
 | tmux `open`, `open --all`, `close` | supported; JSON suppresses attachment | one envelope / notices | classes |
 | backend-none `open` | refused like `shell` under `--json`; otherwise passthrough | shell child's | child's |
 | `run <task>` text | — | child stdio tee'd to the log and inherited; notices on stderr | child's once started; signal `n` → `128+n` |
@@ -640,8 +640,11 @@ does not refresh, probe, destroy, or rewrite `_machine.json` (A61).
 ### 11.5 `unregister`
 `wt unregister <label> [--yes] [--force]`: refuses while non-canonical trees exist (`TREES_EXIST` 5) unless `--force` (removes them first via §11.4, one consent prompt listing all). For the canonical tree the teardown is performed inline: §11.4 step 1 **without** its canonical refusal, then steps 2–8 exactly as written (step 8 is the **only** tree-tied teardown pass), then **every repo-tied record** with `Destroy{teardown}`; **failure barrier**: if any tree-tied or repo-tied record is not dropped → `DESTROY_FAILED` (6), the canonical tree stays `removing` → `remove-interrupted`, and nothing below runs; otherwise artefact cleanup — hash-owned rendered files deleted via §5.7, `.wt/` deleted (consented; it may hold application data), anything else `ARTIFACT_KEPT` with its exclusion retained; exclude block removed if nothing kept; registry and state records deleted. The checkout is never deleted. Machine-tied declarations and records are excluded from both refresh and teardown, and `_machine.json` is left byte-for-byte untouched (A61).
 
+### 11.5a `forget`
+`wt forget <target> [--yes]` is records-only unregister for one live non-canonical tree; canonical → `USE_UNREGISTER` (2). It refuses while tree resource records exist (remedy names `wt destroy` and `wt rm`), while its session is live (remedy `wt close`), or while door holders exist (remedy: wait). After unregister-shaped consent it deletes hash-owned rendered files and `.wt/`, removes this tree's exclude entries, deletes its state file, and moves the registry entry to a tombstone with `reason = "forgotten"` and no materialised paths. It never removes the directory, branch, git worktree registration, or per-tree build cache. A mis-adoption is recovered with `forget`, then `adopt --name` using the correct name; tombstones, unlike live entries, do not participate in path uniqueness.
+
 ### 11.6 `register` and `adopt`
-`wt register [path] [--label L] [--move-to PATH] [--repair]`, `wt adopt <path> [--label L] [--name N]`:
+`wt register [path] [--label L] [--move-to PATH] [--repair]`, `wt adopt <path> [--label L] [--name N] [--agent X] [--meta k=v]…`:
 
 | Step | Action | Lock |
 |---|---|---|
@@ -653,6 +656,7 @@ does not refresh, probe, destroy, or rewrite `_machine.json` (A61).
 | I4 | state `ready`, `sync: null`, `op = null` | 6 |
 
 `adopt` requires the path to be listed by `git worktree list` of that gitdir (`NOT_A_WORKTREE` 5). `register --move-to` updates the canonical path and runs `git worktree repair`.
+`adopt --agent` names a declared agent (including either built-in) and records it without starting a session, so the first `open` uses its resume recipe. `adopt --meta` has the same validation, duplicate-key, and last-value-wins semantics as `new --meta`.
 
 `register <path> --label L --repair` recovers a canonical checkout in derived phase `replaced` because its `.wt/tree_id` marker is absent or wrong. It succeeds only when `path` is label `L`'s recorded canonical path, its common gitdir still matches the label, and the phase is `replaced`; otherwise `REPAIR_REFUSED` (5). Under the exclusive tree lock it rewrites the marker from the registry entry, recomputes the exclude block, and re-renders hash-owned files. It does not allocate or append coordinates, refresh resource declarations, alter resource/sync/verify state, or touch tombstones. `doctor`'s `TREE_REPLACED` remedy for a canonical tree names this command.
 
@@ -660,7 +664,7 @@ does not refresh, probe, destroy, or rewrite `_machine.json` (A61).
 Run exactly once per incarnation at `new` S3 (never for canonical or adopted trees). Source root = the canonical checkout. Per entry: source absent → `COPY_ABSENT` info; tracked by git → `COPY_TRACKED` (5), `new` aborts at S3 (`incomplete`, resumable); destination exists → `COPY_EXISTS` info, never overwritten; otherwise copied via §5.7 (files byte-for-byte with mode, directories recursively, symlinks recreated); record `materialized {kind: copied, hash: null}`. Copied paths are not hash-owned and are never re-rendered or individually deleted; they are excluded while the tree or its tombstone exists. Task side effects outside the tree are never tracked; a side effect that occupies a future tree path surfaces as `PATH_OCCUPIED` at that tree's `new` (§11.2 G).
 
 ## 12. Truth: `list`, `status`, `doctor`, `prune`, logs
-`wt list [label] [--probe] [--fast] [--disk]`, `wt status [target] [--probe]`: address, phase (§11.1), branch/detached, dirty counts, upstream ahead/behind, behind default, sync state (`ok | stale (<files>) | failed | never`, `behind <default> by N`, **`drift (<files>)`** = sync inputs changed on the default branch since the merge-base: one bounded `git diff --name-only HEAD...origin/<default> -- <sync_inputs>` per tree, S3/A31; `--fast` skips it), session `yes|no|unknown`, agent, tree-, repo-, and machine-tied resources `{scope, task, tied_to, state, external, undeclared, last_probe, last_error}`, slot/ports (+`bound` from one bind probe per declared port, skipped by `--fast`), path; `--disk` also sizes the tree's per-tree build cache (`cache_kb`, null when none exists). `--probe` refreshes declarations (§10.5) and runs `exists` under each displayed record's resource lock. For `list`, each distinct `ResourceKey` is probed once per pass: tree-tied keys remain per tree, while a repo- or machine-tied record shared across displayed trees is probed once and its one result is displayed for every tree that declares it. `status` probes each displayed record once. Doctor's state-orphan scan treats `_machine.json` as the machine store, never as an orphaned tree state file.
+`wt ls [label] [--probe] [--fast] [--disk] [--meta key]`, `wt status [target] [--probe]`: address, phase (§11.1), branch/detached, dirty counts, upstream ahead/behind, behind default, sync state (`ok | stale (<files>) | failed | never`, `behind <default> by N`, **`drift (<files>)`** = sync inputs changed on the default branch since the merge-base: one bounded `git diff --name-only HEAD...origin/<default> -- <sync_inputs>` per tree, S3/A31; `--fast` skips it), session `yes|no|unknown`, agent, tree-, repo-, and machine-tied resources `{scope, task, tied_to, state, external, undeclared, last_probe, last_error}`, slot/ports (+`bound` from one bind probe per declared port, skipped by `--fast`), path; `--disk` also sizes the tree's per-tree build cache (`cache_kb`, null when none exists). Human `ls --meta key` inserts a column named `key`, empty for trees without that value; JSON always carries the complete `meta` map and is unchanged by this option. `--probe` refreshes declarations (§10.5) and runs `exists` under each displayed record's resource lock. For `ls`, each distinct `ResourceKey` is probed once per pass: tree-tied keys remain per tree, while a repo- or machine-tied record shared across displayed trees is probed once and its one result is displayed for every tree that declares it. `status` probes each displayed record once. Doctor's state-orphan scan treats `_machine.json` as the machine store, never as an orphaned tree state file.
 
 Exclusive resource rows additionally show `holder|null` in JSON and the live
 holder in human output. A non-holder `--probe` skips the recipe and leaves its
@@ -735,14 +739,16 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 | `wt unregister <label> [--yes] [--force]` | yes | §11.5 |
 | `wt clone <url> [--label L] [--path P]` | yes | `git clone` (class `clone`) to `P` (default `$PWD/<stem>`), then §11.6 |
 | `wt new <label>/<name> [--branch B] [--from REF] [--detach] [--meta k=v]… [--no-sync] [--verify] [--no-fetch] [--no-open] [--no-attach] [--no-build]` | yes (phase-aware) | §11.2 |
-| `wt adopt <path> [--label L] [--name N]` ★ | yes | §11.6 |
-| `wt remove <target> [--yes] [--force] [--delete-branch] [--keep-branch] [--keep-orphans] [--wait d]` | yes | §11.4 |
+| `wt adopt <path> [--label L] [--name N] [--agent X] [--meta k=v]…` ★ | yes | §11.6 |
+| `wt rm <target> [--yes] [--force] [--delete-branch] [--keep-branch] [--keep-orphans] [--wait d]` (`remove` alias) | yes | §11.4 |
+| `wt forget <target> [--yes]` ★ | yes | §11.5a |
 | `wt sync [target] [--force]` | yes | §11.3 |
-| `wt list [label] [--probe] [--fast] [--disk]`, `wt status [target] [--probe]` ★ | — | §12 |
+| `wt ls [label] [--probe] [--fast] [--disk] [--meta key]` (`list` alias), `wt status [target] [--probe]` ★ | — | §12 |
 | `wt meta <target> [k=v\|k=]…` ★ | yes; prompt-free (destroys nothing) | §4.1 |
 | `wt prune [label] [--yes] [--merged] [--gone] [--records T]` | yes | §12 |
 | `wt run <task> [target] … [--take] [-- <args…>]` (aliases `test lint fmt build`); `wt destroy <ScopedTask> [target]`, `wt refresh <ScopedTask> [target]` | per task / per §10.4 | §10.1, §10.4 |
 | `wt exec [target] [--no-gate] -- <cmd…>` | — | §9.1–9.2; `--help`: "passthrough door; not a task (see `wt run`); no `--json` (A20)" |
+| `wt edit [target]` ★ | — | §9.1–9.3 |
 | `wt shell [target]` | — | §9.3 |
 | `wt env [target] …` | — | §8.5 |
 | `wt open [target] [--agent X] [--no-attach] [--all]`, `wt close [target\|--all]` | yes | §9.4 |
@@ -750,7 +756,7 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 | `wt doctor [label] [--probe]` | — | §12 |
 | `wt shell-init <zsh\|bash\|fish>` ★, `wt completions <shell>` ★ | — | §14.6 |
 
-Global: `--json`, `--yes`, `--quiet`, `--verbose`, `--color auto|always|never`, `--home DIR`. Unknown subcommand → exit 2 with the three closest names; every `--help` carries one example. `rm` and `ls` are accepted spellings of `remove` and `list`, hidden from help (A55).
+Global: `--json`, `--yes`, `--quiet`, `--verbose`, `--color auto|always|never`, `--home DIR`. Unknown subcommand → exit 2 with the three closest names; every `--help` carries one example. Top-level help groups commands in order as Everyday, Setup, Working inside a tree, and Upkeep. `rm` and `ls` are the primary documented spellings; `remove` and `list` remain visible aliases (A73 supersedes A55's hidden-alias presentation).
 
 Text mode is the default and every verb has an intentional human rendering; JSON is emitted only with `--json` (passthrough exceptions: A20). There is no generic JSON-to-text fallback. Summaries use:
 
@@ -763,7 +769,7 @@ Text mode is the default and every verb has an intentional human rendering; JSON
 The headline comes first. Fact keys are lower case and aligned within the block. Empty optional sections are omitted, but failures, orphaned resources and pending verification remain visible. `status`, `doctor` and `config` summarise rather than restating their JSON payloads. `path` prints only the root and `which` prints only the resolved executable (or `not found`). `list`, `tasks`, `config` and `locks` use aligned columns with a header where it aids reading; `tasks` is the effective task table, `config` shows effective keys with scope and layer, and `locks` is the coordination lock table. Output is plain ASCII apart from optional ANSI colour on existing diagnostic codes.
 
 ### 14.2 TTY and bounded-runtime rules (A14)
-Control-plane deadlines per §13.3; user children run as long as they run. Idempotent re-run applies to `register`, `unregister`, `clone`, `new`, `adopt`, `sync`, `remove`, `prune`, `open --no-attach`, `close`. stdin not a TTY ⇒ never prompt. Human stdout has the same format when redirected as it has on a terminal; only ANSI colour is omitted according to `--color`. `--json` selects the envelope instead. `unregister`, `destroy` and `refresh` prompt on a TTY without `--yes` and require `--yes` otherwise (`CONFIRM_REQUIRED` 2); a declined prompt exits 0 with `*: false` and mutates nothing. **`remove` is gated on loss, not on the verb** (A54): it prompts only when the plan discards uncommitted work or deletes a branch carrying unpushed commits, `--force` both permits such a removal and consents to it, `--yes` never unlocks one, and without a TTY it is refused with `TREE_DIRTY` (5) rather than `CONFIRM_REQUIRED`. **Exception**: `prune` is a report-then-act verb; without `--yes` on a non-TTY it prints its plan and exits 0 with `data.applied = false` and the notice `CONFIRM_REQUIRED` (§12).
+Control-plane deadlines per §13.3; user children run as long as they run. Idempotent re-run applies to `register`, `unregister`, `clone`, `new`, `adopt`, `sync`, `rm`, `forget`, `prune`, `open --no-attach`, `close`. stdin not a TTY ⇒ never prompt. Human stdout has the same format when redirected as it has on a terminal; only ANSI colour is omitted according to `--color`. `--json` selects the envelope instead. `unregister`, `forget`, `destroy` and `refresh` prompt on a TTY without `--yes` and require `--yes` otherwise (`CONFIRM_REQUIRED` 2); a declined prompt exits 0 with `*: false` and mutates nothing. **`rm` is gated on loss, not on the verb** (A54): it prompts only when the plan discards uncommitted work or deletes a branch carrying unpushed commits, `--force` both permits such a removal and consents to it, `--yes` never unlocks one, and without a TTY it is refused with `TREE_DIRTY` (5) rather than `CONFIRM_REQUIRED`. **Exception**: `prune` is a report-then-act verb; without `--yes` on a non-TTY it prints its plan and exits 0 with `data.applied = false` and the notice `CONFIRM_REQUIRED` (§12).
 
 ### 14.3 Exit classes and error type
 | Code | Class | Examples |
@@ -803,6 +809,7 @@ shapes — open, closed, and failed — even though `open` emits open/failed and
 | `register` | `{ label, path, gitdir_id, registered, resumed, tree: Tree, declared: { tasks: [ScopedTask], resources: [ {scope, task, tied_to, snapshot_keys: [EnvKey]} ], env: [EnvKey], files: [RelPath], bin: [RelPath], ports: [PortName], copy: [RelPath] }, config_errors: [ {path, line, col, message} ] }` |
 | `clone` | `{ url, path, cloned } & register.data` |
 | `unregister` | `{ label, unregistered, destroyed: [ {scope, task, state, child|null} ], artifacts: [ {path, action: "deleted"|"kept"} ] }` |
+| `forget` | `{ target, forgotten, artifacts: [ {path, action: "deleted"|"kept"} ] }` |
 | `new` / `adopt` | `{ tree, created, resumed, sync: StepRep[]|null, verify: {ok, steps: StepRep[]}|null, build: {started, log}|null }` / `{ tree, adopted, resumed }` |
 | `remove` | `{ target, removed, destroyed: [ {scope, task, state, child|null} ], orphans_kept: [ScopedTask], branch_deleted, branch_kept: string|null, session_closed }` |
 | `sync` | `{ target, ran, steps: StepRep[], inputs: [ {path, hash} ] }` |

@@ -324,6 +324,13 @@ pub struct UnregisterData {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ForgetData {
+    pub target: String,
+    pub forgotten: bool,
+    pub artifacts: Vec<ArtifactReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DestroyedReport {
     pub scope: String,
     pub task: String,

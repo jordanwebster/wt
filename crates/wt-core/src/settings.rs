@@ -143,6 +143,7 @@ pub struct ShellSettings {
 pub struct Settings {
     pub schema: u8,
     pub trees_dir: Option<String>,
+    pub editor: Option<Command>,
     pub agents: BTreeMap<String, Agent>,
     pub ports: PortSettings,
     pub git: GitSettings,
@@ -159,6 +160,7 @@ impl Default for Settings {
         Self {
             schema: 1,
             trees_dir: None,
+            editor: None,
             agents: BTreeMap::from([
                 (
                     "claude".to_owned(),
@@ -197,11 +199,19 @@ impl Default for Settings {
 
 pub fn parse(source: &str) -> Result<Settings, CoreError> {
     let mut settings: Settings = toml::from_str(source).map_err(|error| {
+        let remedy = misplaced_repo_key(source).map_or_else(
+            || "fix `$WT_HOME/config.toml`".to_owned(),
+            |key| {
+                format!(
+                    "`{key}` is a repo-scope key; put it under `[repos.<label>]` in `$WT_HOME/config.toml`"
+                )
+            },
+        );
         CoreError::new(
             ExitClass::State,
             "SETTINGS_INVALID",
             error.to_string(),
-            "fix `$WT_HOME/config.toml`",
+            remedy,
         )
     })?;
     let defaults = Settings::default();
@@ -247,7 +257,75 @@ pub fn validate_settings(settings: &Settings) -> Result<(), CoreError> {
             return Err(settings_error("session.agent is not declared"));
         }
     }
+    if let Some(editor) = &settings.editor {
+        if editor.texts().is_empty() || editor.texts().iter().any(String::is_empty) {
+            return Err(settings_error("editor command must not be empty"));
+        }
+        for value in editor.texts() {
+            if let Err(error) = crate::template::validate(value) {
+                return Err(settings_error(&format!(
+                    "editor command template is invalid: {}",
+                    error.message
+                )));
+            }
+        }
+    }
     Ok(())
+}
+
+fn misplaced_repo_key(source: &str) -> Option<&str> {
+    const REPO_KEYS: &[&str] = &[
+        "adapters",
+        "bin",
+        "commands",
+        "copy",
+        "detect",
+        "dirs",
+        "env",
+        "files",
+        "sync_inputs",
+        "vars",
+    ];
+    let table = source.parse::<toml::Table>().ok()?;
+    REPO_KEYS
+        .iter()
+        .copied()
+        .find(|key| table.contains_key(*key))
+        .or_else(|| {
+            table
+                .get("ports")
+                .is_some_and(toml::Value::is_array)
+                .then_some("ports")
+        })
+        .or_else(|| {
+            repo_map_key(
+                &table,
+                "locks",
+                &["tree_exclusive", "repo_git", "resource", "rmw"],
+            )
+        })
+        .or_else(|| {
+            repo_map_key(
+                &table,
+                "task",
+                &["probe_timeout", "destroy_timeout", "timeout", "lock_wait"],
+            )
+        })
+}
+
+fn repo_map_key(
+    table: &toml::Table,
+    key: &'static str,
+    settings_keys: &[&str],
+) -> Option<&'static str> {
+    let values = table.get(key)?.as_table()?;
+    values
+        .iter()
+        .any(|(name, value)| {
+            !settings_keys.contains(&name.as_str())
+                && (value.is_table() || matches!(value, toml::Value::Boolean(false)))
+        })
+        .then_some(key)
 }
 
 pub fn backend_is_declared(source: &str) -> Result<bool, CoreError> {
@@ -438,6 +516,37 @@ mod tests {
         assert_eq!(settings.session.backend, SessionBackend::None);
         assert!(settings.session.attach);
         assert_eq!(settings.session.agent, None);
+        assert_eq!(settings.editor, None);
+    }
+
+    #[test]
+    fn editor_accepts_both_command_forms_and_repo_keys_get_a_scoped_remedy() {
+        assert_eq!(
+            parse("editor=['code', '{{root()}}']").unwrap().editor,
+            Some(Command::Argv(vec![
+                "code".to_owned(),
+                "{{root()}}".to_owned()
+            ]))
+        );
+        assert_eq!(
+            parse("editor='vim'").unwrap().editor,
+            Some(Command::Shell("vim".to_owned()))
+        );
+        for source in ["editor=[]", "editor='{{root()}'"] {
+            let error = parse(source).unwrap_err();
+            assert_eq!(error.code.0, "SETTINGS_INVALID");
+        }
+        let error = parse("env={ FOO='bar' }").unwrap_err();
+        assert!(error.remedy.contains("repo-scope key"));
+        assert!(error.remedy.contains("[repos.<label>]"));
+        for source in [
+            "ports=['http']",
+            "[locks.integration]\nslots=2",
+            "[task.test]\nrun='cargo test'",
+        ] {
+            let error = parse(source).unwrap_err();
+            assert!(error.remedy.contains("repo-scope key"), "{source}");
+        }
     }
 
     #[test]

@@ -1,0 +1,22 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "forget",
+  "data": null,
+  "error": {
+    "class": "state",
+    "code": "RESOURCES_EXIST",
+    "details": null,
+    "exit": 5,
+    "message": "repo/adopted still has resource records",
+    "remedy": "use `wt destroy` to tear down the resources, or `wt rm` to remove the tree"
+  },
+  "notices": [],
+  "ok": false,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

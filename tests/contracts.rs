@@ -203,6 +203,12 @@ fn section_4_1_tree_metadata_sets_lists_unsets_and_round_trips() {
         .unwrap();
     assert_eq!(work["meta"], updated["data"]["meta"]);
     h.wt()
+        .args(["ls", "--meta", "ticket"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ticket"))
+        .stdout(predicate::str::contains("ABC-124"));
+    h.wt()
         .args(["status", "repo/work"])
         .assert()
         .success()
@@ -222,6 +228,271 @@ fn section_4_1_tree_metadata_sets_lists_unsets_and_round_trips() {
         stored.meta,
         serde_json::from_value(updated["data"]["meta"].clone()).unwrap()
     );
+}
+
+#[test]
+fn edit_is_a_root_cwd_passthrough_door_with_documented_resolution() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    let port = NEXT_ISOLATED_PORT.fetch_add(32, Ordering::Relaxed);
+    common::write(
+        &h.home.join("config.toml"),
+        &format!("editor=['sh','-c','printf \"%s|%s|%s\" \"$PWD\" \"$WT_TARGET\" \"{{{{root()}}}}\"']\n[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
+    );
+    h.register(&repo);
+    let expected_root = std::fs::canonicalize(&repo).unwrap();
+    h.wt()
+        .env("VISUAL", "false")
+        .env("EDITOR", "false")
+        .args(["edit", "repo"])
+        .assert()
+        .success()
+        .stdout(format!(
+            "{}|repo|{}",
+            expected_root.display(),
+            expected_root.display()
+        ));
+
+    let output = h.wt().args(["edit", "repo", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let refusal: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refusal["error"]["code"], "JSON_UNSUPPORTED");
+
+    common::write(
+        &h.home.join("config.toml"),
+        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
+    );
+    h.wt()
+        .env("VISUAL", "printf visual")
+        .env("EDITOR", "printf editor")
+        .args(["edit", "repo"])
+        .assert()
+        .success()
+        .stdout("visual");
+    h.wt()
+        .env("EDITOR", "printf editor")
+        .args(["edit", "repo"])
+        .assert()
+        .success()
+        .stdout("editor");
+    h.wt()
+        .args(["edit", "repo"])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("EDITOR_UNSET"))
+        .stderr(predicate::str::contains("`editor` settings key"));
+}
+
+#[test]
+fn adopt_records_metadata_and_a_validated_agent_for_first_open_resume() {
+    let h = Harness::new();
+    let port = NEXT_ISOLATED_PORT.fetch_add(32, Ordering::Relaxed);
+    common::write(
+        &h.home.join("config.toml"),
+        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='tmux'\n"),
+    );
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+    let adopted = h.root.join("adopted-with-agent");
+    common::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "adopted-with-agent",
+            adopted.to_str().unwrap(),
+        ],
+    );
+    let value = h.json(&[
+        "adopt",
+        adopted.to_str().unwrap(),
+        "--label",
+        "repo",
+        "--name",
+        "adopted",
+        "--agent",
+        "codex",
+        "--meta",
+        "ticket=ABC-9",
+    ]);
+    assert_eq!(value["data"]["tree"]["agent"], "codex");
+    assert_eq!(
+        value["data"]["tree"]["meta"],
+        serde_json::json!({"ticket": "ABC-9"})
+    );
+    let opened = h.json(&["open", "repo/adopted", "--no-attach"]);
+    let session = opened["data"]["sessions"][0]["name"].as_str().unwrap();
+    let argv =
+        std::fs::read_to_string(h.shim_state.join("tmux").join(session).join("argv")).unwrap();
+    assert!(argv.lines().any(|line| line == "resume"));
+    assert!(argv.lines().any(|line| line == "--last"));
+
+    let other = h.root.join("adopted-invalid-agent");
+    common::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "adopted-invalid-agent",
+            other.to_str().unwrap(),
+        ],
+    );
+    h.wt()
+        .args([
+            "adopt",
+            other.to_str().unwrap(),
+            "--label",
+            "repo",
+            "--agent",
+            "missing",
+        ])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains(
+            "agent `missing` is not configured",
+        ));
+}
+
+#[test]
+fn forget_removes_only_wt_records_and_artifacts_and_requires_consent() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo("repo", "");
+    h.register(&repo);
+    h.wt()
+        .args(["forget", "repo", "--yes"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("USE_UNREGISTER"));
+    let created = h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
+    let tree = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
+    common::write(
+        &tree.join(".wt/config.toml"),
+        "[files.\"editor.local\"]\ncontent='tree={{name()}}'\n",
+    );
+    h.json(&["env", "repo/work"]);
+    assert!(tree.join("editor.local").exists());
+    assert!(std::fs::read_to_string(repo.join(".git/info/exclude"))
+        .unwrap()
+        .contains("/editor.local"));
+    let registry_before = std::fs::read(h.home.join("registry.json")).unwrap();
+
+    h.wt()
+        .args(["forget", "repo/work"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("CONFIRM_REQUIRED"));
+    assert_eq!(
+        std::fs::read(h.home.join("registry.json")).unwrap(),
+        registry_before
+    );
+    let declined = h.pty_output(&["forget", "repo/work"], b"n\n");
+    assert_eq!(declined.child.code, Some(0));
+    assert!(String::from_utf8_lossy(&declined.stdout).contains("Did not forget repo/work"));
+    assert_eq!(
+        std::fs::read(h.home.join("registry.json")).unwrap(),
+        registry_before
+    );
+
+    let forgotten = h.json(&["forget", "repo/work", "--yes"]);
+    assert_eq!(forgotten["data"]["forgotten"], true);
+    assert!(tree.exists());
+    assert!(!tree.join(".wt").exists());
+    assert!(!tree.join("editor.local").exists());
+    assert!(!std::fs::read_to_string(repo.join(".git/info/exclude"))
+        .unwrap()
+        .contains("/editor.local"));
+    assert!(tree.join(".git").exists());
+    assert!(common::branches(&repo).contains(&"work".to_owned()));
+    let registry: wt_core::model::Registry =
+        serde_json::from_slice(&std::fs::read(h.home.join("registry.json")).unwrap()).unwrap();
+    assert!(!registry.trees.iter().any(|entry| entry.name == "work"));
+    assert!(registry
+        .tombstones
+        .iter()
+        .any(|entry| entry.name == "work" && entry.reason == "forgotten"));
+    assert!(!h
+        .home
+        .join(wt_core::model::tree_state_path(
+            &wt_core::model::Target::parse("repo/work").unwrap()
+        ))
+        .exists());
+}
+
+#[test]
+fn forget_refuses_resources_sessions_and_door_holders_with_specific_remedies() {
+    let resources = Harness::new();
+    configure_backend_none(&resources);
+    let repo = resources.repo("repo", RESOURCE);
+    resources.register(&repo);
+    resources.json(&["new", "repo/work", "--no-sync", "--no-open"]);
+    resources.json(&["run", "service", "repo/work"]);
+    resources
+        .wt()
+        .args(["forget", "repo/work", "--yes"])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("RESOURCES_EXIST"))
+        .stderr(predicate::str::contains("wt destroy"))
+        .stderr(predicate::str::contains("wt rm"));
+
+    let sessions = Harness::new();
+    let port = NEXT_ISOLATED_PORT.fetch_add(32, Ordering::Relaxed);
+    common::write(
+        &sessions.home.join("config.toml"),
+        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='tmux'\n"),
+    );
+    let repo = sessions.repo("repo", BASIC);
+    sessions.register(&repo);
+    sessions.json(&["new", "repo/work", "--no-sync", "--no-attach"]);
+    sessions
+        .wt()
+        .args(["forget", "repo/work", "--yes"])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("SESSION_LIVE"))
+        .stderr(predicate::str::contains("wt close"));
+
+    let holders = Harness::new();
+    configure_backend_none(&holders);
+    let repo = holders.repo("repo", BASIC);
+    holders.register(&repo);
+    holders.json(&["new", "repo/work", "--no-sync", "--no-open"]);
+    let mut child = holders
+        .wt_std()
+        .args(["exec", "repo/work", "--", "sleep", "5"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    holders
+        .wt()
+        .args(["forget", "repo/work", "--yes"])
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("TREE_IN_USE"))
+        .stderr(predicate::str::contains("wait for the door holders"));
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn top_level_help_uses_intent_groups_and_primary_short_spellings() {
+    let h = Harness::new();
+    let output = h.wt().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    let headings = ["Everyday:", "Setup:", "Working inside a tree:", "Upkeep:"];
+    let positions = headings.map(|heading| help.find(heading).unwrap());
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(help.contains("ls           List registered trees [aliases: list]"));
+    assert!(help.contains("rm           Tear down and remove a linked tree [aliases: remove]"));
+    for alias in ["test", "lint", "fmt", "build"] {
+        assert!(help.contains(&format!("  {alias}")));
+    }
 }
 
 #[test]

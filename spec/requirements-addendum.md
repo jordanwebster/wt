@@ -1044,3 +1044,49 @@ completion and the PATH guard, removes the `wtcd` and `wtsh` helpers, and adds
 a guarded `(<target>) ` prompt prefix that is inert outside a door. The built-in
 Claude start recipe names the bare tree with
 `["claude", "--name", "{{name()}}"]`.
+
+## A71. Editing is a door
+
+`wt edit [target]` enters the ordinary door and replaces wt with an editor at
+the tree root. It resolves the command from the templated settings `editor`
+key, then `$VISUAL`, then `$EDITOR`; no value is `EDITOR_UNSET`, with a remedy
+that names `editor`. Like `exec` and `shell`, it is a passthrough door: the
+editor receives the full assembled environment and child status, while
+`--json` is refused with `JSON_UNSUPPORTED`. Terminal editors and cold GUI
+launches therefore see the tree exactly as tasks do. A GUI command that merely
+forwards to an existing process cannot change that process's environment;
+run configurations must use `wt exec`, or integrated terminals `wt shell`.
+Rationale: editing is the remaining everyday entrance into a worktree, and an
+editor that starts outside the door silently chooses the wrong binaries,
+ports, and rendered files.
+
+## A72. A worktree can outlive wt's adoption of it
+
+`wt forget <target> [--yes]` removes wt's records and owned artifacts for one
+live non-canonical tree without touching its directory, branch, or git
+worktree registration. Canonical trees use `unregister`. Resource records,
+live sessions, and door holders refuse with remedies to destroy or remove,
+close, and wait respectively. Consent is identical to `unregister`, because
+`.wt/` may contain application data: a terminal prompts, non-interactive use
+requires `--yes`, and a declined prompt exits successfully with
+`forgotten:false` and no mutation. Hash-owned rendered files and `.wt/` are
+cleaned, exclude entries and state are removed, and the registry entry becomes
+a tombstone with reason `forgotten`. Rationale: adoption can attach the wrong
+name or policy to a perfectly valid worktree; correcting that record must not
+pretend the checkout itself is disposable.
+
+## A73. Adoption and the command surface describe actual intent
+
+`adopt` accepts the same repeatable metadata assignments as `new`, plus a
+declared `--agent`; it records both without starting anything. A recorded
+agent makes the first `open` use the resume recipe, preserving the fact that
+an adopted tree already has history. `rm` and `ls` are the primary documented
+spellings while `remove` and `list` remain visible aliases. Help is ordered by
+intent — Everyday, Setup, Working inside a tree, Upkeep — and exposes the
+`test`, `lint`, `fmt`, and `build` run aliases. Human `ls --meta <key>` adds the
+selected value as a fleet column; JSON continues carrying the complete map.
+Finally, when a repo-scope configuration key is misplaced at settings top
+level, the error tells the user to put it below `[repos.<label>]`. Rationale:
+the terse verbs are the daily interface, adoption should preserve the same
+fleet facts as creation, and configuration errors should point across the
+scope boundary instead of merely saying that a familiar key is unknown.

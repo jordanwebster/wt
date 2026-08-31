@@ -14,7 +14,7 @@ with it.
 wt register ~/source/orbit
 wt new orbit/fix-scrolling        # creates the tree, lands you inside it
 orbit serve                       # this tree's build, on this tree's port
-wt remove orbit/fix-scrolling     # or `wt rm`
+wt rm orbit/fix-scrolling
 ```
 
 ## A worktree owns its names
@@ -191,7 +191,7 @@ one; `wt status` and `wt doctor` report completion or failure.
 wt new orbit/review-42 --from pr:42 --no-attach   # provision, don't enter
 wt new orbit/scratch --no-open                    # no session at all
 wt new orbit/ticket-42 --meta ticket=ABC-42       # attach opaque fleet data
-wt list
+wt ls
 wt status orbit/fix-scrolling
 ```
 
@@ -268,7 +268,7 @@ start  = ["codex"]
 resume = ["codex", "resume", "--last"]
 ```
 
-Remove a worktree when finished. `wt remove` (or `wt rm`) asks only when the
+Remove a worktree when finished. `wt rm` (`wt remove` is an alias) asks only when the
 removal would destroy work: uncommitted changes, or commits no remote carries
 on a branch it is about to delete. A clean worktree whose commits are pushed is
 removed without a prompt. `--force` permits a removal that loses work and is
@@ -435,7 +435,7 @@ Inside a worktree, `wt` exports two tiers:
 Name transformations belong in template functions such as `{{name_snake()}}`
 and `{{name_short()}}`, not environment variables. `WT_SESSION`,
 `WT_NAME_SNAKE`, `WT_NAME_SHORT`, and `WT_SLOT` are not exported. Inside tmux,
-use tmux's `$TMUX_PANE` for the current pane and `wt list --json` for registry
+use tmux's `$TMUX_PANE` for the current pane and `wt ls --json` for registry
 lookup.
 
 Ports are **not** exported. They are an input to your configuration, not part
@@ -481,7 +481,7 @@ private, because Cargo's unit hashes ignore the workspace path, so trees
 sharing one directory would corrupt each other's generated code and
 freshness — while each tree keeps its binaries in its own `target/`. The
 directory is deleted with the tree, `wt prune` reaps orphans, and
-`wt list --disk` sizes it (`cache_kb`). Cross-tree warmth comes from
+`wt ls --disk` sizes it (`cache_kb`). Cross-tree warmth comes from
 content-addressed caches instead: install sccache and set
 `rustc-wrapper = "sccache"` in `~/.cargo/config.toml [build]`, and every tree
 compiles shared dependencies as cache hits. pnpm hard-links packages from its
@@ -545,7 +545,7 @@ $WT_HOME/
   ...                         rendered files and application-owned data
 ```
 
-Useful maintenance commands: `wt list --probe --disk`, `wt doctor`, `wt locks`,
+Useful maintenance commands: `wt ls --probe --disk`, `wt doctor`, `wt locks`,
 `wt prune`, and `wt unregister <label> --yes`. `shell-init` keeps completion
 support, restores a worktree's binary prefix if a shell startup file reordered
 `PATH`, and adds a guarded `(<target>) ` prompt prefix inside door shells:
@@ -553,6 +553,9 @@ support, restores a worktree's binary prefix if a shell startup file reordered
 ```sh
 eval "$(wt shell-init zsh)"
 ```
+
+See the [cookbook](docs/cookbook.md) for policy shims, agent wrappers, and
+editor integration patterns.
 
 Normative behaviour lives in [spec/SPEC.md](spec/SPEC.md). The original problem
 statement is at [spec/problem-statement.md](spec/problem-statement.md).

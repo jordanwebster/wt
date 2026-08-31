@@ -18,6 +18,9 @@ use super::context::target_of;
 use super::{door, executor, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: List) -> Result<Output, CoreError> {
+    if let Some(key) = args.meta.as_deref() {
+        wt_core::model::validate_meta(key, "")?;
+    }
     let selected = context
         .registry
         .trees
@@ -76,7 +79,13 @@ pub(crate) fn run(context: &mut Context, args: List) -> Result<Output, CoreError
             right.holder.pid,
         ))
     });
-    Output::data(ListData { trees, locks })
+    let data = ListData { trees, locks };
+    if let Some(key) = args.meta.as_deref() {
+        let text = super::human::render_list_meta(data.clone(), key);
+        Output::text(data, text)
+    } else {
+        Output::data(data)
+    }
 }
 
 pub(crate) fn tree_report(

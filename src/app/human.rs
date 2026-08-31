@@ -1,9 +1,9 @@
 use serde_json::Value;
 use wt_core::doctor::Severity;
 use wt_core::report::{
-    AdoptData, CloneData, ConfigData, DoctorData, ListData, LocksData, NewData, Notice, PruneData,
-    RegisterData, RemoveData, ResourceActionData, SessionsData, StatusData, SyncData, TasksData,
-    UnregisterData, WhichData,
+    AdoptData, CloneData, ConfigData, DoctorData, ForgetData, ListData, LocksData, NewData, Notice,
+    PruneData, RegisterData, RemoveData, ResourceActionData, SessionsData, StatusData, SyncData,
+    TasksData, UnregisterData, WhichData,
 };
 
 use crate::cli::Command;
@@ -25,7 +25,9 @@ pub(crate) enum HumanKind {
     Shell,
     Env,
     Open,
+    Edit,
     Close,
+    Forget,
     Remove,
     Prune,
     Destroy,
@@ -60,7 +62,9 @@ impl From<&Command> for HumanKind {
             Command::Shell(_) => Self::Shell,
             Command::Env(_) => Self::Env,
             Command::Open(_) => Self::Open,
+            Command::Edit(_) => Self::Edit,
             Command::Close(_) => Self::Close,
+            Command::Forget(_) => Self::Forget,
             Command::Remove(_) => Self::Remove,
             Command::Prune(_) => Self::Prune,
             Command::Destroy(_) => Self::Destroy,
@@ -98,9 +102,14 @@ impl HumanKind {
                 .path
                 .unwrap_or_else(|| "not found".to_owned()),
             Self::Run => render_run(value, notices),
-            Self::Path | Self::Meta | Self::Exec | Self::Shell | Self::Env | Self::Script => {
-                String::new()
-            }
+            Self::Path
+            | Self::Meta
+            | Self::Exec
+            | Self::Shell
+            | Self::Edit
+            | Self::Env
+            | Self::Script => String::new(),
+            Self::Forget => render_forget(decode(value), notices),
             Self::Locks => render_locks(decode(value), notices),
         }
     }
@@ -178,6 +187,20 @@ fn render_unregister(data: UnregisterData, notices: &[Notice]) -> String {
     if !data.artifacts.is_empty() {
         facts.push(("artifacts", data.artifacts.len().to_string()));
     }
+    block(headline, facts, notices)
+}
+
+fn render_forget(data: ForgetData, notices: &[Notice]) -> String {
+    let headline = if data.forgotten {
+        format!("Forgot {}", data.target)
+    } else {
+        format!("Did not forget {}", data.target)
+    };
+    let facts = if data.artifacts.is_empty() {
+        Vec::new()
+    } else {
+        vec![("artifacts", data.artifacts.len().to_string())]
+    };
     block(headline, facts, notices)
 }
 
@@ -307,6 +330,14 @@ fn render_status(data: StatusData, notices: &[Notice]) -> String {
 }
 
 fn render_list(data: ListData, _notices: &[Notice]) -> String {
+    render_list_with_meta(data, None)
+}
+
+pub(crate) fn render_list_meta(data: ListData, key: &str) -> String {
+    render_list_with_meta(data, Some(key))
+}
+
+fn render_list_with_meta(data: ListData, meta_key: Option<&str>) -> String {
     let show_holders = data.trees.iter().any(|tree| {
         tree.resources
             .iter()
@@ -328,40 +359,64 @@ fn render_list(data: ListData, _notices: &[Notice]) -> String {
                     })
                     .collect::<Vec<_>>()
                     .join(",");
-                vec![
+                let mut row = vec![
                     tree.target,
                     tree.phase,
                     tree.branch.unwrap_or_else(|| "detached".to_owned()),
                     tree.sync.state,
                     resources,
-                    tree.path,
-                ]
+                ];
+                if let Some(key) = meta_key {
+                    row.push(tree.meta.get(key).cloned().unwrap_or_default());
+                }
+                row.push(tree.path);
+                row
             })
             .collect::<Vec<_>>();
-        table(
-            "Registered trees",
-            ["target", "phase", "branch", "sync", "holders", "path"],
-            rows,
-        )
+        if let Some(key) = meta_key {
+            table(
+                "Registered trees",
+                ["target", "phase", "branch", "sync", "holders", key, "path"],
+                rows,
+            )
+        } else {
+            table(
+                "Registered trees",
+                ["target", "phase", "branch", "sync", "holders", "path"],
+                rows,
+            )
+        }
     } else {
         let rows = data
             .trees
             .into_iter()
             .map(|tree| {
-                vec![
+                let mut row = vec![
                     tree.target,
                     tree.phase,
                     tree.branch.unwrap_or_else(|| "detached".to_owned()),
                     tree.sync.state,
-                    tree.path,
-                ]
+                ];
+                if let Some(key) = meta_key {
+                    row.push(tree.meta.get(key).cloned().unwrap_or_default());
+                }
+                row.push(tree.path);
+                row
             })
             .collect::<Vec<_>>();
-        table(
-            "Registered trees",
-            ["target", "phase", "branch", "sync", "path"],
-            rows,
-        )
+        if let Some(key) = meta_key {
+            table(
+                "Registered trees",
+                ["target", "phase", "branch", "sync", key, "path"],
+                rows,
+            )
+        } else {
+            table(
+                "Registered trees",
+                ["target", "phase", "branch", "sync", "path"],
+                rows,
+            )
+        }
     }
 }
 

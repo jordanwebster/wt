@@ -7,9 +7,11 @@ mod context;
 mod destroy;
 mod doctor;
 mod door;
+mod edit;
 mod env;
 mod exec;
 mod executor;
+mod forget;
 mod human;
 mod list;
 mod locks;
@@ -324,7 +326,9 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Shell(args) => shell::run(context, args),
         Command::Env(args) => env::run(context, args),
         Command::Open(args) => open::run(context, args),
+        Command::Edit(args) => edit::run(context, args),
         Command::Close(args) => close::run(context, args),
+        Command::Forget(args) => forget::run(context, args),
         Command::Remove(args) => remove::run(context, args),
         Command::Prune(args) => prune::run(context, args),
         Command::Destroy(args) => destroy::run(context, args),
