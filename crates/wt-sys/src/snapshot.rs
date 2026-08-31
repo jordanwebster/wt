@@ -312,6 +312,7 @@ mod tests {
                 scope: RelPath::new(".").unwrap(),
                 task: "daemon".into(),
             },
+            exclusive: None,
             name: "repo_tree_daemon".into(),
             cwd_rel: RelPath::new(".").unwrap(),
             exists: Some(command.clone()),

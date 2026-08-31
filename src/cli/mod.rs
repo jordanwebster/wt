@@ -273,6 +273,8 @@ pub struct Run {
     pub dry_run: bool,
     #[arg(long)]
     pub no_log: bool,
+    #[arg(long)]
+    pub take: bool,
     #[arg(last = true)]
     pub args: Vec<String>,
 }
@@ -302,6 +304,7 @@ impl AliasRun {
             timeout: self.timeout,
             dry_run: self.dry_run,
             no_log: self.no_log,
+            take: false,
             args: self.args,
         }
     }

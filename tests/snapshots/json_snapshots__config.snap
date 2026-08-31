@@ -1,5 +1,6 @@
 ---
 source: tests/json_snapshots.rs
+assertion_line: 128
 expression: "normalize(value, &h.root)"
 ---
 {
@@ -43,6 +44,7 @@ expression: "normalize(value, &h.root)"
               "description": null,
               "destroy": null,
               "env": {},
+              "exclusive": null,
               "exists": null,
               "lock": null,
               "name": null,
@@ -58,6 +60,7 @@ expression: "normalize(value, &h.root)"
               "description": null,
               "destroy": null,
               "env": {},
+              "exclusive": null,
               "exists": null,
               "lock": null,
               "name": null,
@@ -73,6 +76,7 @@ expression: "normalize(value, &h.root)"
               "description": null,
               "destroy": null,
               "env": {},
+              "exclusive": null,
               "exists": null,
               "lock": null,
               "name": null,
@@ -88,6 +92,7 @@ expression: "normalize(value, &h.root)"
               "description": null,
               "destroy": null,
               "env": {},
+              "exclusive": null,
               "exists": null,
               "lock": null,
               "name": null,
@@ -103,6 +108,7 @@ expression: "normalize(value, &h.root)"
               "description": null,
               "destroy": "rm -f \"$WT_ROOT/.service\"",
               "env": {},
+              "exclusive": null,
               "exists": "test -f \"$WT_ROOT/.service\"",
               "lock": null,
               "name": null,
@@ -118,6 +124,7 @@ expression: "normalize(value, &h.root)"
               "description": null,
               "destroy": null,
               "env": {},
+              "exclusive": null,
               "exists": null,
               "lock": null,
               "name": null,
@@ -133,6 +140,7 @@ expression: "normalize(value, &h.root)"
               "description": null,
               "destroy": null,
               "env": {},
+              "exclusive": null,
               "exists": null,
               "lock": null,
               "name": null,
@@ -148,6 +156,7 @@ expression: "normalize(value, &h.root)"
               "description": null,
               "destroy": null,
               "env": {},
+              "exclusive": null,
               "exists": null,
               "lock": null,
               "name": null,

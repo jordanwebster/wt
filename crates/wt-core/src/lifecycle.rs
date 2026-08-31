@@ -96,6 +96,14 @@ pub struct RepoState {
     pub schema: u8,
     pub label: Option<Label>,
     pub resources: BTreeMap<String, ResourceRecord>,
+    #[serde(default)]
+    pub exclusive: BTreeMap<String, ExclusiveHolder>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExclusiveHolder {
+    pub holder: String,
+    pub since: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

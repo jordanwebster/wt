@@ -67,6 +67,7 @@ mod tests {
                 scope: RelDir::new(".").unwrap(),
                 task: task.to_owned(),
             },
+            exclusive: None,
             name: format!("repo_{task}"),
             cwd_rel: RelDir::new(".").unwrap(),
             exists: None,

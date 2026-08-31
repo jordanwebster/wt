@@ -39,6 +39,7 @@ expression: "normalize(value, &h.root)"
         {
           "external": false,
           "has_instance": false,
+          "holder": null,
           "last_error": null,
           "last_probe": null,
           "name": "repo_work_a6ff5944_service",

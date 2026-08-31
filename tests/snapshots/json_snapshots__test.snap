@@ -10,6 +10,7 @@ expression: "normalize(value, &h.root)"
       "code": 0,
       "signal": null
     },
+    "displaced": null,
     "log": "<log>",
     "steps": [
       {

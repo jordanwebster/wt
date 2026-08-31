@@ -10,7 +10,7 @@ pub(crate) fn run(context: &mut Context, args: ResourceAction) -> Result<Output,
         return Output::data(serde_json::json!({"destroyed": false}));
     }
     let door = door::enter(context, args.target.as_deref(), "destroy")?;
-    let notices = door.notices.clone();
+    let mut notices = door.notices.clone();
     let plan = executor::plan(context, &door, &args.task)?;
     let node = plan
         .nodes
@@ -24,14 +24,18 @@ pub(crate) fn run(context: &mut Context, args: ResourceAction) -> Result<Output,
     executor::refresh_all_declarations(context, &door)?;
     let before =
         executor::resource_state(context, &door, key)?.unwrap_or_else(|| "declared".to_owned());
-    let (after, child) = executor::destroy_resource(context, &door, key, false)?;
+    let arenas = executor::arena_snapshot(context, &door.tree.label)?;
+    let result = executor::destroy_resource(context, &door, key, false, &arenas)?;
+    if let Some(notice) = result.notice {
+        notices.push(notice);
+    }
     Ok(Output::data(ResourceActionData {
         target: door.target.to_string(),
         scope: key.scope.to_string(),
         task: key.task.clone(),
         before,
-        after,
-        child,
+        after: result.state,
+        child: result.child,
     })?
     .with_notices(notices))
 }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{Command, TiedTo},
+    config::{Command, Exclusive, TiedTo},
     model::{name_snake, EnvMap, Label, RelDir},
     CoreError, ExitClass,
 };
@@ -60,6 +60,8 @@ pub struct SnapshotRoots {
 pub struct ResourceSnapshot {
     pub schema: u8,
     pub key: ResourceKey,
+    #[serde(default)]
+    pub exclusive: Option<Exclusive>,
     pub name: String,
     pub cwd_rel: RelDir,
     pub exists: Option<ExpandedCommand>,
@@ -691,6 +693,7 @@ mod tests {
                 scope: RelDir::new(".").unwrap(),
                 task: "db".to_owned(),
             },
+            exclusive: None,
             name: "repo_db".to_owned(),
             cwd_rel: RelDir::new(".").unwrap(),
             exists: Some(ExpandedCommand::Shell {

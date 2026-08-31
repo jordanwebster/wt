@@ -91,6 +91,13 @@ pub enum TiedTo {
     Machine,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Exclusive {
+    Repo,
+    Machine,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Task {
@@ -102,6 +109,7 @@ pub struct Task {
     pub lock: Option<String>,
     pub name: Option<String>,
     pub tied_to: Option<TiedTo>,
+    pub exclusive: Option<Exclusive>,
     pub env: IndexMap<String, String>,
     pub cwd: Option<RelPath>,
     pub timeout: Option<String>,
@@ -777,6 +785,7 @@ fn validate_task(
             (task.ready_within.is_some(), "ready_within"),
             (task.name.is_some(), "name"),
             (task.tied_to.is_some(), "tied_to"),
+            (task.exclusive.is_some(), "exclusive"),
             (!task.snapshot_env.is_empty(), "snapshot_env"),
         ]
         .into_iter()
@@ -786,6 +795,13 @@ fn validate_task(
                 "aggregate task `{id}` key `{key}` would guard nothing; put `{key}` on a task that runs"
             )));
         }
+    }
+    if task.exclusive.is_some()
+        && (task.destroy.is_none() || task.exists.is_none() || task.tied_to != Some(TiedTo::Tree))
+    {
+        return Err(invalid(
+            "exclusive is valid only on a tree-tied resource (destroy + exists + tied_to = \"tree\")",
+        ));
     }
     if task.destroy.is_some() && (task.exists.is_none() || task.tied_to.is_none()) {
         return Err(invalid("a resource needs exists and tied_to"));

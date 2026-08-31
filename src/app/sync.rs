@@ -92,7 +92,13 @@ pub(crate) fn run(context: &mut Context, args: Sync) -> Result<Output, CoreError
     let (ran, steps) = if unchanged && !args.force {
         (false, Vec::new())
     } else {
-        match executor::execute_plan(context, &door, &plan, None, None, None, false) {
+        match executor::execute_plan(
+            context,
+            &door,
+            &plan,
+            None,
+            executor::ExecuteOptions::DEFAULT,
+        ) {
             Ok(result) => (true, result.data.steps),
             Err(error) => {
                 fail(context, &target, &holder, &error)?;

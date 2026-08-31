@@ -256,7 +256,24 @@ fn render_status(data: StatusData, notices: &[Notice]) -> String {
         ));
     }
     if !data.tree.resources.is_empty() {
-        facts.push(("resources", data.tree.resources.len().to_string()));
+        let held =
+            data.tree
+                .resources
+                .iter()
+                .filter_map(|resource| {
+                    resource.holder.as_ref().map(|holder| {
+                        format!("{}={} (holder {holder})", resource.task, resource.state)
+                    })
+                })
+                .collect::<Vec<_>>();
+        facts.push((
+            "resources",
+            if held.is_empty() {
+                data.tree.resources.len().to_string()
+            } else {
+                held.join(", ")
+            },
+        ));
     }
     if !data.tasks.is_empty() {
         facts.push(("tasks", data.tasks.len().to_string()));
@@ -272,24 +289,62 @@ fn render_status(data: StatusData, notices: &[Notice]) -> String {
 }
 
 fn render_list(data: ListData, _notices: &[Notice]) -> String {
-    let rows = data
-        .trees
-        .into_iter()
-        .map(|tree| {
-            vec![
-                tree.target,
-                tree.phase,
-                tree.branch.unwrap_or_else(|| "detached".to_owned()),
-                tree.sync.state,
-                tree.path,
-            ]
-        })
-        .collect::<Vec<_>>();
-    table(
-        "Registered trees",
-        ["target", "phase", "branch", "sync", "path"],
-        rows,
-    )
+    let show_holders = data.trees.iter().any(|tree| {
+        tree.resources
+            .iter()
+            .any(|resource| resource.holder.is_some())
+    });
+    if show_holders {
+        let rows = data
+            .trees
+            .into_iter()
+            .map(|tree| {
+                let resources = tree
+                    .resources
+                    .iter()
+                    .filter_map(|resource| {
+                        resource
+                            .holder
+                            .as_ref()
+                            .map(|holder| format!("{}:{holder}", resource.task))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                vec![
+                    tree.target,
+                    tree.phase,
+                    tree.branch.unwrap_or_else(|| "detached".to_owned()),
+                    tree.sync.state,
+                    resources,
+                    tree.path,
+                ]
+            })
+            .collect::<Vec<_>>();
+        table(
+            "Registered trees",
+            ["target", "phase", "branch", "sync", "holders", "path"],
+            rows,
+        )
+    } else {
+        let rows = data
+            .trees
+            .into_iter()
+            .map(|tree| {
+                vec![
+                    tree.target,
+                    tree.phase,
+                    tree.branch.unwrap_or_else(|| "detached".to_owned()),
+                    tree.sync.state,
+                    tree.path,
+                ]
+            })
+            .collect::<Vec<_>>();
+        table(
+            "Registered trees",
+            ["target", "phase", "branch", "sync", "path"],
+            rows,
+        )
+    }
 }
 
 fn render_sync(data: SyncData, notices: &[Notice]) -> String {

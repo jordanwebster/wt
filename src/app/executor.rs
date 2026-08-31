@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use wt_core::config::{self, Command, Config, EffectiveScope, TiedTo};
+use wt_core::config::{self, Command, Config, EffectiveScope, Exclusive, TiedTo};
 use wt_core::env::{EnvInputs, EnvOutput, TaskContext};
-use wt_core::lifecycle::RepoState;
+use wt_core::lifecycle::{ExclusiveHolder, RepoState};
 use wt_core::model::{duration_millis, scope_enc};
 use wt_core::report::{ChildReport, DryRunData, DryRunStepReport, RunData, StepReport};
 use wt_core::report::{Notice, NoticeLevel};
@@ -31,6 +31,33 @@ enum Guard {
 pub(crate) struct PlanExecution {
     pub data: RunData,
     pub notices: Vec<Notice>,
+}
+
+pub(crate) struct ArenaSnapshot {
+    repo: BTreeMap<String, ExclusiveHolder>,
+    machine: BTreeMap<String, ExclusiveHolder>,
+}
+
+pub(crate) struct DestroyResult {
+    pub state: String,
+    pub child: Option<ChildReport>,
+    pub notice: Option<Notice>,
+}
+
+pub(crate) struct ExecuteOptions<'a> {
+    pub timeout: Option<&'a str>,
+    pub wait: Option<&'a str>,
+    pub no_log: bool,
+    pub take: bool,
+}
+
+impl ExecuteOptions<'_> {
+    pub const DEFAULT: Self = Self {
+        timeout: None,
+        wait: None,
+        no_log: false,
+        take: false,
+    };
 }
 
 struct NodeExecution {
@@ -159,6 +186,29 @@ pub(crate) fn validate_args(plan: &TaskPlan, args: &[String]) -> Result<Option<S
     }
 }
 
+pub(crate) fn validate_take(plan: &TaskPlan, take: bool) -> Result<(), CoreError> {
+    if !take {
+        return Ok(());
+    }
+    let root = plan
+        .nodes
+        .iter()
+        .find(|node| node.id == plan.root)
+        .expect("a task plan contains its root");
+    if root.resource.is_some() && root.exclusive.is_some() {
+        return Ok(());
+    }
+    Err(CoreError::new(
+        ExitClass::Usage,
+        "TAKE_REQUIRES_EXCLUSIVE",
+        format!(
+            "--take is valid only for an exclusive resource; `{}` is not one",
+            plan.root
+        ),
+        "remove --take or choose a resource with exclusive = \"repo\" or \"machine\"",
+    ))
+}
+
 fn shell_accepts_args(shell: &str) -> bool {
     shell.contains("$@")
         || shell.contains("$*")
@@ -175,27 +225,49 @@ pub(crate) fn execute_plan(
     door: &Door,
     plan: &TaskPlan,
     resolved_args: Option<(&str, &[String])>,
-    timeout: Option<&str>,
-    wait: Option<&str>,
-    no_log: bool,
+    options: ExecuteOptions<'_>,
 ) -> Result<PlanExecution, CoreError> {
     let mut steps = Vec::new();
     let mut notices = Vec::new();
     let mut last_child = None;
     let mut last_log = None;
+    let root = plan
+        .nodes
+        .iter()
+        .find(|node| node.id == plan.root)
+        .expect("a task plan contains its root");
+    let displaced = if options.take {
+        displace_exclusive(context, door, root)?
+    } else {
+        if let (Some(arena), Some(key)) = (root.exclusive, root.resource.as_ref()) {
+            if let Some(holder) = exclusive_holder(context, key, arena)? {
+                if holder != door.target.to_string() {
+                    return Err(resource_held(root, door, &holder));
+                }
+            }
+        }
+        None
+    };
     for (index, node) in plan.nodes.iter().enumerate() {
         let started = Instant::now();
-        let _guards = acquire_node_locks(context, door, node, wait)?;
+        let _guards = acquire_node_locks(context, door, node, options.wait)?;
         let (status, child, log) = if node.resource.is_some() {
             refresh_node_declaration(context, door, node)?;
-            let result = run_resource(context, door, node, timeout, no_log)?;
+            let result = run_resource(context, door, node, options.timeout, options.no_log)?;
             notices.extend(result.notices);
             (result.status, result.child, result.log)
         } else {
             let node_args = resolved_args
                 .filter(|(target, _)| *target == node.id)
                 .map_or(&[] as &[String], |(_, args)| args);
-            run_task(context, door, node, node_args, timeout, no_log)?
+            run_task(
+                context,
+                door,
+                node,
+                node_args,
+                options.timeout,
+                options.no_log,
+            )?
         };
         if child.is_some() {
             last_child.clone_from(&child);
@@ -221,6 +293,7 @@ pub(crate) fn execute_plan(
             args: resolved_args.map_or_else(Vec::new, |(_, args)| args.to_vec()),
             child: last_child,
             log: last_log,
+            displaced,
             steps,
         },
         notices,
@@ -310,6 +383,14 @@ pub(crate) fn probe_resources(
 ) -> Result<Vec<ResourceRecord>, CoreError> {
     let mut probed = Vec::with_capacity(records.len());
     for record in records {
+        let exclusive = record.declaration.exclusive;
+        if let Some(arena) = exclusive {
+            let current = exclusive_holder(context, &record.key, arena)?;
+            if current.as_deref() != Some(door.target.to_string().as_str()) {
+                probed.push(record);
+                continue;
+            }
+        }
         let holder = context.holder(door.target.to_string(), "probe")?;
         let _resource = lock::resource(
             &resource_lock_path(context, &record.key),
@@ -320,6 +401,7 @@ pub(crate) fn probe_resources(
             ),
         )?;
         let probe = execute_probe(context, door, record.effective_snapshot())?;
+        let absent = matches!(probe.result, ProbeResult::Absent);
         let step = wt_core::resource::step(Some(record), Event::Probe(probe));
         let key = step
             .record
@@ -328,6 +410,11 @@ pub(crate) fn probe_resources(
             .key
             .clone();
         persist_step(context, door, &key, &step.record)?;
+        if absent {
+            if let Some(arena) = exclusive {
+                clear_exclusive_holder(context, &key, arena, &door.target.to_string())?;
+            }
+        }
         probed.push(step.record.expect("probe keeps record"));
     }
     Ok(probed)
@@ -545,8 +632,28 @@ fn run_resource(
 ) -> Result<NodeExecution, CoreError> {
     let key = node.resource.as_ref().expect("resource node has a key");
     let mut record = load_record(context, door, key)?;
+    let exclusive = node.exclusive;
+    let prior_holder = if let Some(arena) = exclusive {
+        let holder = exclusive_holder(context, key, arena)?;
+        if let Some(holder) = holder.as_deref() {
+            if holder != door.target.to_string() {
+                return Err(resource_held(node, door, holder));
+            }
+        }
+        holder
+    } else {
+        None
+    };
     let snapshot = record.effective_snapshot().clone();
     let probe = execute_probe(context, door, &snapshot)?;
+    if let Some(arena) = exclusive {
+        if !matches!(probe.result, ProbeResult::Failed { .. }) {
+            if prior_holder.is_some() && matches!(probe.result, ProbeResult::Absent) {
+                clear_exclusive_holder(context, key, arena, &door.target.to_string())?;
+            }
+            claim_exclusive(context, door, node, arena)?;
+        }
+    }
     let first = wt_core::resource::step(
         Some(record),
         Event::Run {
@@ -578,6 +685,7 @@ fn run_resource(
     )?;
     let child = effect_child(&effect);
     let confirm = execute_probe(context, door, record.effective_snapshot())?;
+    let confirmed_absent = matches!(confirm.result, ProbeResult::Absent);
     let final_step = wt_core::resource::step(
         Some(record),
         Event::Run {
@@ -587,6 +695,11 @@ fn run_resource(
         },
     );
     persist_step(context, door, key, &final_step.record)?;
+    if confirmed_absent {
+        if let Some(arena) = exclusive {
+            clear_exclusive_holder(context, key, arena, &door.target.to_string())?;
+        }
+    }
     if let Some(error) = final_step.error {
         return Err(error);
     }
@@ -619,8 +732,27 @@ pub(crate) fn destroy_resource(
     door: &Door,
     key: &ResourceKey,
     teardown: bool,
-) -> Result<(String, Option<ChildReport>), CoreError> {
+    arenas: &ArenaSnapshot,
+) -> Result<DestroyResult, CoreError> {
     let mut record = load_record(context, door, key)?;
+    let exclusive = record.declaration.exclusive;
+    if let Some(holder) =
+        live_other_arena_holder(context, arenas, &record, &door.target.to_string())
+    {
+        if teardown {
+            persist_step(context, door, key, &None)?;
+            return Ok(DestroyResult {
+                state: "dropped".to_owned(),
+                child: None,
+                notice: Some(resource_held_by_notice(key, &holder)),
+            });
+        }
+        return Ok(DestroyResult {
+            state: "declared".to_owned(),
+            child: None,
+            notice: Some(resource_held_by_notice(key, &holder)),
+        });
+    }
     let probe = execute_probe(context, door, record.effective_snapshot())?;
     let first = wt_core::resource::step(
         Some(record),
@@ -636,7 +768,14 @@ pub(crate) fn destroy_resource(
         if let Some(error) = first.error {
             return Err(error);
         }
-        return Ok((resource_status(&first), None));
+        if let Some(arena) = exclusive {
+            clear_exclusive_holder(context, key, arena, &door.target.to_string())?;
+        }
+        return Ok(DestroyResult {
+            state: resource_status(&first),
+            child: None,
+            notice: None,
+        });
     }
     record = first.record.expect("destroy decision retains record");
     let effect = execute_effect(
@@ -661,7 +800,14 @@ pub(crate) fn destroy_resource(
     if let Some(error) = final_step.error {
         return Err(error);
     }
-    Ok((resource_status(&final_step), child))
+    if let Some(arena) = exclusive {
+        clear_exclusive_holder(context, key, arena, &door.target.to_string())?;
+    }
+    Ok(DestroyResult {
+        state: resource_status(&final_step),
+        child,
+        notice: None,
+    })
 }
 
 pub(crate) fn destroy_stored_resource(
@@ -669,8 +815,18 @@ pub(crate) fn destroy_stored_resource(
     target: &wt_core::model::Target,
     record: ResourceRecord,
     tree_replaced: bool,
-) -> Result<(String, Option<ChildReport>), CoreError> {
+    arenas: &ArenaSnapshot,
+) -> Result<DestroyResult, CoreError> {
     let key = record.key.clone();
+    let exclusive = record.declaration.exclusive;
+    if let Some(holder) = live_other_arena_holder(context, arenas, &record, &target.to_string()) {
+        persist_tree_record(context, target, &key, &None)?;
+        return Ok(DestroyResult {
+            state: "dropped".to_owned(),
+            child: None,
+            notice: Some(resource_held_by_notice(&key, &holder)),
+        });
+    }
     let probe = if matches!(
         record.state,
         wt_core::resource::ResourceState::Present | wt_core::resource::ResourceState::Orphaned
@@ -693,7 +849,14 @@ pub(crate) fn destroy_stored_resource(
         if let Some(error) = first.error {
             return Err(error);
         }
-        return Ok((resource_status(&first), None));
+        if let Some(arena) = exclusive {
+            clear_exclusive_holder(context, &key, arena, &target.to_string())?;
+        }
+        return Ok(DestroyResult {
+            state: resource_status(&first),
+            child: None,
+            notice: None,
+        });
     }
     let record = first.record.expect("destroy decision retains record");
     let effect = execute_stored_effect(context, &record, tree_replaced)?;
@@ -712,7 +875,14 @@ pub(crate) fn destroy_stored_resource(
     if let Some(error) = final_step.error {
         return Err(error);
     }
-    Ok((resource_status(&final_step), child))
+    if let Some(arena) = exclusive {
+        clear_exclusive_holder(context, &key, arena, &target.to_string())?;
+    }
+    Ok(DestroyResult {
+        state: resource_status(&final_step),
+        child,
+        notice: None,
+    })
 }
 
 pub(crate) fn newest_resources_first(mut records: Vec<ResourceRecord>) -> Vec<ResourceRecord> {
@@ -940,6 +1110,7 @@ fn refresh_node_declaration(context: &Context, door: &Door, node: &Node) -> Resu
     let snapshot = ResourceSnapshot {
         schema: 1,
         key: key.clone(),
+        exclusive: node.exclusive,
         name: assembled
             .env
             .get("WT_SELF")
@@ -1011,6 +1182,7 @@ fn store_declaration(
                     schema: 1,
                     label,
                     resources: BTreeMap::new(),
+                    exclusive: BTreeMap::new(),
                 });
             snapshot.recorded_sequence = next_recorded_sequence(state.resources.values());
             let id = scoped_id(key);
@@ -1088,6 +1260,7 @@ fn persist_step(
                     schema: 1,
                     label,
                     resources: BTreeMap::new(),
+                    exclusive: BTreeMap::new(),
                 });
             match record {
                 Some(record) => {
@@ -1125,6 +1298,294 @@ fn shared_state_paths(
             None,
         ),
         TiedTo::Tree => unreachable!("tree state uses the tree store"),
+    }
+}
+
+fn exclusive_state_paths(
+    context: &Context,
+    key: &ResourceKey,
+    arena: Exclusive,
+) -> (PathBuf, PathBuf, Option<wt_core::model::Label>) {
+    match arena {
+        Exclusive::Repo => {
+            let label = key
+                .label
+                .as_ref()
+                .expect("repo-exclusive resources carry a label")
+                .clone();
+            (
+                context.home.join(wt_core::model::repo_state_path(&label)),
+                context.home.join(format!("locks/{label}/_repo.rmw.lock")),
+                Some(label),
+            )
+        }
+        Exclusive::Machine => (
+            context.home.join(wt_core::model::machine_state_path()),
+            context.home.join("locks/_machine.rmw.lock"),
+            None,
+        ),
+    }
+}
+
+fn target_is_live(context: &Context, value: &str) -> bool {
+    wt_core::model::Target::parse(value).is_ok_and(|target| {
+        context
+            .registry
+            .trees
+            .iter()
+            .any(|tree| tree.label == target.label && tree.name == target.name)
+    })
+}
+
+fn read_exclusive_holder(
+    context: &Context,
+    key: &ResourceKey,
+    arena: Exclusive,
+) -> Result<Option<String>, CoreError> {
+    let (path, _, _) = exclusive_state_paths(context, key, arena);
+    Ok(wt_sys::fsx::read_json::<RepoState>(&path, "STATE_CORRUPT")?
+        .and_then(|state| state.exclusive.get(&scoped_id(key)).cloned())
+        .map(|entry| entry.holder))
+}
+
+fn exclusive_holder(
+    context: &Context,
+    key: &ResourceKey,
+    arena: Exclusive,
+) -> Result<Option<String>, CoreError> {
+    Ok(
+        read_exclusive_holder(context, key, arena)?
+            .filter(|holder| target_is_live(context, holder)),
+    )
+}
+
+pub(crate) fn arena_snapshot(
+    context: &Context,
+    label: &wt_core::model::Label,
+) -> Result<ArenaSnapshot, CoreError> {
+    let repo = wt_sys::fsx::read_json::<RepoState>(
+        &context.home.join(wt_core::model::repo_state_path(label)),
+        "STATE_CORRUPT",
+    )?
+    .map(|state| state.exclusive)
+    .unwrap_or_default();
+    let machine = wt_sys::fsx::read_json::<RepoState>(
+        &context.home.join(wt_core::model::machine_state_path()),
+        "STATE_CORRUPT",
+    )?
+    .map(|state| state.exclusive)
+    .unwrap_or_default();
+    Ok(ArenaSnapshot { repo, machine })
+}
+
+fn live_other_arena_holder(
+    context: &Context,
+    arenas: &ArenaSnapshot,
+    record: &ResourceRecord,
+    target: &str,
+) -> Option<String> {
+    if record.key.tied_to != TiedTo::Tree {
+        return None;
+    }
+    for arena in [Exclusive::Repo, Exclusive::Machine] {
+        if record
+            .declaration
+            .exclusive
+            .is_some_and(|declared| declared != arena)
+        {
+            continue;
+        }
+        let entries = match arena {
+            Exclusive::Repo => &arenas.repo,
+            Exclusive::Machine => &arenas.machine,
+        };
+        let Some(holder) = entries
+            .get(&scoped_id(&record.key))
+            .map(|entry| entry.holder.as_str())
+            .filter(|holder| *holder != target && target_is_live(context, holder))
+        else {
+            continue;
+        };
+        if record.declaration.exclusive.is_none()
+            && !wt_core::model::Target::parse(holder)
+                .is_ok_and(|holder_target| Some(&holder_target.label) == record.key.label.as_ref())
+        {
+            continue;
+        }
+        return Some(holder.to_owned());
+    }
+    None
+}
+
+fn resource_held_by_notice(key: &ResourceKey, holder: &str) -> Notice {
+    Notice {
+        level: NoticeLevel::Info,
+        code: "RESOURCE_HELD_BY".to_owned(),
+        subject: Some(scoped_id(key)),
+        message: format!("resource left to {holder}"),
+    }
+}
+
+pub(crate) fn exclusive_holder_for_record(
+    context: &Context,
+    record: &ResourceRecord,
+) -> Result<Option<String>, CoreError> {
+    record
+        .declaration
+        .exclusive
+        .map(|arena| exclusive_holder(context, &record.key, arena))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn claim_exclusive(
+    context: &Context,
+    door: &Door,
+    node: &Node,
+    arena: Exclusive,
+) -> Result<(), CoreError> {
+    let key = node
+        .resource
+        .as_ref()
+        .expect("exclusive resource has a key");
+    let (path, lock_path, label) = exclusive_state_paths(context, key, arena);
+    let owner = door.target.to_string();
+    let holder = context.holder(owner.clone(), "exclusive-claim")?;
+    let _lock = lock::state_rmw(&lock_path, &holder, context.rmw_wait())?;
+    let mut state =
+        wt_sys::fsx::read_json::<RepoState>(&path, "STATE_CORRUPT")?.unwrap_or(RepoState {
+            schema: 1,
+            label,
+            resources: BTreeMap::new(),
+            exclusive: BTreeMap::new(),
+        });
+    if let Some(current) = state.exclusive.get(&scoped_id(key)) {
+        if current.holder != owner && target_is_live(context, &current.holder) {
+            return Err(resource_held(node, door, &current.holder));
+        }
+        if current.holder == owner {
+            return Ok(());
+        }
+    }
+    state.exclusive.insert(
+        scoped_id(key),
+        ExclusiveHolder {
+            holder: owner,
+            since: wt_sys::fsx::timestamp()?,
+        },
+    );
+    wt_sys::fsx::write_json(&path, &state)
+}
+
+fn clear_exclusive_holder(
+    context: &Context,
+    key: &ResourceKey,
+    arena: Exclusive,
+    expected: &str,
+) -> Result<(), CoreError> {
+    let (path, lock_path, _) = exclusive_state_paths(context, key, arena);
+    let holder = context.holder(expected.to_owned(), "exclusive-clear")?;
+    let _lock = lock::state_rmw(&lock_path, &holder, context.rmw_wait())?;
+    let Some(mut state) = wt_sys::fsx::read_json::<RepoState>(&path, "STATE_CORRUPT")? else {
+        return Ok(());
+    };
+    let id = scoped_id(key);
+    if state
+        .exclusive
+        .get(&id)
+        .is_some_and(|entry| entry.holder == expected)
+    {
+        state.exclusive.remove(&id);
+        wt_sys::fsx::write_json(&path, &state)?;
+    }
+    Ok(())
+}
+
+fn resource_held(node: &Node, door: &Door, holder: &str) -> CoreError {
+    CoreError::new(
+        ExitClass::Conflict,
+        "RESOURCE_HELD",
+        format!("exclusive resource {} is held by {holder}", node.id),
+        format!(
+            "run `wt run {} {} --take` to displace {holder}",
+            node.id, door.target
+        ),
+    )
+    .with_details(serde_json::json!({"holder": holder}))
+}
+
+fn displace_exclusive(
+    context: &Context,
+    door: &Door,
+    node: &Node,
+) -> Result<Option<String>, CoreError> {
+    let arena = node
+        .exclusive
+        .expect("--take validation requires an exclusive root");
+    let key = node
+        .resource
+        .as_ref()
+        .expect("exclusive resource has a key");
+    loop {
+        let Some(holder) = exclusive_holder(context, key, arena)? else {
+            return Ok(None);
+        };
+        if holder == door.target.to_string() {
+            return Ok(None);
+        }
+        let holder_target =
+            wt_core::model::Target::parse(&holder).expect("live arena holders are valid targets");
+        let holder_key = ResourceKey {
+            label: Some(holder_target.label.clone()),
+            tied_to: TiedTo::Tree,
+            name: Some(holder_target.name.clone()),
+            scope: key.scope.clone(),
+            task: key.task.clone(),
+        };
+        let lock_holder = context.holder(door.target.to_string(), "take")?;
+        let _resource = lock::resource(
+            &resource_lock_path(context, &holder_key),
+            &lock_holder,
+            duration(
+                context.settings.locks.resource.as_deref(),
+                Duration::from_secs(120),
+            ),
+        )?;
+        if exclusive_holder(context, key, arena)?.as_deref() != Some(holder.as_str()) {
+            continue;
+        }
+        let record = context
+            .read_state(&holder_target)?
+            .and_then(|state| state.resources.get(&scoped_id(&holder_key)).cloned());
+        let Some(record) = record else {
+            clear_exclusive_holder(context, key, arena, &holder)?;
+            return Ok(Some(holder));
+        };
+        let tree = context
+            .registry
+            .trees
+            .iter()
+            .find(|tree| tree.label == holder_target.label && tree.name == holder_target.name)
+            .ok_or_else(|| {
+                CoreError::new(
+                    ExitClass::Conflict,
+                    "EXCLUSIVE_HOLDER_CHANGED",
+                    format!(
+                        "exclusive resource {} holder {holder} is no longer registered",
+                        node.id
+                    ),
+                    "the holder changed while displacing; run the command again",
+                )
+                .with_details(serde_json::json!({"holder": holder}))
+            })?;
+        let exists = matches!(
+            wt_sys::fsx::path_kind(Path::new(tree.path.as_str()))?,
+            wt_sys::fsx::PathKind::Directory
+        );
+        let replaced = exists && !context.identity_ok(tree)?;
+        let arenas = arena_snapshot(context, &holder_target.label)?;
+        destroy_stored_resource(context, &holder_target, record, replaced, &arenas)?;
+        return Ok(Some(holder));
     }
 }
 

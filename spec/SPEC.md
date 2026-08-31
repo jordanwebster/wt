@@ -142,7 +142,7 @@ Detect  := { depth?: 0|1|2 (1), ignore?: [RelPath] }
 LockCfg := { slots?: u16 (1, minimum 1), wait?: Duration }
 File    := { content?: Template, source?: RelPath, marker?: String ("#"; "" = no header), mode?: OctalString ★ ("0644") }
 Task    := { run?: Cmd, exists?: Cmd, destroy?: Cmd, needs?: [ScopedTask|PrivateId], lock?: LockName, name?: Template,
-             tied_to?: "tree"|"repo"|"machine", env?: Map<EnvKey, Template>, cwd?: RelPath, timeout?: Duration, description?: String,
+             tied_to?: "tree"|"repo"|"machine", exclusive?: "repo"|"machine", env?: Map<EnvKey, Template>, cwd?: RelPath, timeout?: Duration, description?: String,
              ready_within?: Duration ★, snapshot_env?: [EnvKey] ★ }
 Cmd     := String | [String]          // `sh -c`: NEVER templated, every character is the shell's | argv: each element templated
 Template:= String                      // ${name} reads a var, ${ports.n} a declared port; ${fn()} calls; $$ is a literal $; `$` before a non-name character is literal
@@ -151,6 +151,9 @@ Every task declares at least one of `run`, `destroy`, or `needs`. A task with
 `needs` and neither `run` nor `destroy` is an aggregate and accepts only
 `needs` and `description`; any other task key would guard nothing and belongs
 on a task that runs (A57).
+`exclusive` is valid only on a tree-tied resource: the task must declare
+`destroy`, `exists`, and `tied_to = "tree"`; any other use is
+`CONFIG_INVALID` naming this rule (A60).
 `false` deletes an inherited map entry; in the map form of `commands`, `true`
 claims a name and `false` deletes an inherited claim. The array form remains the
 compact declaration form. The three acceptance files (§16) are restated in
@@ -388,7 +391,7 @@ Probe    := Present(0) | Absent(1) | Failed{exit(n≥2)|timeout|spawn}
 lock_plan(node, held) -> ascending [ Tree(shared) unless held, RepoGit if "RepoGit" ∈ sys_locks, Resource(key) if resource, Named(node.lock) if lock ]   // levels 1–4; the sole acquisition authority; 5/6 are leaf RMWs inside steps
 ```
 `wt run <task> [target] [--wait d|forever] [--timeout d] [--dry-run]
-[--no-log] [-- <args…>]` (aliases `test lint fmt build`; `sync` is §11.3;
+[--no-log] [--take] [-- <args…>]` (aliases `test lint fmt build`; `sync` is §11.3;
 `destroy`/`refresh` drive §10.4). Trailing arguments are resolved and validated
 before X1, and before `--dry-run` prints its plan. Starting at the invoked root,
 a node with a `run` recipe is the resolved argument target. Arguments reach
@@ -409,6 +412,21 @@ replayed from snapshots, not a parameterised invocation. Arguments appear in
 the log header, in `--dry-run`, and in `run --json` data; giving them without
 `--` produces a usage error that names `--` (A58).
 
+`--take` is valid only when the invoked root is an exclusive resource;
+otherwise `TAKE_REQUIRES_EXCLUSIVE` (2) names that rule. If another tree is
+the holder, displacement is a separate serialised transition: acquire only
+the holder's level-3 resource lock, drive its record with `Destroy` through
+its frozen instance, clear the arena holder, and release before the ordinary
+run acquires the caller's resource lock and claims the arena. Two level-3
+locks are never held together. `DestroyFail` leaves the holder record
+`orphaned`, retains the arena holder, and stops with `DESTROY_FAILED` because
+the instance may remain. A live holder with no record for the key is cleared
+without running any destroy (there is nothing recorded to destroy) and the
+report names it; an instance such a holder actually left running is outside
+the record and is the accepted residual. `--take` never prompts; it carries
+consent (A54, A60). Success reports `displaced <holder>` in text and in §14.4
+data.
+
 | Step | Action | Lock |
 |---|---|---|
 | X0 | door D0–D6 (§9.1) | 1,5,6 |
@@ -425,6 +443,12 @@ tree key carries its tree name. The state key is `"<ScopedTask>"`, including
 in `_machine.json`, so two labels declaring the same machine-scoped task share
 one record. The lock path is per §4 (level 3), held from probe through the
 final commit. CLI selection is by `ScopedTask`.
+
+For a resource with `exclusive = "repo"|"machine"`, the corresponding arena
+store (`_repo.json` or `_machine.json`) additionally carries
+`exclusive.<ScopedTask> = { holder: <tree target>, since }`. Holder changes
+are made only under that store's RMW lock. A holder naming no live registry
+tree is treated as absent (A60).
 
 ### 10.3 Snapshots and `execute`
 ```
@@ -458,6 +482,28 @@ Probes, runs and destroys use `instance` when present, else `declaration` (§10.
 | **orphaned** | refused `RESOURCE_ORPHANED` (6) | Present → stays; Absent → **declared**, cleared (`RESOURCE_GONE`); Failed → stays | as **present**/Destroy (retry) | refused |
 
 Invariants: a record exists for every effective tree-tied resource from its first refresh; `present` only on a Present probe; a record is dropped only after a confirmed-absent probe and only when undeclared or during teardown; teardown terminates (after one `Destroy{teardown}` pass every record is dropped or `orphaned`); a no-`run` resource is never run.
+
+**Exclusive resources (A60).** Only the arena holder may probe or destroy the
+shared instance. A non-holder's record remains `declared`: `list`/`status
+--probe` skip it and `remove`/`prune` drop its teardown record without running
+either recipe. The arena entries govern teardown independently of the local
+declaration: before a teardown or destroy/refresh path probes or destroys a
+tree-tied record whose declaration names an arena, wt consults that arena and
+any live other holder triggers the non-holder rule; with `exclusive = null`,
+the unconditional divergence guard consults both arenas but honours an entry
+only when its holder target has the record's label, because the guard protects
+checkouts of the same repository and cross-label machine exclusivity is
+enforced through the declaring configuration (A60). An absent or dead holder
+proceeds normally. A run by another live holder refuses `RESOURCE_HELD` (4),
+names the holder tree, and gives `--take` as the remedy. With no holder, run
+first probes: Present claims the arena and then freezes an external instance;
+Absent claims before the ordinary declared → run → present transition. The
+claim therefore survives a crash during run alongside
+the already-frozen teardown instance. A holder runs normally. Its confirmed
+Absent probe clears both its instance and arena holder (`RESOURCE_GONE`); if
+the same invocation will run again, it reclaims before doing so. Successful
+holder teardown by `destroy`, `refresh`, `remove`, or `prune` clears the arena
+holder; failed destroy retains it.
 
 ### 10.5 Declaration refresh; repo- and machine-tied declarations
 **When.** Declarations are refreshed at `register`/`adopt` (I3), `new` (S4), `sync`, `wt run <resource>` (X2, before the step), `list`/`status --probe`, and `remove`/`unregister` step 8 — never by an ordinary door (§0). For each effective resource `r` across all scopes: run `assemble` once more with `task = TaskContext{r}` and `r`'s scope from the same `clean` parent, render output discarded, notices suppressed except `ENV_UNDEFINED` (→ `REFRESH_SKIPPED{r}` warn, record unrefreshed); build `r`'s snapshot (§10.3); then, by `tied_to`:
@@ -555,7 +601,7 @@ Classification (pure over git results): "unpushed" = upstream present ∧ `rev-l
 | 5 | `kill-session` if `has-session` (consented); then tree lock exclusive with deadline `locks.tree_exclusive` (`--wait d`); timeout → `TREE_IN_USE` (4) naming the holders, remedy "wait for or stop them" | 1 | session only |
 | 6 | revalidate under the lock: identity check (§4.1) (mismatch → `TREE_REPLACED`, nothing destroyed); dirty/unpushed re-observed (newly dirty without `--force` → `TREE_DIRTY`, nothing changed) | — | no |
 | 7 | state `removing`, `op{remove}` | 6 | yes |
-| 8 | declaration refresh if the dir exists (§10.5); every tree-tied record: §10.4 `Destroy{teardown}`, newest record first; all attempted | 3, 6 | yes |
+| 8 | declaration refresh if the dir exists (§10.5); every tree-tied record: §10.4 `Destroy{teardown}`, newest record first; all attempted; an exclusive non-holder record is dropped without probe/destroy, while successful teardown of the holder clears its arena entry in this pass; the unconditional `exclusive = null` consult honours only a same-label holder because it protects checkouts of the same repository, while cross-label machine exclusivity is enforced through the declaring configuration (A60) | 3, 6 | yes |
 | 9 | any record not dropped → without `--keep-orphans`: `DESTROY_FAILED` (6), tree stays `removing` → `remove-interrupted` with its records, nothing below runs (remedy: fix, then `wt remove` again, or `--keep-orphans`, or `wt prune --records <target>`); with `--keep-orphans`: state `op = null`, continue; the entry stays live after step 10 (derived phase `missing` with records; `TREE_MISSING_PENDING` protects the name) and step 11 is skipped | — | |
 | 10 | `git worktree remove --force <entry.path>`; the branch per step 3's decision — deleted when its commits are on a remote, kept when they are not, kept for an adopted tree, always deleted with `--delete-branch` (`-D`), never with `--keep-branch` (A54); missing dir → `git worktree prune` | 2 | yes |
 | 11 | registry: entry → tombstone (record-free; carries `materialized` paths); delete the state file; exclude block | 5 | yes |
@@ -591,6 +637,13 @@ Run exactly once per incarnation at `new` S3 (never for canonical or adopted tre
 ## 12. Truth: `list`, `status`, `doctor`, `prune`, logs
 `wt list [label] [--probe] [--fast] [--disk]`, `wt status [target] [--probe]`: address, phase (§11.1), branch/detached, dirty counts, upstream ahead/behind, behind default, sync state (`ok | stale (<files>) | failed | never`, `behind <default> by N`, **`drift (<files>)`** = sync inputs changed on the default branch since the merge-base: one bounded `git diff --name-only HEAD...origin/<default> -- <sync_inputs>` per tree, S3/A31; `--fast` skips it), session `yes|no|unknown`, agent, tree-, repo-, and machine-tied resources `{scope, task, tied_to, state, external, undeclared, last_probe, last_error}`, slot/ports (+`bound` from one bind probe per declared port, skipped by `--fast`), path. `--probe` refreshes declarations (§10.5) and runs `exists` under each displayed record's resource lock. For `list`, each distinct `ResourceKey` is probed once per pass: tree-tied keys remain per tree, while a repo- or machine-tied record shared across displayed trees is probed once and its one result is displayed for every tree that declares it. `status` probes each displayed record once. Doctor's state-orphan scan treats `_machine.json` as the machine store, never as an orphaned tree state file.
 
+Exclusive resource rows additionally show `holder|null` in JSON and the live
+holder in human output. A non-holder `--probe` skips the recipe and leaves its
+record declared. `RESOURCE_HELD` is the run conflict in §10.4 and names both
+the holder and the `--take` remedy. A teardown or destroy/refresh skip caused
+by another live arena holder emits the info notice `RESOURCE_HELD_BY`, naming
+the holder as the target to which the resource was left.
+
 `wt doctor [label] [--probe]` findings `{severity, code, subject, message, remedy}`:
 
 | Code | Condition (owner) |
@@ -604,7 +657,7 @@ Run exactly once per incarnation at `new` S3 (never for canonical or adopted tre
 | `BIN_DIR_MISSING` (doctor only, A50), `PATH_NOT_SHADOWED`, `PORT_BOUND`, `SHIM_SHADOWED` (info); `SHIM_BROKEN` (warn); `EXCLUDE_MISSING`, `EXCLUDE_REPAIRED`, `ACTIVATION_IGNORED` | §9, §12, §4.2, §8.1 |
 | `IDENTIFIER_LONG` (resource name > 63); `TREE_IN_USE` (info, holders), `GIT_TOO_OLD` (< 2.31) | §5, §13, tooling |
 
-`wt prune [label] [--yes] [--merged] [--gone] [--records <target>]`: retries orphaned destroys (`Destroy` on `orphaned`); runs §11.4's missing-directory path for `missing` trees (ending in a tombstone); `git worktree prune`; deletes `STATE_ORPHAN` files; `--merged`/`--gone` remove clean trees so classified (dirty ⇒ `keep`). Before any step that creates a tombstone, `prune` `kill-session`s the address's session if tmux reports it (consented by the same prompt). `--records <target>` applies to **live entries** in phase `missing`, `replaced` or `remove-interrupted`: it drives that entry's records with `Destroy{teardown}` from their own snapshots (§10.3, `tree_missing = true` for `missing`/`replaced`) and never acts on any directory; it creates no tombstone (the entry stays live until `wt remove`/`wt new`). **Tombstone collection**: for each tombstone of the label, after the session check, delete the tombstone and recompute the exclude block in one registry RMW (5). Consent: TTY without `--yes` → prompt; **non-TTY without `--yes` → print the plan, exit 0 with `data.applied = false` and notice `CONFIRM_REQUIRED`** (prune is a report-then-act verb; §14.2).
+`wt prune [label] [--yes] [--merged] [--gone] [--records <target>]`: retries orphaned destroys (`Destroy` on `orphaned`); runs §11.4's missing-directory path for `missing` trees (ending in a tombstone); `git worktree prune`; deletes `STATE_ORPHAN` files; deletes each `exclusive.<ScopedTask>` arena entry whose holder is not a live registry tree under that arena store's RMW lock and reports the deletion as a prune item; `--merged`/`--gone` remove clean trees so classified (dirty ⇒ `keep`). Before any step that creates a tombstone, `prune` `kill-session`s the address's session if tmux reports it (consented by the same prompt). `--records <target>` applies to **live entries** in phase `missing`, `replaced` or `remove-interrupted`: it drives that entry's records with `Destroy{teardown}` from their own snapshots (§10.3, `tree_missing = true` for `missing`/`replaced`) and never acts on any directory; it creates no tombstone (the entry stays live until `wt remove`/`wt new`). **Tombstone collection**: for each tombstone of the label, after the session check, delete the tombstone and recompute the exclude block in one registry RMW (5). Consent: TTY without `--yes` → prompt; **non-TTY without `--yes` → print the plan, exit 0 with `data.applied = false` and notice `CONFIRM_REQUIRED`** (prune is a report-then-act verb; §14.2).
 
 **Log retention (A31).** `<tree>/.wt/logs/` keeps the newest `logs.keep` (default 20) logs per `(scope, task)`; older ones are deleted by the `run` that creates a new log (§10.1). `--no-log` writes none.
 
@@ -662,7 +715,7 @@ Every wait and every wt-owned subprocess has a default deadline; only `--wait fo
 | `wt sync [target] [--force]` | yes | §11.3 |
 | `wt list [label] [--probe] [--fast] [--disk]`, `wt status [target] [--probe]` ★ | — | §12 |
 | `wt prune [label] [--yes] [--merged] [--gone] [--records T]` | yes | §12 |
-| `wt run <task> [target] … [-- <args…>]` (aliases `test lint fmt build`); `wt destroy <ScopedTask> [target]`, `wt refresh <ScopedTask> [target]` | per task / per §10.4 | §10.1, §10.4 |
+| `wt run <task> [target] … [--take] [-- <args…>]` (aliases `test lint fmt build`); `wt destroy <ScopedTask> [target]`, `wt refresh <ScopedTask> [target]` | per task / per §10.4 | §10.1, §10.4 |
 | `wt exec [target] [--no-gate] -- <cmd…>` | — | §9.1–9.2; `--help`: "passthrough door; not a task (see `wt run`); no `--json` (A20)" |
 | `wt shell [target]` | — | §9.3 |
 | `wt env [target] …` | — | §8.5 |
@@ -710,7 +763,7 @@ Tree     := { target, label, name, canonical, tree_id, path, slot, geometry: {ba
               dirty: {modified, untracked}|null, upstream: {ahead, behind}|null, behind_default|null,
               sync: {state, at|null, changed: [RelPath], drift: [RelPath]}, verify: {ok, at}|null,
               session: "yes"|"no"|"unknown", session_name, agent|null, resources: [Resource], ports: [ {name, port, bound|null} ], disk_kb|null }
-Resource := { scope, task, tied_to, name, state, reason|null, external, undeclared, has_instance, last_probe: {at, result}|null, last_error: {at, event, message}|null }
+Resource := { scope, task, tied_to, name, state, reason|null, external, undeclared, has_instance, holder|null, last_probe: {at, result}|null, last_error: {at, event, message}|null }
 StepRep  := { id, scope, status, child|null, duration_ms }
 ```
 
@@ -727,7 +780,7 @@ shapes — open, closed, and failed — even though `open` emits open/failed and
 | `new` / `adopt` | `{ tree, created, resumed, sync: StepRep[]|null, verify: {ok, steps: StepRep[]}|null }` / `{ tree, adopted, resumed }` |
 | `remove` | `{ target, removed, destroyed: [ {scope, task, state, child|null} ], orphans_kept: [ScopedTask], branch_deleted, branch_kept: string|null, session_closed }` |
 | `sync` | `{ target, ran, steps: StepRep[], inputs: [ {path, hash} ] }` |
-| `run` | `{ target, task, args: [String], child|null, log|null, steps: StepRep[] }`; `--dry-run`: `{ task, args: [String], steps: [ {id, scope, origin, cwd, run, exists, lock, sys_locks, resource, tied_to} ] }` |
+| `run` | `{ target, task, args: [String], child|null, log|null, displaced: target|null, steps: StepRep[] }`; `--dry-run`: `{ task, args: [String], steps: [ {id, scope, origin, cwd, run, exists, lock, sys_locks, resource, tied_to} ] }` |
 | `destroy` / `refresh` | `{ target, scope, task, before, after, child|null }` |
 | `open` (non-attaching) / `close` | shared `{ sessions: [ {target, name, created, existing, agent|null, foreground} | {target, session, closed} | {target, name, failed:true, code, message, remedy} ] }`; `open` emits open/failed, `close` emits closed, and only `open --all` may return `ok:false` with this data retained |
 | `env` | `{ target, set, overrode, restored, missing_bins, rendered, bins: [ {dir, exists, executables} ], ports: [ {name, port} ], env: Map, activation: Activation }` |
@@ -813,6 +866,7 @@ Levels **U** (wt-core), **I** (wt-sys/app on temp repos with shims: tmux, docker
 | §10.1, §14.1, §14.4 (A58) | argv arguments append after templating and shell arguments appear at `"$@"`, only on the resolved target; an adapter-composed root forwards to the single adapter recipe; a two-scope composite refuses and names the public scoped tasks; a user aggregate refuses regardless of fan-out; no-parameter shell and resource refusals have their specified usage codes and remedies; absent arguments preserve behaviour; aliases accept `--`; log header, dry-run, and JSON carry the exact argument vector; arguments without `--` name the delimiter | C |
 | §4, §5.2–5.3, §13.3, §14.4 (A59) | named-lock config parses, validates `slots`/`wait`, is root-only, and merges by name; two holders fill two ordered slot files, a third gets `LOCK_HELD 2/2` naming both holders and both remedies, and a bounded waiter proceeds after release; an absent entry means one slot and the §13.3 default wait (previously unimplemented, now honoured — the announced A59 behaviour change); `wt locks` reports `held n/N` and per-slot holders | U, I, C |
 | §4, §5.2, §5.6, §10.2–10.5, §11.4–11.5, §12, §14.5 (A61) | machine-tied validation rejects tree- and repo-specific keys/functions and snapshot stripping removes both sets; two labels declaring one `ScopedTask` share one `_machine.json` record with `label: null`; machine RMW/resource lock paths are used; remove and unregister leave the machine store byte-identical; destroy prompts on a TTY and requires `--yes` without one; refresh works from either label; `list --probe` probes shared repo- and machine-tied `ResourceKey`s once per pass and reuses each result across trees; status/list JSON order resources tree, repo, machine | U, I, C |
+| §5.2, §10.1–10.4, §11.4, §12, §14.1, §14.4 (A60) | exclusive grammar is restricted to tree-tied resources; repo and machine arenas serialise holder claims; a second tree gets `RESOURCE_HELD`; `--take` destroys through the holder's frozen snapshot without holding two resource locks, reports the displaced target in text/JSON, and flips the holder; non-holder remove/probe run no recipe, including when its checkout predates the exclusive declaration, and a skip names the holder in `RESOURCE_HELD_BY`; an unrelated label's same-named non-exclusive task is unaffected by another label's machine arena entry; holder teardown and confirmed absence clear ownership; a present unheld resource is adopted as external; stale holders are treated as absent and their arena entries are collected by `prune`; `--take` on a non-exclusive target is a usage error | U, I, C |
 | §10.3 | snapshot env = exactly the minimised set (never `WT_ACTIVATION`; parent keys only via `snapshot_env`); teardown env = invoker's env overlaid; A25 scans only the recipe about to run; files 0600 under umask 000; repo-tied env has no tree-specific key; orbit daemon after `rm -rf`: `prune` → `orphaned(exe_missing)`, installed `orbit` never invoked; a recipe without tree words runs with bins removed from PATH; canonical root gone → `repo_root_missing` | I |
 | §10.4 | pgdata sequence (declared → run notice → external present → refresh → declared → remove drops absent/destroys present); probe exit 2 → never runs/destroys, teardown → orphaned; `resource.frozen` failpoint → next `run` probes and settles; destroy failure → orphaned, others attempted; declaration deleted after creation → still destroyed from the instance; sibling-scope same-named resources distinct | I, C |
 | §10.5 | instance frozen after `needs`, later config edit does not change it; no refresh on a plain door; repo-tied: the invoking tree's stripped declaration is used until an instance exists, then the instance governs | I, C |

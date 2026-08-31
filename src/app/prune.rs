@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use wt_core::lifecycle::DerivedPhase;
+use wt_core::lifecycle::{DerivedPhase, RepoState};
 use wt_core::report::{Notice, NoticeLevel, PruneData, PruneItemReport};
 use wt_core::resource::ResourceState;
 use wt_core::{CoreError, ExitClass};
@@ -42,11 +42,12 @@ pub(crate) fn run(context: &mut Context, args: Prune) -> Result<Output, CoreErro
     context.yes = true;
     let result = apply(context, &args, &mut items);
     context.yes = original_yes;
-    result?;
-    Output::data(PruneData {
+    let notices = result?;
+    Ok(Output::data(PruneData {
         applied: true,
         items,
-    })
+    })?
+    .with_notices(notices))
 }
 
 fn plan(context: &Context, args: &Prune) -> Result<Vec<PruneItemReport>, CoreError> {
@@ -163,6 +164,17 @@ fn plan(context: &Context, args: &Prune) -> Result<Vec<PruneItemReport>, CoreErr
             },
         );
     }
+    for entry in stale_exclusive_entries(context, args.label.as_deref())? {
+        planned.insert(
+            entry.target.clone(),
+            PruneItemReport {
+                target: entry.target,
+                reasons: vec!["stale-exclusive-holder".to_owned()],
+                action: "delete-exclusive".to_owned(),
+                result: None,
+            },
+        );
+    }
     Ok(planned.into_values().collect())
 }
 
@@ -170,7 +182,8 @@ fn apply(
     context: &mut Context,
     args: &Prune,
     items: &mut [PruneItemReport],
-) -> Result<(), CoreError> {
+) -> Result<Vec<Notice>, CoreError> {
+    let mut notices = Vec::new();
     if args.records.is_some() {
         let target = context.resolve(Some(&items[0].target))?;
         let tree = context.tree(&target)?;
@@ -185,6 +198,7 @@ fn apply(
                 .unwrap_or_default(),
         );
         let total = records.len();
+        let arenas = executor::arena_snapshot(context, &target.label)?;
         for record in records {
             let holder = context.holder(target.to_string(), "prune")?;
             let _resource = lock::resource(
@@ -195,7 +209,11 @@ fn apply(
                     Duration::from_secs(120),
                 ),
             )?;
-            let _ = executor::destroy_stored_resource(context, &target, record, replaced);
+            if let Ok(result) =
+                executor::destroy_stored_resource(context, &target, record, replaced, &arenas)
+            {
+                notices.extend(result.notice);
+            }
         }
         let remaining = context
             .read_state(&target)?
@@ -218,9 +236,13 @@ fn apply(
             "records": total,
             "remaining": remaining,
         }));
-        return Ok(());
+        return Ok(notices);
     }
 
+    let exclusive_entries = stale_exclusive_entries(context, args.label.as_deref())?
+        .into_iter()
+        .map(|entry| (entry.target.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
     for item in items.iter_mut() {
         match item.action.as_str() {
             "remove" => {
@@ -235,6 +257,7 @@ fn apply(
                         wait: None,
                     },
                 )?;
+                notices.extend(output.notices);
                 item.result = Some(output.data);
             }
             "destroy-records" => {
@@ -251,8 +274,13 @@ fn apply(
                         .unwrap_or_default(),
                 );
                 let total = records.len();
+                let arenas = executor::arena_snapshot(context, &target.label)?;
                 for record in records {
-                    let _ = executor::destroy_stored_resource(context, &target, record, replaced);
+                    if let Ok(result) = executor::destroy_stored_resource(
+                        context, &target, record, replaced, &arenas,
+                    ) {
+                        notices.extend(result.notice);
+                    }
                 }
                 let remaining = context
                     .read_state(&target)?
@@ -263,6 +291,14 @@ fn apply(
             "delete-state" => {
                 wt_sys::fsx::remove_path(Path::new(&item.target))?;
                 item.result = Some(serde_json::json!({"deleted": true}));
+            }
+            "delete-exclusive" => {
+                let deleted = if let Some(entry) = exclusive_entries.get(&item.target) {
+                    collect_stale_exclusive(context, entry)?
+                } else {
+                    false
+                };
+                item.result = Some(serde_json::json!({"deleted": deleted}));
             }
             "keep" => item.result = Some(serde_json::json!({"kept": true})),
             "collect" => {}
@@ -334,7 +370,89 @@ fn apply(
     for item in items.iter_mut().filter(|item| item.action == "collect") {
         item.result = Some(serde_json::json!({"collected": true}));
     }
-    Ok(())
+    Ok(notices)
+}
+
+#[derive(Clone)]
+struct StaleExclusiveEntry {
+    target: String,
+    path: PathBuf,
+    lock_path: PathBuf,
+    key: String,
+}
+
+fn stale_exclusive_entries(
+    context: &Context,
+    label_filter: Option<&str>,
+) -> Result<Vec<StaleExclusiveEntry>, CoreError> {
+    let mut stores = context
+        .registry
+        .labels
+        .keys()
+        .filter(|label| label_filter.is_none_or(|filter| label.as_str() == filter))
+        .map(|label| {
+            (
+                label.to_string(),
+                context.home.join(wt_core::model::repo_state_path(label)),
+                context.home.join(format!("locks/{label}/_repo.rmw.lock")),
+            )
+        })
+        .collect::<Vec<_>>();
+    stores.push((
+        "_machine".to_owned(),
+        context.home.join(wt_core::model::machine_state_path()),
+        context.home.join("locks/_machine.rmw.lock"),
+    ));
+
+    let mut entries = Vec::new();
+    for (store, path, lock_path) in stores {
+        let Some(state) = wt_sys::fsx::read_json::<RepoState>(&path, "STATE_CORRUPT")? else {
+            continue;
+        };
+        for (key, holder) in state.exclusive {
+            if !arena_holder_is_live(context, &holder.holder) {
+                entries.push(StaleExclusiveEntry {
+                    target: format!("{store}:exclusive.{key}"),
+                    path: path.clone(),
+                    lock_path: lock_path.clone(),
+                    key,
+                });
+            }
+        }
+    }
+    entries.sort_by(|left, right| left.target.cmp(&right.target));
+    Ok(entries)
+}
+
+fn collect_stale_exclusive(
+    context: &Context,
+    entry: &StaleExclusiveEntry,
+) -> Result<bool, CoreError> {
+    let holder = context.holder(entry.target.clone(), "prune")?;
+    let _lock = lock::state_rmw(&entry.lock_path, &holder, context.rmw_wait())?;
+    let Some(mut state) = wt_sys::fsx::read_json::<RepoState>(&entry.path, "STATE_CORRUPT")? else {
+        return Ok(false);
+    };
+    let stale = state
+        .exclusive
+        .get(&entry.key)
+        .is_some_and(|holder| !arena_holder_is_live(context, &holder.holder));
+    if !stale {
+        return Ok(false);
+    }
+    state.exclusive.remove(&entry.key);
+    wt_sys::fsx::write_json(&entry.path, &state)?;
+    Ok(true)
+}
+
+fn arena_holder_is_live(context: &Context, holder: &str) -> bool {
+    wt_core::model::Target::parse(holder).is_ok_and(|target| {
+        context
+            .registry
+            .trees
+            .iter()
+            .any(|tree| tree.label == target.label && tree.name == target.name)
+    })
 }
 
 fn state_orphans(

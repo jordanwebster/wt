@@ -1771,6 +1771,610 @@ SOURCE = "{source}"
     assert!(!h.home.join("machine-ready").exists());
 }
 
+fn resource_config(exclusive: Option<&str>, live: &Path, events: &Path) -> String {
+    let exclusive =
+        exclusive.map_or_else(String::new, |arena| format!("exclusive = \"{arena}\"\n"));
+    format!(
+        r#"
+[task.service]
+run = 'printf %s "$WT_TARGET" > "{}"'
+exists = 'test -f "{}"'
+destroy = 'printf "destroy:%s\n" "$WT_TARGET" >> "{}"; rm -f "{}"'
+tied_to = "tree"
+{}
+"#,
+        live.display(),
+        live.display(),
+        events.display(),
+        live.display(),
+        exclusive,
+    )
+}
+
+fn exclusive_config(arena: &str, live: &Path, events: &Path) -> String {
+    resource_config(Some(arena), live, events)
+}
+
+fn repo_exclusive_holder(h: &Harness) -> Option<String> {
+    let label = wt_core::model::Label::new("repo").unwrap();
+    wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(
+        &h.home.join(wt_core::model::repo_state_path(&label)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .and_then(|state| state.exclusive.get("service").cloned())
+    .map(|entry| entry.holder)
+}
+
+#[test]
+fn sections_5_2_and_10_4_exclusive_grammar_names_the_tree_resource_rule() {
+    for invalid in [
+        r#"[task.x]
+run = "true"
+exclusive = "repo"
+"#,
+        r#"[task.x]
+destroy = "true"
+tied_to = "tree"
+exclusive = "machine"
+"#,
+        r#"[task.x]
+exists = "false"
+destroy = "true"
+tied_to = "repo"
+exclusive = "repo"
+"#,
+    ] {
+        let error = wt_core::config::parse(invalid, "repo/.wt.toml").unwrap_err();
+        assert_eq!(error.code.0, "CONFIG_INVALID");
+        assert!(error.message.contains(
+            "exclusive is valid only on a tree-tied resource (destroy + exists + tied_to = \"tree\")"
+        ));
+    }
+}
+
+#[test]
+fn sections_10_1_to_10_4_take_displaces_frozen_holder_and_flips_repo_arena() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let live = h.root.join("exclusive-live");
+    let events = h.root.join("exclusive-events");
+    let repo = h.repo("repo", &exclusive_config("repo", &live, &events));
+    h.register(&repo);
+    h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
+    h.json(&["new", "repo/b", "--no-sync", "--no-open"]);
+    h.json(&["run", "service", "repo/a"]);
+
+    let held = h
+        .wt()
+        .args(["run", "service", "repo/b", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(held.status.code(), Some(4));
+    let held_json: serde_json::Value = serde_json::from_slice(&held.stdout).unwrap();
+    assert_eq!(held_json["error"]["code"], "RESOURCE_HELD");
+    assert!(held_json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("repo/a"));
+    assert!(held_json["error"]["remedy"]
+        .as_str()
+        .unwrap()
+        .contains("--take"));
+
+    h.wt()
+        .args(["run", "service", "repo/b", "--take"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("displaced repo/a"));
+    assert_eq!(std::fs::read_to_string(&live).unwrap(), "repo/b");
+    assert_eq!(
+        std::fs::read_to_string(&events).unwrap(),
+        "destroy:repo/a\n"
+    );
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/b"));
+
+    let displaced_json = h.json(&["run", "service", "repo/a", "--take"]);
+    assert_eq!(displaced_json["data"]["displaced"], "repo/b");
+    let final_json = h.json(&["run", "service", "repo/b", "--take"]);
+    assert_eq!(final_json["data"]["displaced"], "repo/a");
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/b"));
+    assert_eq!(std::fs::read_to_string(&live).unwrap(), "repo/b");
+}
+
+#[test]
+fn sections_10_4_and_11_4_live_declaration_protects_stale_non_holder_on_remove() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let live = h.root.join("exclusive-live");
+    let events = h.root.join("exclusive-events");
+    let repo = h.repo("repo", &resource_config(None, &live, &events));
+    h.register(&repo);
+    let created_a = h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
+    let created_b = h.json(&["new", "repo/b", "--no-sync", "--no-open"]);
+    let tree_a = PathBuf::from(created_a["data"]["tree"]["path"].as_str().unwrap());
+    let tree_b = PathBuf::from(created_b["data"]["tree"]["path"].as_str().unwrap());
+    h.json(&["run", "service", "repo/a"]);
+
+    let target_a = wt_core::model::Target::parse("repo/a").unwrap();
+    let state_path_a = h.home.join(wt_core::model::tree_state_path(&target_a));
+    let state_a =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path_a, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        state_a.resources["service"]
+            .instance
+            .as_ref()
+            .unwrap()
+            .exclusive,
+        None
+    );
+
+    let exclusive = exclusive_config("repo", &live, &events);
+    common::write(&tree_a.join(".wt/config.toml"), &exclusive);
+    common::write(&tree_b.join(".wt/config.toml"), &exclusive);
+    h.json(&["run", "service", "repo/b"]);
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/b"));
+
+    let removed = h.json(&["remove", "repo/a", "--yes"]);
+    assert_eq!(removed["data"]["destroyed"][0]["state"], "dropped");
+    assert!(!state_path_a.exists());
+    assert!(live.exists());
+    assert!(!events.exists());
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/b"));
+}
+
+#[test]
+fn sections_10_4_and_11_4_arena_protects_pre_exclusive_checkout_on_remove() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let live = h.root.join("exclusive-live");
+    let events = h.root.join("exclusive-events");
+    let repo = h.repo("repo", &resource_config(None, &live, &events));
+    h.register(&repo);
+    h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
+    let created_b = h.json(&["new", "repo/b", "--no-sync", "--no-open"]);
+    let tree_b = PathBuf::from(created_b["data"]["tree"]["path"].as_str().unwrap());
+
+    common::write(
+        &tree_b.join(".wt/config.toml"),
+        &exclusive_config("repo", &live, &events),
+    );
+    h.json(&["run", "service", "repo/b"]);
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/b"));
+
+    let target_a = wt_core::model::Target::parse("repo/a").unwrap();
+    let state_path_a = h.home.join(wt_core::model::tree_state_path(&target_a));
+    let state_a =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path_a, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    assert_eq!(state_a.resources["service"].declaration.exclusive, None);
+
+    let removed = h.json(&["remove", "repo/a", "--yes"]);
+    assert_eq!(removed["data"]["destroyed"][0]["state"], "dropped");
+    let notice = removed["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|notice| notice["code"] == "RESOURCE_HELD_BY")
+        .unwrap();
+    assert_eq!(notice["subject"], "service");
+    assert!(notice["message"]
+        .as_str()
+        .unwrap()
+        .contains("left to repo/b"));
+    assert!(live.exists());
+    assert!(!events.exists());
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/b"));
+}
+
+#[test]
+fn sections_10_4_and_11_4_unrelated_label_ignores_machine_divergence_guard() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let alpha_live = h.root.join("alpha-db");
+    let beta_live = h.root.join("beta-db");
+    let beta_destroyed = h.root.join("beta-db-destroyed");
+    let alpha = h.repo(
+        "alpha",
+        &format!(
+            r#"
+[task.db]
+run = 'touch "{}"'
+exists = 'test -f "{}"'
+destroy = 'rm -f "{}"'
+tied_to = "tree"
+exclusive = "machine"
+"#,
+            alpha_live.display(),
+            alpha_live.display(),
+            alpha_live.display(),
+        ),
+    );
+    let beta = h.repo(
+        "beta",
+        &format!(
+            r#"
+[task.db]
+run = 'touch "{}"'
+exists = 'test -f "{}"'
+destroy = 'touch "{}"; rm -f "{}"'
+tied_to = "tree"
+"#,
+            beta_live.display(),
+            beta_live.display(),
+            beta_destroyed.display(),
+            beta_live.display(),
+        ),
+    );
+    h.register(&alpha);
+    h.register(&beta);
+    h.json(&["run", "db", "alpha"]);
+    h.json(&["run", "db", "beta"]);
+    assert!(alpha_live.exists());
+    assert!(beta_live.exists());
+
+    let destroyed = h.json(&["destroy", "db", "beta", "--yes"]);
+    assert_eq!(destroyed["data"]["after"], "declared");
+    assert!(!destroyed["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "RESOURCE_HELD_BY"));
+    assert!(alpha_live.exists());
+    assert!(!beta_live.exists());
+    assert!(beta_destroyed.exists());
+
+    let machine = wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(
+        &h.home.join(wt_core::model::machine_state_path()),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(machine.exclusive["db"].holder, "alpha");
+
+    // The other branch of the guard, pinned so a future narrowing cannot
+    // silently break it: a label that DECLARES exclusive = "machine" must
+    // respect another label's live holder on the teardown path.
+    let gamma_destroyed = h.root.join("gamma-db-destroyed");
+    let gamma = h.repo(
+        "gamma",
+        &format!(
+            r#"
+[task.db]
+run = 'true'
+exists = 'test -f "{}"'
+destroy = 'touch "{}"'
+tied_to = "tree"
+exclusive = "machine"
+"#,
+            alpha_live.display(),
+            gamma_destroyed.display(),
+        ),
+    );
+    h.register(&gamma);
+    let held = h.json(&["destroy", "db", "gamma", "--yes"]);
+    assert_eq!(held["data"]["after"], "declared");
+    assert!(held["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "RESOURCE_HELD_BY"
+            && notice["message"].as_str().unwrap().contains("alpha")));
+    assert!(!gamma_destroyed.exists());
+    assert!(alpha_live.exists());
+}
+
+#[test]
+fn section_12_prune_collects_stale_exclusive_arena_entries() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let live = h.root.join("exclusive-live");
+    let events = h.root.join("exclusive-events");
+    let repo = h.repo("repo", &exclusive_config("repo", &live, &events));
+    h.register(&repo);
+    let created = h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
+    let tree = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
+    h.json(&["run", "service", "repo/a"]);
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/a"));
+
+    wt_sys::fsx::remove_path(&tree).unwrap();
+    let registry_path = h.home.join("registry.json");
+    let mut registry =
+        wt_sys::fsx::read_json::<wt_core::model::Registry>(&registry_path, "REGISTRY_CORRUPT")
+            .unwrap()
+            .unwrap();
+    registry
+        .trees
+        .retain(|tree| tree.label.as_str() != "repo" || tree.name != "a");
+    wt_sys::fsx::write_json(&registry_path, &registry).unwrap();
+
+    let pruned = h.json(&["prune", "--yes"]);
+    let item = pruned["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["target"] == "repo:exclusive.service")
+        .unwrap();
+    assert_eq!(item["reasons"][0], "stale-exclusive-holder");
+    assert_eq!(item["action"], "delete-exclusive");
+    assert_eq!(item["result"]["deleted"], true);
+    assert_eq!(repo_exclusive_holder(&h), None);
+}
+
+#[test]
+fn section_10_4_live_declaration_claims_for_stale_pre_exclusive_instance() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let live = h.root.join("exclusive-live");
+    let events = h.root.join("exclusive-events");
+    let repo = h.repo("repo", &resource_config(None, &live, &events));
+    h.register(&repo);
+    let created = h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
+    let tree = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
+    h.json(&["run", "service", "repo/a"]);
+    assert_eq!(repo_exclusive_holder(&h), None);
+
+    common::write(
+        &tree.join(".wt/config.toml"),
+        &exclusive_config("repo", &live, &events),
+    );
+    h.json(&["run", "service", "repo/a"]);
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/a"));
+}
+
+#[test]
+fn sections_10_1_and_14_4_take_without_displacement_is_a_plain_run() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let live = h.root.join("exclusive-live");
+    let events = h.root.join("exclusive-events");
+    let repo = h.repo("repo", &exclusive_config("repo", &live, &events));
+    h.register(&repo);
+
+    let no_holder = h.json(&["run", "service", "repo", "--take"]);
+    assert_eq!(no_holder["data"]["displaced"], serde_json::Value::Null);
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo"));
+
+    let current_holder = h.json(&["run", "service", "repo", "--take"]);
+    assert_eq!(current_holder["data"]["displaced"], serde_json::Value::Null);
+    h.wt()
+        .args(["run", "service", "repo", "--take"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("displaced").not());
+}
+
+#[test]
+fn sections_10_4_and_11_4_non_holder_remove_skips_and_holder_remove_clears() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let live = h.root.join("exclusive-live");
+    let events = h.root.join("exclusive-events");
+    let repo = h.repo("repo", &exclusive_config("repo", &live, &events));
+    h.register(&repo);
+    h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
+    h.json(&["new", "repo/b", "--no-sync", "--no-open"]);
+    h.json(&["run", "service", "repo/a"]);
+
+    h.json(&["remove", "repo/b", "--yes"]);
+    assert!(live.exists());
+    assert!(!events.exists());
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/a"));
+
+    h.json(&["remove", "repo/a", "--yes"]);
+    assert!(!live.exists());
+    assert_eq!(
+        std::fs::read_to_string(&events).unwrap(),
+        "destroy:repo/a\n"
+    );
+    assert_eq!(repo_exclusive_holder(&h), None);
+}
+
+#[test]
+fn sections_10_4_and_12_external_adoption_and_absent_probe_manage_holder() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let live = h.root.join("exclusive-live");
+    let events = h.root.join("exclusive-events");
+    let repo = h.repo("repo", &exclusive_config("repo", &live, &events));
+    h.register(&repo);
+    common::write(&live, "external");
+
+    let adopted = h.json(&["run", "service", "repo"]);
+    assert_eq!(adopted["data"]["steps"][0]["status"], "present");
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo"));
+    let status = h.json(&["status", "repo"]);
+    assert_eq!(status["data"]["resources"][0]["external"], true);
+    assert_eq!(status["data"]["resources"][0]["holder"], "repo");
+    h.wt()
+        .args(["status", "repo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("holder repo"));
+    h.wt()
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("service:repo"));
+
+    wt_sys::fsx::remove_path(&live).unwrap();
+    let probed = h.json(&["status", "repo", "--probe"]);
+    assert_eq!(probed["data"]["resources"][0]["state"], "declared");
+    assert_eq!(probed["data"]["resources"][0]["has_instance"], false);
+    assert_eq!(
+        probed["data"]["resources"][0]["holder"],
+        serde_json::Value::Null
+    );
+    assert_eq!(repo_exclusive_holder(&h), None);
+
+    let label = wt_core::model::Label::new("repo").unwrap();
+    let arena_path = h.home.join(wt_core::model::repo_state_path(&label));
+    let mut arena =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(&arena_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap_or(wt_core::lifecycle::RepoState {
+                schema: 1,
+                label: Some(label),
+                resources: std::collections::BTreeMap::new(),
+                exclusive: std::collections::BTreeMap::new(),
+            });
+    arena.exclusive.insert(
+        "service".to_owned(),
+        wt_core::lifecycle::ExclusiveHolder {
+            holder: "repo/gone".to_owned(),
+            since: wt_sys::fsx::timestamp().unwrap(),
+        },
+    );
+    wt_sys::fsx::write_json(&arena_path, &arena).unwrap();
+    h.json(&["run", "service", "repo"]);
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo"));
+}
+
+#[test]
+fn section_10_4_exclusive_frozen_crash_is_settled_by_the_next_probe() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let live = h.root.join("exclusive-live");
+    let events = h.root.join("exclusive-events");
+    let repo = h.repo("repo", &exclusive_config("repo", &live, &events));
+    h.register(&repo);
+
+    let target = wt_core::model::Target::parse("repo").unwrap();
+    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
+    let mut state =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    let record = state.resources.get_mut("service").unwrap();
+    record.instance = Some(record.declaration.clone());
+    wt_sys::fsx::write_json(&state_path, &state).unwrap();
+
+    let label = wt_core::model::Label::new("repo").unwrap();
+    let arena_path = h.home.join(wt_core::model::repo_state_path(&label));
+    let mut arena =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(&arena_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap_or(wt_core::lifecycle::RepoState {
+                schema: 1,
+                label: Some(label),
+                resources: std::collections::BTreeMap::new(),
+                exclusive: std::collections::BTreeMap::new(),
+            });
+    arena.exclusive.insert(
+        "service".to_owned(),
+        wt_core::lifecycle::ExclusiveHolder {
+            holder: "repo".to_owned(),
+            since: wt_sys::fsx::timestamp().unwrap(),
+        },
+    );
+    wt_sys::fsx::write_json(&arena_path, &arena).unwrap();
+
+    let probed = h.json(&["status", "repo", "--probe"]);
+    assert_eq!(probed["data"]["resources"][0]["state"], "declared");
+    assert_eq!(probed["data"]["resources"][0]["has_instance"], false);
+    assert_eq!(repo_exclusive_holder(&h), None);
+    assert!(!live.exists());
+}
+
+#[test]
+fn sections_10_1_and_14_1_take_on_non_exclusive_is_usage_error() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo("repo", RESOURCE);
+    h.register(&repo);
+    let output = h
+        .wt()
+        .args(["run", "service", "repo", "--take", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "TAKE_REQUIRES_EXCLUSIVE");
+}
+
+#[test]
+fn section_10_1_take_destroy_failure_retains_holder_and_orphans_its_record() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let live = h.root.join("exclusive-live");
+    let repo = h.repo(
+        "repo",
+        &format!(
+            r#"
+[task.service]
+run = 'touch "{}"'
+exists = 'test -f "{}"'
+destroy = 'exit 9'
+tied_to = "tree"
+exclusive = "repo"
+"#,
+            live.display(),
+            live.display(),
+        ),
+    );
+    h.register(&repo);
+    h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
+    h.json(&["new", "repo/b", "--no-sync", "--no-open"]);
+    h.json(&["run", "service", "repo/a"]);
+
+    let output = h
+        .wt()
+        .args(["run", "service", "repo/b", "--take", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(6));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "DESTROY_FAILED");
+    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/a"));
+    let target = wt_core::model::Target::parse("repo/a").unwrap();
+    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
+        &h.home.join(wt_core::model::tree_state_path(&target)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        state.resources["service"].state,
+        wt_core::resource::ResourceState::Orphaned
+    );
+}
+
+#[test]
+fn sections_10_2_and_10_4_machine_exclusive_conflicts_across_labels() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let live = h.root.join("exclusive-live");
+    let events = h.root.join("exclusive-events");
+    let first = h.repo("first", &exclusive_config("machine", &live, &events));
+    let second = h.repo("second", &exclusive_config("machine", &live, &events));
+    h.register(&first);
+    h.register(&second);
+    h.json(&["run", "service", "first"]);
+
+    let output = h
+        .wt()
+        .args(["run", "service", "second", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "RESOURCE_HELD");
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("first"));
+    let machine = wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(
+        &h.home.join(wt_core::model::machine_state_path()),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(machine.exclusive["service"].holder, "first");
+}
+
 #[test]
 fn list_probe_deduplicates_shared_resources_across_trees_and_status_probes_once() {
     let h = Harness::new();

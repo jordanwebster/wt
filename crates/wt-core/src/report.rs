@@ -161,6 +161,7 @@ pub struct ResourceReport {
     pub external: bool,
     pub undeclared: bool,
     pub has_instance: bool,
+    pub holder: Option<String>,
     pub last_probe: Option<LastProbeReport>,
     pub last_error: Option<LastErrorReport>,
 }
@@ -373,6 +374,7 @@ pub struct RunData {
     pub args: Vec<String>,
     pub child: Option<ChildReport>,
     pub log: Option<String>,
+    pub displaced: Option<String>,
     pub steps: Vec<StepReport>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -757,6 +759,7 @@ mod tests {
                 external: false,
                 undeclared: false,
                 has_instance: false,
+                holder: None,
                 last_probe: Some(LastProbeReport {
                     at: "TIME".to_owned(),
                     result: "absent".to_owned(),
@@ -957,6 +960,7 @@ mod tests {
                     signal: None,
                 }),
                 log: Some(".wt/logs/test.log".to_owned()),
+                displaced: None,
                 steps: vec![step("test")],
             },
         );

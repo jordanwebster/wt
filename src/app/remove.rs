@@ -150,6 +150,8 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
 
     let mut destroyed = Vec::new();
     let mut errors = Vec::new();
+    let mut notices = Vec::new();
+    let arenas = executor::arena_snapshot(context, &target.label)?;
     let records = executor::newest_resources_first(
         context
             .read_state(&target)?
@@ -168,17 +170,22 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
             ),
         )?;
         let result = if let Some(door) = entered.as_ref() {
-            executor::destroy_resource(context, door, &key, true)
+            executor::destroy_resource(context, door, &key, true, &arenas)
         } else {
-            executor::destroy_stored_resource(context, &target, record, !identity_ok)
+            executor::destroy_stored_resource(context, &target, record, !identity_ok, &arenas)
         };
         match result {
-            Ok((status, child)) => destroyed.push(DestroyedReport {
-                scope: key.scope.to_string(),
-                task: key.task,
-                state: status,
-                child,
-            }),
+            Ok(result) => {
+                if let Some(notice) = result.notice {
+                    notices.push(notice);
+                }
+                destroyed.push(DestroyedReport {
+                    scope: key.scope.to_string(),
+                    task: key.task,
+                    state: result.state,
+                    child: result.child,
+                });
+            }
             Err(error) => {
                 errors.push(error);
                 destroyed.push(DestroyedReport {
@@ -272,7 +279,7 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         door::recompute_exclude(context, &tree.label)?;
         Vec::new()
     };
-    Output::data(RemoveData {
+    Ok(Output::data(RemoveData {
         target: target.to_string(),
         removed: true,
         destroyed,
@@ -280,7 +287,8 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         branch_deleted,
         branch_kept,
         session_closed,
-    })
+    })?
+    .with_notices(notices))
 }
 
 /// The plan a user is asked to consent to: what this removal ends, in the

@@ -64,6 +64,7 @@ expression: envelope
           "external": false,
           "undeclared": false,
           "has_instance": false,
+          "holder": null,
           "last_probe": {
             "at": "TIME",
             "result": "absent"

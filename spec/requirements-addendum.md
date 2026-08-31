@@ -823,15 +823,20 @@ holder; `wt run <r> --take` destroys the holder's record through its frozen
 instance, clears the holder, claims it, proceeds as itself, and prints what
 it displaced. `--take` never prompts: displacing a declared-reproducible
 resource is not loss (A54) and the flag carries the consent, on the same
-axis as `--force`. When no holder is recorded and a probe finds the resource
-present, the probing tree becomes the holder with `external = true` — the
-first-probe-freezes rule unchanged. The holder is cleared by teardown of the
-holder's record, by `destroy`/`refresh`, and by a confirmed-absent probe
-(`RESOURCE_GONE`). The repo-tied tree-variable restriction is untouched: the
-gap was a missing concept, not a wrong restriction. Rationale: "one dev
-server; retarget it to my tree and tell me who I bumped" was previously
-expressible only through configurations that failed silently, and the
-consent gate cannot be built inside a recipe.
+axis as `--force`. When no holder is recorded, a run's own probe finding
+the resource present makes the running tree the holder with
+`external = true` — the first-probe-freezes rule unchanged; a passive
+`--probe` observes without claiming, because observation must not seize
+ownership. The holder is cleared by teardown of the holder's record, by
+`destroy`/`refresh`, and by a confirmed-absent probe (`RESOURCE_GONE`).
+The arena entry, not the local configuration, governs teardown: a checkout
+whose branch predates the `exclusive` declaration still may not destroy
+what another live tree holds, so teardown consults the arena for the key
+before running any recipe. The repo-tied tree-variable restriction is
+untouched: the gap was a missing concept, not a wrong restriction.
+Rationale: "one dev server; retarget it to my tree and tell me who I bumped"
+was previously expressible only through configurations that failed silently,
+and the consent gate cannot be built inside a recipe.
 
 ## A61. Machine-tied tasks and resources
 

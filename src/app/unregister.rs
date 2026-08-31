@@ -93,6 +93,8 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
     executor::refresh_lifecycle_declarations(context, &door)?;
     let mut destroyed = Vec::new();
     let mut teardown_errors = Vec::new();
+    let mut notices = door.notices.clone();
+    let arenas = executor::arena_snapshot(context, &label)?;
     let tree_records = executor::newest_resources_first(
         context
             .read_state(&target)?
@@ -101,13 +103,18 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
     );
     for record in tree_records {
         let key = record.key.clone();
-        match executor::destroy_resource(context, &door, &key, true) {
-            Ok((state, child)) => destroyed.push(DestroyedReport {
-                scope: key.scope.to_string(),
-                task: key.task,
-                state,
-                child,
-            }),
+        match executor::destroy_resource(context, &door, &key, true, &arenas) {
+            Ok(result) => {
+                if let Some(notice) = result.notice {
+                    notices.push(notice);
+                }
+                destroyed.push(DestroyedReport {
+                    scope: key.scope.to_string(),
+                    task: key.task,
+                    state: result.state,
+                    child: result.child,
+                });
+            }
             Err(error) => {
                 teardown_errors.push(error);
                 destroyed.push(DestroyedReport {
@@ -127,13 +134,18 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
     );
     for record in repo_records {
         let key = record.key.clone();
-        match executor::destroy_resource(context, &door, &key, true) {
-            Ok((state, child)) => destroyed.push(DestroyedReport {
-                scope: key.scope.to_string(),
-                task: key.task,
-                state,
-                child,
-            }),
+        match executor::destroy_resource(context, &door, &key, true, &arenas) {
+            Ok(result) => {
+                if let Some(notice) = result.notice {
+                    notices.push(notice);
+                }
+                destroyed.push(DestroyedReport {
+                    scope: key.scope.to_string(),
+                    task: key.task,
+                    state: result.state,
+                    child: result.child,
+                });
+            }
             Err(error) => {
                 teardown_errors.push(error);
                 destroyed.push(DestroyedReport {
@@ -212,5 +224,5 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
         destroyed,
         artifacts,
     })?
-    .with_notices(door.notices))
+    .with_notices(notices))
 }

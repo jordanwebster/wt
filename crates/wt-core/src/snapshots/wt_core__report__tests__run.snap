@@ -20,6 +20,7 @@ expression: envelope
       "signal": null
     },
     "log": ".wt/logs/test.log",
+    "displaced": null,
     "steps": [
       {
         "id": "test",

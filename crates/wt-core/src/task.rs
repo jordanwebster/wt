@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{Command, Task, TiedTo},
+    config::{Command, Exclusive, Task, TiedTo},
     error::CoreError,
     model::{EnvMap, RelDir},
     resource::ResourceKey,
@@ -31,6 +31,7 @@ pub struct Node {
     pub exists: Option<Command>,
     pub destroy: Option<Command>,
     pub tied_to: Option<TiedTo>,
+    pub exclusive: Option<Exclusive>,
     pub name: Option<String>,
     pub env: EnvMap,
     pub lock: Option<String>,
@@ -55,6 +56,7 @@ impl Node {
             exists: task.exists.clone(),
             destroy: task.destroy.clone(),
             tied_to: task.tied_to,
+            exclusive: task.exclusive,
             name: task.name.clone(),
             env: task.env.clone().into_iter().collect(),
             lock: task.lock.clone(),
@@ -215,6 +217,7 @@ mod tests {
             exists: None,
             destroy: None,
             tied_to: None,
+            exclusive: None,
             name: None,
             env: EnvMap::new(),
             lock: None,

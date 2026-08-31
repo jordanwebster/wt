@@ -227,7 +227,7 @@ fn tree_report_with_shared(
             .flat_map(|state| state.resources.into_values()),
         );
     }
-    let resources = resource_reports(resource_records);
+    let resources = resource_reports(context, resource_records)?;
     let sync = state.as_ref().and_then(|state| state.sync.as_ref());
     let changed = if exists && identity_ok {
         sync.map(|sync| sync_changed(context, tree, &sync.inputs))
@@ -429,46 +429,51 @@ fn to_u32(value: u64) -> u32 {
 }
 
 fn resource_reports(
+    context: &Context,
     records: impl IntoIterator<Item = wt_core::resource::ResourceRecord>,
-) -> Vec<ResourceReport> {
+) -> Result<Vec<ResourceReport>, CoreError> {
     let mut reports = records
         .into_iter()
-        .map(|record| ResourceReport {
-            scope: record.key.scope.to_string(),
-            task: record.key.task.clone(),
-            tied_to: match record.key.tied_to {
-                TiedTo::Tree => "tree",
-                TiedTo::Repo => "repo",
-                TiedTo::Machine => "machine",
-            }
-            .to_owned(),
-            name: record.name().to_owned(),
-            state: match record.state {
-                ResourceState::Declared => "declared",
-                ResourceState::Present => "present",
-                ResourceState::Orphaned => "orphaned",
-            }
-            .to_owned(),
-            reason: record.reason.clone(),
-            external: record.external,
-            undeclared: record.undeclared,
-            has_instance: record.instance.is_some(),
-            last_probe: record.last_probe.as_ref().map(|probe| LastProbeReport {
-                at: probe.at.clone(),
-                result: match &probe.result {
-                    ProbeResult::Present => "present",
-                    ProbeResult::Absent => "absent",
-                    ProbeResult::Failed { .. } => "failed",
+        .map(|record| {
+            let holder = executor::exclusive_holder_for_record(context, &record)?;
+            Ok(ResourceReport {
+                scope: record.key.scope.to_string(),
+                task: record.key.task.clone(),
+                tied_to: match record.key.tied_to {
+                    TiedTo::Tree => "tree",
+                    TiedTo::Repo => "repo",
+                    TiedTo::Machine => "machine",
                 }
                 .to_owned(),
-            }),
-            last_error: record.last_error.as_ref().map(|error| LastErrorReport {
-                at: error.at.clone(),
-                event: error.event.clone(),
-                message: error.message.clone(),
-            }),
+                name: record.name().to_owned(),
+                state: match record.state {
+                    ResourceState::Declared => "declared",
+                    ResourceState::Present => "present",
+                    ResourceState::Orphaned => "orphaned",
+                }
+                .to_owned(),
+                reason: record.reason.clone(),
+                external: record.external,
+                undeclared: record.undeclared,
+                has_instance: record.instance.is_some(),
+                holder,
+                last_probe: record.last_probe.as_ref().map(|probe| LastProbeReport {
+                    at: probe.at.clone(),
+                    result: match &probe.result {
+                        ProbeResult::Present => "present",
+                        ProbeResult::Absent => "absent",
+                        ProbeResult::Failed { .. } => "failed",
+                    }
+                    .to_owned(),
+                }),
+                last_error: record.last_error.as_ref().map(|error| LastErrorReport {
+                    at: error.at.clone(),
+                    event: error.event.clone(),
+                    message: error.message.clone(),
+                }),
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, CoreError>>()?;
     reports.sort_by(|left, right| {
         let order = |tied_to: &str| match tied_to {
             "tree" => 0,
@@ -481,7 +486,7 @@ fn resource_reports(
             &right.task,
         ))
     });
-    reports
+    Ok(reports)
 }
 
 fn session_state(context: &Context, tree: &wt_core::model::TreeRec) -> String {
