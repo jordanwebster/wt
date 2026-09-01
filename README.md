@@ -166,6 +166,22 @@ between versions.
 
 ## Tour
 
+`wt setup` is the quickest way in. It finds the git checkouts already on your
+machine, groups them by where they came from, and offers to register one per
+repository and adopt the worktrees you already made by hand. It also installs
+the shell integration, settles tmux, and asks which coding agent new sessions
+should start.
+
+```sh
+wt setup
+wt setup --dry-run      # print the default answers as the commands that would do them
+```
+
+Quitting before its single confirmation changes nothing, and re-running it
+later is how you add more repositories. `--dry-run` asks nothing and needs no
+terminal, so it is also what a script or an agent runs to see what setup would
+do.
+
 Register an existing checkout, or clone and register in one operation:
 
 ```sh
@@ -573,6 +589,11 @@ support, restores a worktree's binary prefix if a shell startup file reordered
 ```sh
 eval "$(wt shell-init zsh)"
 ```
+
+Without that line, a startup file that reorders `PATH` — nvm, pyenv, a stray
+`export PATH=…` — silently puts the installed copy of a command back in front
+of the worktree's own. `wt setup` installs it for you, and `wt doctor` reports
+its absence once a repository claims a command.
 
 See the [cookbook](docs/cookbook.md) for policy shims, agent wrappers, and
 editor integration patterns.

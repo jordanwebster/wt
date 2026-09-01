@@ -4236,6 +4236,7 @@ fn doctor_condition_contracts_cover_every_documented_code() {
         "IDENTIFIER_LONG",
         "TREE_IN_USE",
         "GIT_TOO_OLD",
+        "SHELL_INIT_MISSING",
     ]);
     assert_eq!(
         covered,
@@ -4262,6 +4263,18 @@ fn doctor_manufactures_git_environment_port_and_adapter_conditions() {
     codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
     wt_sys::fsx::create_private_dir(&repo.join("missing-bin")).unwrap();
     codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
+
+    // PATH_NOT_SHADOWED is only observable from inside a door (A76), and only
+    // where a bin directory or a claimed command gives it a prefix to miss.
+    let inside_door = h
+        .wt()
+        .env("WT_TARGET", "repo")
+        .args(["doctor", "repo", "--json"])
+        .output()
+        .unwrap();
+    codes.extend(finding_codes(
+        &serde_json::from_slice(&inside_door.stdout).unwrap(),
+    ));
 
     let exclude = repo.join(".git/info/exclude");
     common::write(&exclude, "");
@@ -4380,7 +4393,25 @@ fn doctor_reports_a_broken_path_prefix_once() {
     common::write(&repo.join("bin-b/.keep"), "");
     h.register(&repo);
 
-    let report = h.json(&["doctor", "repo"]);
+    // Reported only from inside a door (A76): outside one the prefix is
+    // expected to be absent and the finding would be noise on every label.
+    let outside = h.json(&["doctor", "repo"]);
+    assert!(
+        !outside["data"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["code"] == "PATH_NOT_SHADOWED"),
+        "outside a door the missing prefix is not a finding"
+    );
+
+    let inside = h
+        .wt()
+        .env("WT_TARGET", "repo")
+        .args(["doctor", "repo", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&inside.stdout).unwrap();
     let findings = report["data"]["findings"]
         .as_array()
         .unwrap()
@@ -4545,4 +4576,213 @@ fn resource_destroyed_failpoint_reruns_from_probe_truth() {
         h.json(&["destroy", "service", "repo", "--yes"])["data"]["after"],
         "declared"
     );
+}
+
+/// A76 §14.7: `setup` is the sole terminal-primary verb, and it says so in the
+/// two ways an automated caller can reach it — while `--dry-run`, which asks
+/// nothing, works anywhere.
+#[test]
+fn setup_refuses_json_and_a_terminal_free_invocation() {
+    let h = Harness::new();
+
+    let json = h.wt().args(["setup", "--json"]).output().unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "JSON_UNSUPPORTED");
+    assert_eq!(json.status.code(), Some(2));
+
+    // Tests never have a terminal on stdin, which is exactly the condition.
+    let plain = h.wt().arg("setup").output().unwrap();
+    assert_eq!(plain.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&plain.stderr);
+    assert!(stderr.contains("CONFIRM_REQUIRED"), "{stderr}");
+    assert!(
+        stderr.contains("wt register") && stderr.contains("--dry-run"),
+        "the remedy must name what an agent can run instead: {stderr}"
+    );
+
+    let dry = h
+        .wt()
+        .args(["setup", "--dry-run", "--shell", "zsh"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        dry.status.code(),
+        Some(0),
+        "a dry run asks nothing and needs no terminal: {}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+}
+
+/// A76 §14.7, end to end without a terminal: the walk, the git batch, the
+/// grouping, the proposals and the default answers, printed as the commands
+/// that would produce them.
+#[test]
+fn setup_dry_run_plans_the_default_answers_as_commands() {
+    let h = Harness::new();
+    // `infocmp` decides the generated tmux file's `default-terminal`, and
+    // machines differ; the shim makes the answer the same everywhere.
+    common::write_executable(&h.shims.join("infocmp"), "#!/bin/sh\nexit 0\n");
+
+    // A checkout with a linked worktree, both untouched by wt.
+    let api = h.repo("api", "");
+    common::git(
+        &api,
+        &["worktree", "add", "-q", "-b", "feature", "../api-feature"],
+    );
+    let feature = h.repos.join("api-feature");
+    // A checkout wt already knows, whose own worktree is still adoptable.
+    let old = h.repo("old", "");
+    h.register(&old);
+    common::git(&old, &["worktree", "add", "-q", "-b", "wip", "../old-wip"]);
+    let wip = h.repos.join("old-wip");
+
+    let output = h
+        .wt()
+        .args(["setup", "--dry-run", "--shell", "zsh"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let real = |path: &Path| {
+        wt_sys::fsx::canonicalize(path)
+            .unwrap()
+            .display()
+            .to_string()
+    };
+    let register = format!("wt register {} --label api", real(&api));
+    let adopt = format!("wt adopt {} --label api --name feature", real(&feature));
+    let adopt_wip = format!("wt adopt {} --label old --name wip", real(&wip));
+    for line in [&register, &adopt, &adopt_wip] {
+        assert!(
+            stdout.contains(line.as_str()),
+            "missing `{line}` in:\n{stdout}"
+        );
+    }
+    assert!(
+        stdout.find(&register).unwrap() < stdout.find(&adopt).unwrap(),
+        "a register precedes the adopt that needs its label:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(&format!("wt register {}", real(&old))),
+        "a registered checkout is not registered again:\n{stdout}"
+    );
+    // The origins are bare mirrors beside the checkouts; they are neither
+    // offered nor descended.
+    assert!(!stdout.contains("api-origin"), "{stdout}");
+
+    // The shell block is printed byte for byte, guard included, into the
+    // file the detected shell reads.
+    assert!(
+        stdout.contains(&format!("cat >> {}/.zshrc <<'WT_SETUP'", h.root.display())),
+        "{stdout}"
+    );
+    assert!(stdout.contains("eval \"$(wt shell-init zsh)\""), "{stdout}");
+    assert!(
+        stdout.contains("eval \"$(wt completions zsh)\""),
+        "{stdout}"
+    );
+    assert!(stdout.contains("# >>> wt >>>"), "{stdout}");
+
+    // tmux (the shim) is installed and unconfigured, so a configuration is
+    // written, describing the terminal wt is running under.
+    assert!(
+        stdout.contains(&format!(
+            "cat > {}/.config/tmux/tmux.conf <<'WT_SETUP'",
+            h.root.display()
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains("xterm-256color:extkeys"), "{stdout}");
+    assert!(
+        stdout.contains("default-terminal \"tmux-256color\""),
+        "{stdout}"
+    );
+    // The bare mirror's HEAD/objects/refs must not have been taken for a
+    // worktree, and nothing was written.
+    assert!(!h.root.join(".zshrc").exists());
+    assert!(!h.root.join(".config/tmux/tmux.conf").exists());
+    assert!(
+        !h.root.join("wt-home/config.toml").exists()
+            || !std::fs::read_to_string(h.root.join("wt-home/config.toml"))
+                .unwrap()
+                .contains("trees_dir")
+    );
+}
+
+/// A76: a second run offers only what is new, and an rc file that already
+/// installs the guard is not appended to again.
+#[test]
+fn setup_dry_run_is_idempotent_once_everything_is_done() {
+    let h = Harness::new();
+    common::write_executable(&h.shims.join("infocmp"), "#!/bin/sh\nexit 0\n");
+    let api = h.repo("api", "");
+    h.register(&api);
+    common::write(&h.root.join(".zshrc"), "eval \"$(wt shell-init zsh)\"\n");
+    common::write(&h.root.join(".tmux.conf"), "set -g mouse on\n");
+
+    let output = h
+        .wt()
+        .args(["setup", "--dry-run", "--shell", "zsh"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(!stdout.contains("wt register"), "{stdout}");
+    assert!(
+        !stdout.contains("shell-init"),
+        "an installed guard is not installed twice:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("cat > "),
+        "an existing tmux configuration is never replaced:\n{stdout}"
+    );
+}
+
+/// A76: the guard is invisible from inside the door it breaks, so `doctor`
+/// reports its absence — and stops once any rc file installs it.
+#[test]
+fn doctor_reports_a_missing_shell_guard_until_one_is_installed() {
+    let h = Harness::new();
+    let repo = h.repo("repo", "commands=['orbit']\nbin=['target/debug']\n");
+    h.register(&repo);
+
+    let codes = |value: &serde_json::Value| -> BTreeSet<String> {
+        value["data"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|finding| finding["code"].as_str().map(str::to_owned))
+            .collect()
+    };
+    assert!(codes(&h.json(&["doctor", "repo"])).contains("SHELL_INIT_MISSING"));
+
+    common::write(
+        &h.root.join(".zshrc"),
+        "export PATH=/usr/local/bin:$PATH\neval \"$(wt shell-init zsh)\"\n",
+    );
+    assert!(
+        !codes(&h.json(&["doctor", "repo"])).contains("SHELL_INIT_MISSING"),
+        "an installed guard must silence the finding"
+    );
+}
+
+/// A76: a label that claims nothing has no prefix for an rc file to displace,
+/// so the finding would be advice about a problem the reader cannot have.
+#[test]
+fn doctor_stays_quiet_about_the_shell_guard_when_nothing_is_claimed() {
+    let h = Harness::new();
+    let repo = h.repo("plain", "");
+    h.register(&repo);
+    let report = h.json(&["doctor", "plain"]);
+    assert!(!report["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "SHELL_INIT_MISSING"));
 }

@@ -8,10 +8,13 @@ pub mod fsx;
 pub mod git;
 pub mod lock;
 pub mod net;
+pub mod probe;
 pub mod proc;
 pub mod snapshot;
+pub mod term;
 pub mod tmux;
 pub mod trace;
+pub mod walk;
 
 pub type Result<T> = std::result::Result<T, wt_core::CoreError>;
 

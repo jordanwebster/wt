@@ -1187,3 +1187,83 @@ almost always which of many child processes cost the time, and answering it
 from the command's own output would mean printing a report nobody asked for.
 Measurement only — behaviour is explained by notices and error codes, and a
 second channel for that would rot.
+
+## A76. Onboarding is one interactive verb that composes the others
+
+`wt setup` is the first-run and add-more-repos verb: it finds git checkouts
+already on the machine, registers the ones the user picks, adopts the linked
+worktrees of those it registered, installs the shell integration, and settles
+tmux and the default agent. It is the only verb whose primary mode is a
+terminal.
+
+Its mutation set is closed and named: `register`, `adopt`, a write to
+`$WT_HOME/config.toml`, an append to a shell rc file, a write or append to a
+tmux config, and a package-manager install run on the terminal. The first two
+are verbs; the rest have no verb, and `setup` prints each as the shell line
+that reproduces it — except the settings write, which edits a structured
+document in place and is printed as a comment saying what it sets, because
+no shell line reproduces it honestly — so `--dry-run` shows the run as the
+commands that would produce it. `--dry-run` asks nothing — it takes the default answer to every
+card, ticking every repository found — and therefore needs no terminal, which is what makes the whole pipeline
+testable and what an agent runs to see what `setup` would do. Interactively,
+`setup` gathers every answer first, renders one plan, takes one consent, and
+only then applies: quitting before that consent exits 0 having mutated
+nothing, and is not a failure.
+
+Interactivity follows §14.2 rather than excepting itself from it. Without a
+terminal on stdin `setup` refuses with `CONFIRM_REQUIRED` (2) and a remedy
+naming `wt register` and `--dry-run`, because a wizard that cannot ask has
+nothing to offer an agent that those do not offer better. `--json` is refused for the same
+reason `exec` refuses it (A20): the envelope describes one operation's result,
+and a session of questions is not one. `setup` is idempotent — a second run is
+how a user adds repositories later, so already-registered checkouts appear in
+its list marked as registered rather than filtered out of it, and every setting
+it asks about offers its current value as the default.
+
+The discovery walk is bounded by depth rather than by a list of directories to
+look in. Walking `$HOME` to a fixed depth, declining to descend into a
+directory once it is known to be a checkout, costs a readdir per directory
+above a checkout and finds repositories wherever the user actually keeps them;
+a curated roots list finds nothing in the home of anyone who chose different
+names. Candidates are grouped by common gitdir and then by normalised origin,
+because that grouping is what makes the choice legible: linked worktrees of one
+checkout can only be adopted under that checkout's label (§11.6), a second
+checkout of one origin can only become a second label, and the user is choosing
+between those two outcomes rather than between paths. The two are one card: a
+worktree's row sits under its checkout's and is enabled exactly while that
+checkout is selected or already registered, so the dependency is visible
+rather than enforced by the order of questions. Nothing is ticked on the
+user's behalf: a registration is opt in, because a wrong tick that slips past
+a long list costs a registration nobody wanted, while a missed one costs a
+keystroke. Recency does the work it can do honestly — it puts the most
+recently touched checkouts first and folds the stale tail behind one line —
+and decides nothing. Every proposed label and name is editable in place.
+
+One effect precedes the consent, and is named here rather than left as a
+contradiction. Reading what a tmux configuration *effectively* sets means
+starting tmux with it, on a throwaway socket and under a deadline, and a
+configuration may run arbitrary commands at startup — a plugin manager
+ordinarily does. Those commands run, once, before the card that reports the
+differences can be drawn. The alternative is reporting differences from a
+textual reading of one file, which is wrong for every configuration that
+sources a fragment, loads a plugin, or sets an option twice; and the effects in
+question are the ones that already run at every tmux start on that machine.
+Nothing wt itself writes happens before the consent.
+
+`setup` may only ever propose what `doctor` could report, and `doctor` reports
+one thing it would otherwise have no way to say. `SHELL_INIT_MISSING` (info)
+fires when no rc file wt knows installs §14.6's guard while a registered label
+claims commands or declares a `bin` directory: without it an ordinary rc file
+that reorders `PATH` silently defeats §9.2's guarantee, and the failure is
+invisible from inside the door it breaks. It is info rather than warn because
+a guard sourced from a fragment file, or from a shell wt does not know, is a
+legitimate configuration it cannot distinguish from a fault, and a warning a
+user learns to ignore costs more than the finding earns. It reads three files
+and spawns nothing: `doctor` is a hot path, and a finding about tmux's key
+handling that needed a throwaway tmux server on every run — with the user's
+plugins started each time — was cut for that reason; `setup` reports the same
+differences at the moment they can be acted on. For the same reason
+`PATH_NOT_SHADOWED` is reported only from inside a door and only for that
+door's own tree — outside one the prefix is *expected* to be absent, another
+label's prefix is expected to be absent even inside one, and firing per
+registered label taught the reader to skip the whole section.

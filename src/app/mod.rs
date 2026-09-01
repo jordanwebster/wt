@@ -24,6 +24,7 @@ mod refresh;
 mod register;
 mod remove;
 mod run;
+mod setup;
 mod shell;
 mod shell_init;
 mod status;
@@ -301,6 +302,7 @@ fn render_error_with_visibility(
 
 fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
     match cli.command {
+        Command::Setup(args) => setup::run(context, args),
         Command::Register(args) => register::run(context, args),
         Command::Unregister(args) => unregister::run(context, args),
         Command::Clone(args) => clone_repo::run(context, args),

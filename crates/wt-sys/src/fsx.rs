@@ -19,6 +19,60 @@ use wt_core::{CoreError, ExitClass};
 use crate::Result;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// Appends text to a file, keeping a backup of what was there.
+///
+/// The path is used as given: a caller that means to edit through a symlink
+/// resolves it first and names the real file in its consent, because an
+/// unresolved append silently edits whatever the link points at (A76).
+/// Returns the backup's path when one was made; a file that did not exist has
+/// nothing to back up.
+pub fn append_with_backup(path: &Path, text: &str) -> Result<Option<PathBuf>> {
+    let existing = read_string(path)?;
+    // An rc file is ordinarily world-readable; an append that quietly made it
+    // private would be an edit nobody agreed to.
+    let mode = std::fs::metadata(path)
+        .map(|meta| meta.permissions().mode() & 0o777)
+        .unwrap_or(0o600);
+    let backup = match &existing {
+        Some(contents) => {
+            let backup = path.with_extension(match path.extension() {
+                Some(extension) => format!("{}.wt-backup", extension.to_string_lossy()),
+                None => "wt-backup".to_owned(),
+            });
+            write_store(&backup, contents.as_bytes())?;
+            Some(backup)
+        }
+        None => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    CoreError::new(
+                        ExitClass::Internal,
+                        "WRITE_FAILED",
+                        format!("could not create {}: {error}", parent.display()),
+                        "check the directory's permissions",
+                    )
+                })?;
+            }
+            None
+        }
+    };
+    let mut merged = existing.unwrap_or_default();
+    if !merged.is_empty() && !merged.ends_with('\n') {
+        merged.push('\n');
+    }
+    merged.push_str(text);
+    write_atomic_mode(path, merged.as_bytes(), mode)?;
+    Ok(backup)
+}
+
+/// Seconds since the epoch, for comparing against a file's mtime.
+pub fn epoch_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 static STORE_FAIL_AFTER: AtomicU64 = AtomicU64::new(u64::MAX);
 

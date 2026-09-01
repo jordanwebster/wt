@@ -39,6 +39,7 @@ pub const CODES: &[&str] = &[
     "NO_VERIFY",
     "NO_COORDINATION",
     "SESSION_BACKEND",
+    "SHELL_INIT_MISSING",
     "BIN_DIR_MISSING",
     "SHIM_BROKEN",
     "SHIM_SHADOWED",

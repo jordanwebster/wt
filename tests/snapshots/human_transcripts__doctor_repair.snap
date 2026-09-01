@@ -1,6 +1,7 @@
 ---
 source: tests/human_transcripts.rs
-expression: "normalize(h, &output.stdout)"
+assertion_line: 282
+expression: normalized
 ---
 Doctor found 1 error, 0 warnings, 1 note
   error  TREE_REPLACED repo - tree phase is replaced

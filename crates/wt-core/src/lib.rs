@@ -29,9 +29,12 @@ pub mod report;
 pub mod resource;
 pub mod session;
 pub mod settings;
+pub mod setup;
 pub mod snapshot;
 pub mod task;
 pub mod template;
+pub mod tmuxconf;
+pub mod tui;
 
 pub use env::{assemble, deactivate};
 pub use error::{CoreError, ErrorCode, ExitClass};

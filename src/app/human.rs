@@ -11,6 +11,7 @@ use crate::cli::Command;
 #[derive(Clone, Copy)]
 pub(crate) enum HumanKind {
     Register,
+    Setup,
     Unregister,
     Clone,
     New,
@@ -43,6 +44,7 @@ pub(crate) enum HumanKind {
 impl From<&Command> for HumanKind {
     fn from(command: &Command) -> Self {
         match command {
+            Command::Setup(_) => Self::Setup,
             Command::Register(_) => Self::Register,
             Command::Unregister(_) => Self::Unregister,
             Command::Clone(_) => Self::Clone,
@@ -108,6 +110,9 @@ impl HumanKind {
             | Self::Shell
             | Self::Edit
             | Self::Env
+            // `setup` always renders its own text (A76): it is a session of
+            // questions, not one operation with a schema.
+            | Self::Setup
             | Self::Script => String::new(),
             Self::Forget => render_forget(decode(value), notices),
             Self::Locks => render_locks(decode(value), notices),

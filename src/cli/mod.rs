@@ -31,7 +31,7 @@ impl Shell {
     name = "wt",
     version,
     about = "Worktree manager for humans and coding agents",
-    override_help = "Worktree manager for humans and coding agents\n\nUsage: wt [OPTIONS] <COMMAND>\n\nEveryday:\n  new          Create or resume a linked worktree\n  open         Open or attach to an agent session\n  edit         Open a tree in the configured editor\n  test         Run the test task\n  lint         Run the lint task\n  fmt          Run the format task\n  build        Run the build task\n  run          Run a declared task\n  ls           List registered trees [aliases: list]\n  status       Report one tree's state and tasks\n  rm           Tear down and remove a linked tree [aliases: remove]\n\nSetup:\n  clone        Clone and register a repository\n  register     Register a canonical checkout\n  adopt        Adopt an existing git worktree\n  shell-init   Print shell helper initialisation\n  completions  Print dynamic shell completions\n\nWorking inside a tree:\n  exec         Run a one-shot command through a passthrough door\n  shell        Start an interactive shell door\n  env          Print a tree's assembled environment\n  path         Print a tree root\n  which        Resolve a command through a tree door's PATH\n  tasks        List effective tasks\n  config       Show effective configuration origins\n  meta         Show or edit a tree's user metadata\n\nUpkeep:\n  sync         Synchronise a tree's dependencies\n  doctor       Diagnose registered state and tooling\n  prune        Report or clean stale tree records\n  close        Close agent sessions\n  forget       Forget wt's records for a linked tree without removing it\n  destroy      Destroy a declared resource\n  refresh      Destroy and recreate a declared resource\n  locks        List wt coordination locks\n  unregister   Tear down and forget a registered repository\n\nOptions:\n      --json           Emit one stable JSON envelope\n      --yes            Consent to destructive operations without prompting\n      --quiet          Suppress optional notices\n      --verbose        Show notices even when stderr is not a terminal\n      --color <COLOR>  Control coloured terminal output [default: auto] [possible values: auto, always, never]\n      --home <DIR>     Use an alternate wt state directory\n  -h, --help           Print help\n  -V, --version        Print version\n\nExample: wt register . && wt new repo/feature"
+    override_help = "Worktree manager for humans and coding agents\n\nUsage: wt [OPTIONS] <COMMAND>\n\nEveryday:\n  new          Create or resume a linked worktree\n  open         Open or attach to an agent session\n  edit         Open a tree in the configured editor\n  test         Run the test task\n  lint         Run the lint task\n  fmt          Run the format task\n  build        Run the build task\n  run          Run a declared task\n  ls           List registered trees [aliases: list]\n  status       Report one tree's state and tasks\n  rm           Tear down and remove a linked tree [aliases: remove]\n\nSetup:\n  setup        Find repositories and settle wt's environment\n  clone        Clone and register a repository\n  register     Register a canonical checkout\n  adopt        Adopt an existing git worktree\n  shell-init   Print shell helper initialisation\n  completions  Print dynamic shell completions\n\nWorking inside a tree:\n  exec         Run a one-shot command through a passthrough door\n  shell        Start an interactive shell door\n  env          Print a tree's assembled environment\n  path         Print a tree root\n  which        Resolve a command through a tree door's PATH\n  tasks        List effective tasks\n  config       Show effective configuration origins\n  meta         Show or edit a tree's user metadata\n\nUpkeep:\n  sync         Synchronise a tree's dependencies\n  doctor       Diagnose registered state and tooling\n  prune        Report or clean stale tree records\n  close        Close agent sessions\n  forget       Forget wt's records for a linked tree without removing it\n  destroy      Destroy a declared resource\n  refresh      Destroy and recreate a declared resource\n  locks        List wt coordination locks\n  unregister   Tear down and forget a registered repository\n\nOptions:\n      --json           Emit one stable JSON envelope\n      --yes            Consent to destructive operations without prompting\n      --quiet          Suppress optional notices\n      --verbose        Show notices even when stderr is not a terminal\n      --color <COLOR>  Control coloured terminal output [default: auto] [possible values: auto, always, never]\n      --home <DIR>     Use an alternate wt state directory\n  -h, --help           Print help\n  -V, --version        Print version\n\nExample: wt register . && wt new repo/feature"
 )]
 pub struct Cli {
     /// Emit one stable JSON envelope.
@@ -87,6 +87,8 @@ pub enum Command {
     #[command(name = "rm", visible_alias = "remove")]
     Remove(Remove),
 
+    /// Find repositories and settle wt's environment.
+    Setup(Setup),
     /// Clone and register a repository.
     Clone(CloneRepo),
     /// Register a canonical checkout.
@@ -154,6 +156,7 @@ impl Command {
             Self::List(_) => "list",
             Self::Status(_) => "status",
             Self::Remove(_) => "remove",
+            Self::Setup(_) => "setup",
             Self::Clone(_) => "clone",
             Self::Register(_) => "register",
             Self::Adopt(_) => "adopt",
@@ -227,6 +230,21 @@ pub struct Unregister {
     pub label: String,
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = "Interactive; needs a terminal. Composes `register`, `adopt` and configuration writes, so `--dry-run` prints the run as commands. No `--json` (A76).\n\nExample: wt setup ~/work"
+)]
+pub struct Setup {
+    /// Extra directories to search, alongside the home directory.
+    pub paths: Vec<PathBuf>,
+    /// Print the plan as the commands that would produce it.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Install into this shell rather than the detected one.
+    #[arg(long, value_enum)]
+    pub shell: Option<Shell>,
 }
 
 #[derive(Debug, Args)]
@@ -535,6 +553,7 @@ pub fn parse() -> Cli {
         "status",
         "rm",
         "remove",
+        "setup",
         "clone",
         "register",
         "adopt",

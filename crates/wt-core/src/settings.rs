@@ -613,3 +613,338 @@ mod tests {
         assert!(error.remedy.contains("retry"));
     }
 }
+
+/// A value as a TOML string literal, so a path with a quote or a backslash
+/// in it is written rather than corrupting the file.
+pub fn string_literal(value: &str) -> String {
+    toml::Value::String(value.to_owned()).to_string()
+}
+
+/// Whether a settings key is already written.
+pub fn declared(source: &str, table: Option<&str>, key: &str) -> Result<bool, CoreError> {
+    let value = source.parse::<toml::Table>().map_err(settings_invalid)?;
+    Ok(match table {
+        Some(table) => value
+            .get(table)
+            .and_then(toml::Value::as_table)
+            .is_some_and(|table| table.contains_key(key)),
+        None => value.contains_key(key),
+    })
+}
+
+/// Writes a settings key that is absent, leaving everything already there —
+/// including comments and ordering — exactly as it was.
+///
+/// `value` is TOML, so a string arrives already quoted.
+pub fn declare(
+    source: &str,
+    table: Option<&str>,
+    key: &str,
+    value: &str,
+) -> Result<String, CoreError> {
+    parse(source)?;
+    if declared(source, table, key)? {
+        return Ok(source.to_owned());
+    }
+    let parsed = source.parse::<toml::Table>().map_err(settings_invalid)?;
+    if let Some(name) = table {
+        if parsed.contains_key(name) && header_end(source, name).is_none() {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "SETTINGS_INVALID",
+                format!("cannot add {name}.{key} to a non-table {name} declaration"),
+                format!("rewrite `{name} = {{ ... }}` as a `[{name}]` table, then retry"),
+            ));
+        }
+    }
+    let mut output = source.to_owned();
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    let line = format!("{key} = {value}\n");
+    match table {
+        Some(name) => match header_end(&output, name) {
+            Some(offset) => output.insert_str(offset, &line),
+            None => {
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&format!("[{name}]\n"));
+                output.push_str(&line);
+            }
+        },
+        // A top-level key appended to the end of the file would land inside
+        // whatever table header came last, so it goes above the first one.
+        None => {
+            let offset = first_header_start(&output).unwrap_or(output.len());
+            output.insert_str(offset, &line);
+        }
+    }
+    parse(&output)?;
+    Ok(output)
+}
+
+/// Writes a settings key, replacing a value already there.
+///
+/// [`declare`] deliberately leaves an existing key alone, which is right when
+/// wt is filling in a default it invented. It is wrong when a person chose the
+/// value: silently keeping the old one and reporting success is the failure
+/// mode this exists to avoid.
+pub fn set(source: &str, table: Option<&str>, key: &str, value: &str) -> Result<String, CoreError> {
+    parse(source)?;
+    if !declared(source, table, key)? {
+        return declare(source, table, key, value);
+    }
+    let updated = rewrite(source, table, key, |line| {
+        let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+        let comment = line
+            .split_once('#')
+            .map(|(_, comment)| format!("  #{comment}"))
+            .unwrap_or_default();
+        let comment = comment.trim_end_matches(['\n', '\r']).to_owned();
+        Some(format!("{indent}{key} = {value}{comment}\n"))
+    });
+    parse(&updated)?;
+    Ok(updated)
+}
+
+/// Removes a settings key, leaving the file untouched when it is absent.
+pub fn unset(source: &str, table: Option<&str>, key: &str) -> Result<String, CoreError> {
+    parse(source)?;
+    if !declared(source, table, key)? {
+        return Ok(source.to_owned());
+    }
+    let updated = rewrite(source, table, key, |_| None);
+    parse(&updated)?;
+    Ok(updated)
+}
+
+/// Replaces or deletes the line declaring `key` inside `table`.
+///
+/// Line-based rather than a parse-and-serialise round trip, which would
+/// discard every comment and reorder the file.
+fn rewrite(
+    source: &str,
+    table: Option<&str>,
+    key: &str,
+    replacement: impl Fn(&str) -> Option<String>,
+) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut current: Option<String> = None;
+    let mut done = false;
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if let Some(name) = header_name(trimmed) {
+            current = Some(name.to_owned());
+            output.push_str(line);
+            continue;
+        }
+        let in_table = match table {
+            Some(name) => current.as_deref() == Some(name),
+            None => current.is_none(),
+        };
+        let declares = trimmed
+            .split_once('=')
+            .is_some_and(|(name, _)| name.trim() == key)
+            && !trimmed.starts_with('#');
+        if !done && in_table && declares {
+            done = true;
+            if let Some(text) = replacement(line) {
+                output.push_str(&text);
+            }
+            continue;
+        }
+        output.push_str(line);
+    }
+    output
+}
+
+/// The table a `[name]` line opens, allowing a trailing comment; `None` for
+/// any other line.
+fn header_name(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('[')?;
+    let (name, after) = rest.split_once(']')?;
+    let after = after.trim();
+    (after.is_empty() || after.starts_with('#')).then(|| name.trim())
+}
+
+fn header_end(source: &str, name: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        offset += line.len();
+        if header_name(line.trim()) == Some(name) {
+            return Some(offset);
+        }
+    }
+    None
+}
+
+fn first_header_start(source: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        if line.trim_start().starts_with('[') {
+            return Some(offset);
+        }
+        offset += line.len();
+    }
+    None
+}
+
+fn settings_invalid(error: toml::de::Error) -> CoreError {
+    CoreError::new(
+        ExitClass::State,
+        "SETTINGS_INVALID",
+        error.to_string(),
+        "fix `$WT_HOME/config.toml`",
+    )
+}
+
+#[cfg(test)]
+mod declare_tests {
+    use super::*;
+
+    #[test]
+    fn a_table_key_is_inserted_under_its_header() {
+        let source = "[session]\nbackend = \"tmux\"\n";
+        let updated = declare(source, Some("session"), "agent", "\"claude\"").unwrap();
+        assert_eq!(
+            updated,
+            "[session]\nagent = \"claude\"\nbackend = \"tmux\"\n"
+        );
+        assert_eq!(
+            parse(&updated).unwrap().session.agent.as_deref(),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn a_missing_table_is_created() {
+        let updated = declare("", Some("session"), "agent", "\"codex\"").unwrap();
+        assert_eq!(updated, "[session]\nagent = \"codex\"\n");
+    }
+
+    #[test]
+    fn a_top_level_key_lands_above_the_first_table() {
+        let source = "[session]\nbackend = \"tmux\"\n";
+        let updated = declare(source, None, "trees_dir", "\"/w\"").unwrap();
+        assert_eq!(
+            updated, "trees_dir = \"/w\"\n[session]\nbackend = \"tmux\"\n",
+            "a top-level key appended at the end would belong to [session]"
+        );
+        assert_eq!(parse(&updated).unwrap().trees_dir.as_deref(), Some("/w"));
+    }
+
+    #[test]
+    fn a_top_level_key_in_a_table_free_file_is_appended() {
+        let updated = declare("# a note\n", None, "trees_dir", "\"/w\"").unwrap();
+        assert_eq!(updated, "# a note\ntrees_dir = \"/w\"\n");
+    }
+
+    #[test]
+    fn an_existing_key_is_left_exactly_as_written() {
+        let source = "# keep me\n[session]\nagent = \"codex\"  # and me\n";
+        assert_eq!(
+            declare(source, Some("session"), "agent", "\"claude\"").unwrap(),
+            source
+        );
+    }
+
+    #[test]
+    fn comments_and_ordering_survive() {
+        let source = "# top\n\n[ports]\nbase = 20000\n\n[session]\n# why\nbackend = \"tmux\"\n";
+        let updated = declare(source, Some("session"), "agent", "\"claude\"").unwrap();
+        assert!(updated.contains("# top"));
+        assert!(updated.contains("# why"));
+        assert!(updated.contains("base = 20000"));
+    }
+
+    #[test]
+    fn setting_replaces_a_value_a_person_chose() {
+        let source = "# top\ntrees_dir = \"/old\"\n\n[session]\nagent = \"claude\"  # why\n";
+        let updated = set(source, None, "trees_dir", "\"/new\"").unwrap();
+        assert!(updated.contains("trees_dir = \"/new\""));
+        assert!(!updated.contains("/old"));
+        assert!(updated.contains("# top"), "comments survive");
+        assert_eq!(parse(&updated).unwrap().trees_dir.as_deref(), Some("/new"));
+
+        let agent = set(&updated, Some("session"), "agent", "\"codex\"").unwrap();
+        assert!(agent.contains("agent = \"codex\"  # why"), "{agent:?}");
+        assert_eq!(
+            parse(&agent).unwrap().session.agent.as_deref(),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn setting_an_absent_key_declares_it() {
+        let updated = set("", Some("session"), "agent", "\"codex\"").unwrap();
+        assert_eq!(updated, "[session]\nagent = \"codex\"\n");
+    }
+
+    #[test]
+    fn unsetting_removes_only_the_named_key() {
+        let source = "trees_dir = \"/w\"\n[session]\nagent = \"claude\"\nattach = false\n";
+        let updated = unset(source, Some("session"), "agent").unwrap();
+        assert_eq!(updated, "trees_dir = \"/w\"\n[session]\nattach = false\n");
+        let parsed = parse(&updated).unwrap();
+        assert_eq!(parsed.session.agent, None);
+        assert_eq!(parsed.trees_dir.as_deref(), Some("/w"));
+    }
+
+    #[test]
+    fn unsetting_an_absent_key_changes_nothing() {
+        let source = "[session]\nattach = false\n";
+        assert_eq!(unset(source, Some("session"), "agent").unwrap(), source);
+    }
+
+    #[test]
+    fn a_rewrite_stays_inside_the_table_it_names() {
+        let source = "[ports]\nbase = 20000\n\n[session]\nattach = false\n";
+        let updated = set(source, Some("ports"), "base", "21000").unwrap();
+        assert!(updated.contains("base = 21000"));
+        assert!(
+            updated.contains("[session]\nattach = false"),
+            "another table is untouched: {updated:?}"
+        );
+        assert_eq!(parse(&updated).unwrap().ports.base, 21000);
+    }
+
+    #[test]
+    fn a_string_literal_round_trips_quotes_and_backslashes() {
+        for value in ["/w/\"odd\"\\dir", "it's", "plain", "a\nb"] {
+            let literal = string_literal(value);
+            let updated = set("", None, "trees_dir", &literal).unwrap();
+            assert_eq!(
+                parse(&updated).unwrap().trees_dir.as_deref(),
+                Some(value),
+                "{literal}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_with_a_trailing_comment_still_names_its_table() {
+        let source = "[session] # sessions\nagent = \"claude\"\n";
+        let updated = set(source, Some("session"), "agent", "\"codex\"").unwrap();
+        assert_eq!(
+            parse(&updated).unwrap().session.agent.as_deref(),
+            Some("codex")
+        );
+        let removed = unset(source, Some("session"), "agent").unwrap();
+        assert_eq!(parse(&removed).unwrap().session.agent, None);
+        let added = declare(source, Some("session"), "attach", "false").unwrap();
+        assert!(!parse(&added).unwrap().session.attach);
+    }
+
+    #[test]
+    fn an_inline_table_is_refused_rather_than_rewritten() {
+        let source = "session = { backend = \"tmux\" }\n";
+        let error = declare(source, Some("session"), "agent", "\"claude\"").unwrap_err();
+        assert_eq!(error.code.0, "SETTINGS_INVALID");
+    }
+
+    #[test]
+    fn a_value_that_would_not_parse_is_refused_before_it_is_written() {
+        assert!(declare("", Some("session"), "agent", "not-toml").is_err());
+    }
+}

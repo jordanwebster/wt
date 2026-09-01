@@ -1,8 +1,9 @@
 ---
 source: tests/human_transcripts.rs
+assertion_line: 282
 expression: normalized
 ---
-Doctor found 0 errors, 2 warnings, 6 notes
+Doctor found 0 errors, 2 warnings, 7 notes
   warning  BIN_DIR_MISSING repo - declared bin directory <ROOT>/repos/repo/bin is missing
   next     create the directory by running the build task
   warning  BIN_DIR_MISSING repo/work - declared bin directory <ROOT>/wt-home/trees/repo/work/bin is missing
@@ -17,5 +18,7 @@ Doctor found 0 errors, 2 warnings, 6 notes
   next     declare task.verify when lifecycle verification is desired
   note     SESSION_BACKEND sessions - session backend is tmux
   next     set `session.backend` in `$WT_HOME/config.toml` to change it
+  note     SHELL_INIT_MISSING shell - no shell startup file installs wt's PATH guard
+  next     run `wt setup`, or add `eval "$(wt shell-init <shell>)"` to your shell's rc file
   note     STATUS_CACHE_OFF repo - git's untracked cache is off, so each status scans the whole tree
   next     run `git config core.untrackedCache true` in this checkout (on macOS or Windows also `git config core.fsmonitor true`)

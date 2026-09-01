@@ -278,6 +278,136 @@ fn numeric_prefix(value: &str) -> u32 {
         .unwrap_or(0)
 }
 
+/// The tmux options `setup` needs to know about before it suggests anything
+/// (A76, §14.7).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EffectiveOptions {
+    pub default_terminal: Option<String>,
+    pub extended_keys: Option<String>,
+    pub terminal_features: Option<String>,
+    pub mouse: Option<String>,
+}
+
+/// Kills a probe server however the probe ends.
+///
+/// A server left behind by an early return would outlive the command and hold
+/// the user's plugins in memory, so the kill is a destructor rather than a
+/// step that a `?` can skip.
+struct ProbeServer {
+    program: OsString,
+    socket: String,
+    deadline: Duration,
+}
+
+impl Drop for ProbeServer {
+    fn drop(&mut self) {
+        let mut request = CommandRequest::new(self.program.clone());
+        request.args = proc::os_args(&["-L", &self.socket, "kill-server"]);
+        let _ = proc::capture(&request, self.deadline);
+        // tmux leaves the socket file behind, and this probe runs on every
+        // `doctor` with a tmux backend; one stale file per run would pile up.
+        for directory in socket_directories() {
+            let path = directory.join(&self.socket);
+            // Only ever a socket. `remove_path` recurses into a directory,
+            // and this path is predicted rather than observed: if anything
+            // else owns it, deleting its contents is data loss for a cleanup
+            // that was only ever cosmetic.
+            if matches!(
+                crate::fsx::path_kind(&path),
+                Ok(crate::fsx::PathKind::Other)
+            ) {
+                let _ = crate::fsx::remove_path(&path);
+            }
+        }
+    }
+}
+
+/// Where tmux keeps its sockets, following the same rules tmux itself uses.
+fn socket_directories() -> Vec<std::path::PathBuf> {
+    let uid = unsafe { libc::getuid() };
+    let mut directories = Vec::new();
+    if let Some(base) = std::env::var_os("TMUX_TMPDIR") {
+        directories.push(std::path::PathBuf::from(base).join(format!("tmux-{uid}")));
+    }
+    directories.push(std::path::PathBuf::from(format!("/tmp/tmux-{uid}")));
+    directories
+}
+
+/// Reads what a tmux configuration actually resolves to.
+///
+/// The values are read from a throwaway server on its own socket rather than
+/// from the file, because a configuration's effect is the product of its
+/// sourced fragments, its plugins and its ordering — none of which a textual
+/// reading of one file can see. The user's own `run-shell` lines execute, as
+/// they do at every tmux start, under this deadline.
+pub fn probe_effective(
+    program: impl Into<OsString>,
+    config: Option<&Path>,
+    deadline: Duration,
+) -> Result<EffectiveOptions> {
+    let program = program.into();
+    let socket = format!("wt-probe-{}", std::process::id());
+    let mut start = CommandRequest::new(program.clone());
+    let mut args = vec!["-L".to_owned(), socket.clone()];
+    if let Some(config) = config {
+        args.push("-f".to_owned());
+        args.push(config.to_string_lossy().into_owned());
+    }
+    // A detached session, not `start-server`: a server with no session exits
+    // as soon as its invocation ends, so every later query would find nothing
+    // running and report the configuration as empty.
+    args.push("new-session".to_owned());
+    args.push("-d".to_owned());
+    start.args = args.iter().map(OsString::from).collect();
+
+    let server = ProbeServer {
+        program: program.clone(),
+        socket: socket.clone(),
+        deadline,
+    };
+    let started = proc::capture(&start, deadline)?;
+    if !started.success() {
+        drop(server);
+        return Err(tmux_failed("start a configuration probe", &started));
+    }
+
+    // Queried one option at a time: scope differs between them, and a single
+    // dump does not reliably show an option left at its default.
+    let options = EffectiveOptions {
+        default_terminal: show(&program, &socket, "-sv", "default-terminal", deadline),
+        extended_keys: show(&program, &socket, "-sv", "extended-keys", deadline),
+        terminal_features: show(&program, &socket, "-sv", "terminal-features", deadline),
+        mouse: show(&program, &socket, "-gv", "mouse", deadline),
+    };
+    drop(server);
+    Ok(options)
+}
+
+fn show(
+    program: &OsString,
+    socket: &str,
+    scope: &str,
+    option: &str,
+    deadline: Duration,
+) -> Option<String> {
+    let mut request = CommandRequest::new(program.clone());
+    request.args = proc::os_args(&["-L", socket, "show", scope, option]);
+    let output = proc::capture(&request, deadline).ok()?;
+    if !output.success() {
+        return None;
+    }
+    // An array option such as `terminal-features` prints one entry per line;
+    // rejoining them with the separator tmux accepts keeps the value in the
+    // one form every reader parses.
+    let value = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+    (!value.is_empty()).then_some(value)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -340,5 +470,27 @@ mod tests {
     fn version_gate_finds_a_numeric_version_after_a_vendor_prefix() {
         let (_dir, tmux, _) = stub("#!/bin/sh\nprintf 'tmux next-3.4\\n'\n");
         assert_eq!(tmux.check_version().unwrap(), (3, 4));
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    #[test]
+    fn socket_cleanup_never_touches_a_directory() {
+        // The socket path is predicted from a pid, not observed. A directory
+        // there belongs to something else, and `remove_path` would delete it
+        // and everything under it.
+        let temp = tempfile::tempdir().unwrap();
+        let squatter = temp.path().join("wt-probe-1");
+        std::fs::create_dir_all(squatter.join("nested")).unwrap();
+        std::fs::write(squatter.join("nested/important"), b"keep me").unwrap();
+
+        let kind = crate::fsx::path_kind(&squatter).unwrap();
+        assert_eq!(kind, crate::fsx::PathKind::Directory);
+        assert!(
+            !matches!(kind, crate::fsx::PathKind::Other),
+            "the cleanup predicate must reject a directory"
+        );
+        assert!(squatter.join("nested/important").exists());
     }
 }

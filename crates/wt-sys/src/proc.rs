@@ -1117,6 +1117,52 @@ pub fn os_args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
+/// Runs a child with every standard stream inherited, handing the terminal
+/// over completely until it exits.
+///
+/// `setup` uses this for a package manager: the child may prompt for a
+/// password on the terminal, print for minutes, and redraw its own progress,
+/// none of which survives being relayed through a pipe (A76, §14.7).
+pub fn handover(request: &CommandRequest) -> Result<ChildStatus> {
+    let traced = trace_spawn(request, None)?;
+    let mut command = build_command(request, false);
+    command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let outcome = command
+        .spawn()
+        .map_err(|error| spawn_error(request, error))
+        .and_then(|mut child| {
+            child
+                .wait()
+                .map_err(io_error("wait for a handed-over child"))
+                .map(|status| ChildStatus {
+                    code: status.code(),
+                    signal: status.signal(),
+                })
+        });
+    traced.finish(match &outcome {
+        Ok(status) if status.code == Some(0) => crate::trace::Outcome::Code(0),
+        Ok(status) => crate::trace::Outcome::Code(status.code.unwrap_or(1)),
+        Err(_) => crate::trace::Outcome::Code(1),
+    });
+    outcome
+}
+
+/// The first executable named `program` on `PATH`.
+pub fn on_path(program: &str) -> Option<PathBuf> {
+    if program.contains('/') {
+        let path = PathBuf::from(program);
+        return executable(&path).then_some(path);
+    }
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|directory| directory.join(program))
+            .find(|candidate| executable(candidate))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

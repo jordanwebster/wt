@@ -23,6 +23,7 @@ pub(crate) fn run(context: &mut Context, args: Doctor) -> Result<Output, CoreErr
         "set `session.backend` in `$WT_HOME/config.toml` to change it",
     )];
     tooling_findings(context, &mut findings);
+    shell_init_finding(context, &mut findings);
     if wt_core::deactivate(&context.parent_env)?
         .report
         .activation_ignored
@@ -468,15 +469,19 @@ fn config_findings(
             has_existing_bin = true;
         }
     }
-    if (has_existing_bin || !effective.commands.is_empty())
+    // Only reported from inside a door, and only for that door's own tree
+    // (A76). Outside one the prefix is *expected* to be absent, and another
+    // label's prefix is expected to be absent even inside one.
+    if context.parent_env.get("WT_TARGET") == Some(&subject)
+        && (has_existing_bin || !effective.commands.is_empty())
         && !path_prefix_is_assembled(context, root, &effective)
     {
         findings.push(finding(
             Severity::Warn,
             "PATH_NOT_SHADOWED",
             &subject,
-            "the expected door prefix is not first on PATH",
-            "enter through a wt door or install the shell-init PATH guard",
+            "this door's prefix is not first on PATH; a shell startup file displaced it",
+            "install the shell-init guard with `wt setup`, or move the PATH edit above it",
         ));
     }
     if config
@@ -910,6 +915,55 @@ impl ResourceName for wt_core::resource::ResourceRecord {
     fn name(&self) -> &str {
         self.effective_snapshot().name.as_str()
     }
+}
+
+/// Reports the one environment fact nothing else can observe (A76): the
+/// shell guard is invisible from inside the door it breaks.
+///
+/// Info rather than warn: a guard sourced from a fragment file, or from a
+/// shell other than the ones wt knows, is a legitimate configuration this
+/// cannot tell from a fault.
+fn shell_init_finding(context: &Context, findings: &mut Vec<wt_core::doctor::Finding>) {
+    // The guard only matters where a name is claimed: without commands or a
+    // bin directory there is no prefix for an rc file to displace.
+    let claims = context
+        .registry
+        .trees
+        .iter()
+        .filter(|tree| tree.canonical)
+        .any(|tree| {
+            context
+                .load_config(tree)
+                .map(|config| !config.root.commands.is_empty() || !config.root.bin.is_empty())
+                .unwrap_or(false)
+        });
+    if !claims {
+        return;
+    }
+    let Some(home) = context.parent_env.get("HOME").map(std::path::PathBuf::from) else {
+        return;
+    };
+    // Every shell's rc file is checked rather than the running shell's: a
+    // guard anywhere is evidence the reader installed it, and this costs three
+    // file reads instead of a subprocess.
+    let installed = wt_core::setup::SHELLS.iter().any(|shell| {
+        wt_core::setup::rc_file(shell).is_some_and(|relative| {
+            wt_sys::fsx::read_string(&home.join(relative))
+                .ok()
+                .flatten()
+                .is_some_and(|contents| wt_core::setup::block_installed(&contents))
+        })
+    });
+    if installed {
+        return;
+    }
+    findings.push(finding(
+        Severity::Info,
+        "SHELL_INIT_MISSING",
+        "shell",
+        "no shell startup file installs wt's PATH guard",
+        "run `wt setup`, or add `eval \"$(wt shell-init <shell>)\"` to your shell's rc file",
+    ));
 }
 
 #[cfg(test)]
