@@ -1,8 +1,9 @@
 ---
 source: tests/human_transcripts.rs
-expression: "normalize(h, &output.stdout)"
+expression: normalized
 ---
 Created repo/work
   path    <ROOT>/wt-home/trees/repo/work
   branch  work
   sync    skipped
+build started  <ROOT>/wt-home/trees/repo/work/.wt/logs/wt-setup.log

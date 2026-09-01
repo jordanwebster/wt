@@ -8,7 +8,7 @@ expression: "normalize(value, &h.root)"
     "sessions": [
       {
         "closed": true,
-        "session": "wt_repo_canonical_be9ff5d9",
+        "session": "repo",
         "target": "repo"
       }
     ]

@@ -7,9 +7,11 @@ mod context;
 mod destroy;
 mod doctor;
 mod door;
+mod edit;
 mod env;
 mod exec;
 mod executor;
+mod forget;
 mod human;
 mod list;
 mod locks;
@@ -129,15 +131,17 @@ pub fn main(cli: Cli) -> i32 {
         Ok(mut output) => {
             if json {
                 if let Some(AfterRender::Build { target }) = output.after_render.take() {
-                    if let Err(error) = open::start_build(
+                    match open::start_build(
                         opened_context
                             .as_mut()
                             .expect("deferred actions require an open context"),
                         &target,
                     ) {
-                        output = output
-                            .with_notices([open::build_failure_notice(&target, &error)])
-                            .with_failure(error);
+                        Ok(build) => {
+                            output.data["build"] =
+                                serde_json::to_value(build).expect("build state always serializes");
+                        }
+                        Err(error) => output = output.with_failure(error),
                     }
                 }
             }
@@ -188,11 +192,12 @@ pub fn main(cli: Cli) -> i32 {
                             emit_session_warning(&target, &error);
                         }
                     }
-                    AfterRender::Build { target } => {
-                        if let Err(error) = open::start_build(context, &target) {
-                            return render_error(&command, json, color, error, Vec::new());
+                    AfterRender::Build { target } => match open::start_build(context, &target) {
+                        Ok(build) => println!("build started  {}", build.log),
+                        Err(error) => {
+                            return render_error(&command, json, color, error, Vec::new())
                         }
-                    }
+                    },
                     AfterRender::Attach { session } => {
                         if let Err(error) = open::attach(context, &session) {
                             return render_error(&command, json, color, error, Vec::new());
@@ -312,6 +317,10 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
                 .flatten();
             if let Some(path) = &status {
                 let _ = wt_sys::fsx::write_store(path, b"running\n");
+                // The recorded pid otherwise still names the finished
+                // supervisor, and a dead pid beside a `running` status reads
+                // as abandoned (A69) — for the whole foreground run.
+                record_build_pid(context, target.as_deref());
             }
             let result = run::run(context, args.into_run("build"));
             record_build_result(status.as_deref(), &result);
@@ -321,7 +330,9 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Shell(args) => shell::run(context, args),
         Command::Env(args) => env::run(context, args),
         Command::Open(args) => open::run(context, args),
+        Command::Edit(args) => edit::run(context, args),
         Command::Close(args) => close::run(context, args),
+        Command::Forget(args) => forget::run(context, args),
         Command::Remove(args) => remove::run(context, args),
         Command::Prune(args) => prune::run(context, args),
         Command::Destroy(args) => destroy::run(context, args),
@@ -334,6 +345,22 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::ShellInit(args) => shell_init::run(context, args),
         Command::Completions(args) => completions::run(context, args),
     }
+}
+
+fn record_build_pid(context: &Context, target: Option<&str>) {
+    let Ok(target) = context.resolve(target) else {
+        return;
+    };
+    let Ok(holder) = context.holder(target.to_string(), "build") else {
+        return;
+    };
+    let _ = context.mutate_state(&target, &holder, |state| {
+        if let Some(build) = state.build.as_mut() {
+            build.pid = std::process::id();
+            build.started = wt_sys::fsx::timestamp()?;
+        }
+        Ok(())
+    });
 }
 
 fn build_status_path(context: &Context, target: Option<&str>) -> Option<std::path::PathBuf> {

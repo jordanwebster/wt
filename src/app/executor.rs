@@ -1117,7 +1117,7 @@ fn refresh_node_declaration(context: &Context, door: &Door, node: &Node) -> Resu
             .env
             .get("WT_SELF")
             .cloned()
-            .unwrap_or_else(|| wt_core::resource::default_name(key, &door.tree.name_short)),
+            .expect("resource assembly always sets WT_SELF"),
         cwd_rel: node.cwd.clone(),
         exists: node
             .exists
@@ -1630,7 +1630,7 @@ fn node_environment(context: &Context, door: &Door, node: &Node) -> Result<EnvOu
     let resource_name = node.resource.as_ref().map(|key| {
         node.name
             .clone()
-            .unwrap_or_else(|| wt_core::resource::default_name(key, &door.tree.name_short))
+            .unwrap_or_else(|| wt_core::resource::default_name_template(key))
     });
     wt_core::assemble(EnvInputs {
         cfg: &effective,
@@ -1659,7 +1659,7 @@ fn expanded(command: &Command, assembled: &EnvOutput) -> Result<ExpandedCommand,
     };
     match command {
         Command::Shell(shell) => Ok(ExpandedCommand::Shell {
-            shell: shell.clone(),
+            shell: wt_core::template::expand(shell, &context)?,
         }),
         Command::Argv(argv) => argv
             .iter()

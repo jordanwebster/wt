@@ -52,8 +52,9 @@ pub struct VerifyState {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BuildState {
     pub started: String,
-    pub window: Option<String>,
     pub log: String,
+    #[serde(default)]
+    pub pid: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

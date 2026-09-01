@@ -9,6 +9,17 @@ use crate::cli::Adopt;
 use super::{door, executor, list, register, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreError> {
+    let meta = super::meta::parse_creation(&args.meta)?;
+    if let Some(agent) = args.agent.as_deref() {
+        if !context.settings.agents.contains_key(agent) {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "CONFIG_INVALID",
+                format!("agent `{agent}` is not configured"),
+                "choose a declared agent or configure it under `[agents]` in `$WT_HOME/config.toml`",
+            ));
+        }
+    }
     let path = wt_sys::fsx::canonicalize(&args.path)?;
     let git = context.git(&path)?;
     let common = wt_sys::fsx::canonicalize(&git.common_dir()?)?;
@@ -136,8 +147,8 @@ pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreErro
         name_short: coordinates.name_short,
         session_name: coordinates.session_name,
         created_at: now,
-        agent: None,
-        meta: std::collections::BTreeMap::new(),
+        agent: args.agent,
+        meta,
         source: TreeSource {
             kind: SourceKind::Adopted,
             branch: git.head_branch(&path)?,

@@ -287,8 +287,10 @@ git's own open is documented and not defended against. (Settles R5.)
 
 Repo-tied recipes may not reference tree-specific variables (already a
 validation rule); their snapshot `env` therefore excludes `WT_ROOT`,
-`WT_TARGET`, `WT_NAME*`, `WT_SLOT`, `WT_PORT_*`, `WT_SESSION`, `WT_BIN`,
-`PATH` and is compared for agreement on what remains. (Settles R6/S5.)
+`WT_TARGET`, `WT_NAME`, `WT_BRANCH`, `WT_BIN`, `WT_PATH_PREFIX`, and `PATH`,
+and is compared for agreement on what remains. A70 removed the older
+tree-specific exports rather than leaving inert stripping rules for them.
+(Settles R6/S5; export list updated by A70.)
 
 ## A29. Path-derived resource identities are shared by whatever occupies the path
 
@@ -660,7 +662,7 @@ model, so wt no longer copies build output at all.
 
 Each ecosystem supplies the sharing mechanism. Cargo 1.91+ separates
 `target-dir` outputs from `build-dir` intermediates. Both cargo adapter tools
-set `CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}"`, one
+set `CARGO_BUILD_BUILD_DIR = "{{home()}}/cache/cargo-build/{{label()}}"`, one
 path per repository. `CARGO_TARGET_DIR` remains unset so each tree's binary
 stays in its own `target/`, preserving A41. Repository and user `env` layers
 may override the adapter value by the ordinary merge rule. The split was
@@ -740,7 +742,7 @@ ones: capacity for a named lock is a machine fact expressed through the
 ordinary layer merge (A59), an exclusive resource occupies one slot of a wider
 arena (A60), and a machine-tied task is a resource whose arena is the host
 (A61). The stripping rule generalises: a repo-scoped snapshot carries no
-tree-specific keys (A28); a machine-scoped snapshot additionally carries no
+current tree-specific keys (A28/A70); a machine-scoped snapshot additionally carries no
 repo-specific keys (`WT_LABEL`, `WT_REPO`, and the `label()` / `repo()`
 functions). Rationale: three consumer requests — lock capacity, exclusive
 holders, machine-scoped onboarding — are one missing concept; naming the axis
@@ -846,8 +848,8 @@ and the consent gate cannot be built inside a recipe.
 docker running, an authenticated CLI, a base database every repository
 shares. Records live in `$WT_HOME/state/_machine.json`, keyed by
 `ScopedTask` exactly as `_repo.json` is; two labels declaring the same
-scoped task share the record. Declarations are stripped of tree- and
-repo-specific keys (A56), and the invoking context's stripped declaration is
+scoped task share the record. Declarations are stripped of the current tree-
+and repo-specific keys (A56/A70), and the invoking context's stripped declaration is
 effective until an instance is frozen — exactly as A31 reads A28 for repo
 scope, with no cross-repo agreement mechanism. Machine-tied templates and
 recipes may reference neither tree-specific nor repo-specific keys
@@ -910,7 +912,7 @@ directory also outlived every tree that fed it (77 GB observed for one
 repository, four trees), because nothing owned its lifecycle.
 
 Both cargo tools now set
-`CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}/${name_short()}"`:
+`CARGO_BUILD_BUILD_DIR = "{{home()}}/cache/cargo-build/{{label()}}/{{name_short()}}"`:
 one directory per tree, grouped under the label so attribution and reaping
 are directory listings. `name_short` is deterministic in `(label, name)`, so
 recreating an address readopts its cache warm. wt does not attempt to make
@@ -931,3 +933,179 @@ removal. `prune` reaps `CACHE_ORPHAN` entries — anything under
 `name_short`, which also migrates the retired per-repository layout — and
 `doctor` reports them. `list --disk` sizes each tree's cache as `cache_kb`,
 because the 77 GB accumulated precisely while attributed to nothing.
+
+## A65. Every `removed: false` carries its reason
+
+`wt remove` resolves addresses by the same §3.2 rules as every other verb. An
+unresolvable address is `NOT_FOUND` (3) with the ordinary candidate remedy. The
+one idempotent exception is an explicit `label/name` with no live tree and a
+matching tombstone: it exits 0 with `removed: false` and an `ALREADY_REMOVED`
+info notice. Declining the work-loss prompt likewise exits 0 with
+`removed: false` and a `REMOVE_DECLINED` info notice naming the target and
+saying that nothing changed. Human output states these reasons.
+
+The old parser silently interpreted a bare tree name as a label and returned
+an unexplained success when that fabricated target was absent. Shared address
+resolution makes removal agree with the rest of the CLI, while the narrowly
+tombstone-backed exception preserves safe script idempotence without hiding a
+mistyped or contextless address.
+
+## A66. One template syntax applies to every templated string
+
+`{{name}}`, `{{fn()}}`, and `{{ports.<name>}}` are the sole evaluation forms.
+Every `{{` begins an expression, expressions contain no whitespace, and a
+malformed expression or an unknown name outside the vars DAG is
+`CONFIG_INVALID` at its source location. The function set, vars DAG (including
+`VARS_UNKNOWN` for an unknown dependency), and port lookup semantics are
+unchanged. Shell-form
+`run`, `exists`, and `destroy` recipes are now templated before `sh -c`, with
+substitutions inserted verbatim; argv elements continue to be templated
+independently. Path-valued shell substitutions therefore need shell quoting,
+or the recipe should use argv form.
+
+Dollar signs have no meaning to wt. `${...}`, `$NAME`, and `$$` pass through as
+literal text, and the legacy `$WT_*` spelling hints and bare-name refusal are
+deleted. A `files` entry may set `template = false` (default true) to render its
+content or source verbatim while preserving hash ownership, markers, and mode.
+This is the opt-out for Jinja, Helm, GitHub Actions, and other formats that own
+`{{`; literal `{{` in any non-file template remains unsupported, an accepted
+limitation.
+
+Shell recipes have no `template = false` opt-out, so literal Go-template
+output such as Docker `--format '{{.State.Status}}'` cannot appear directly in
+a shell-string recipe; use argv form or splice the braces through shell
+variables, for example `b='{{' e='}}'; docker inspect --format
+"${b}.State.Status${e}"`.
+
+This supersedes A44's `${...}`/`$$` syntax and never-template-shell rule, and
+the untouched-shell clause in A58; A44's distinction between declared
+constants, functions, and port lookups and A58's argument-forwarding behavior
+remain in force. The old design put two rules on either side of the same seam:
+a declared value in a shell recipe could silently expand to empty in the shell,
+while a rendered shell or Compose file needed a wt-specific dollar escape.
+Using syntax disjoint from the shell gives every string one rule and leaves `$`
+entirely to the shell or rendered format.
+
+## A67. Session names are sanitised target strings
+
+For a new allocation, `session_name` is the target's display form — `label` for
+the canonical tree and `label/name` otherwise — with `.` and `:` mapped to `_`.
+There is no `wt_` prefix, truncation, or hash fallback. A collision with any
+live or tombstoned session name is `IDENTITY_COLLISION` with the existing
+choose-another-tree-name remedy. Existing persisted names and tombstone
+inheritance are untouched. Every tmux operation addressing a target uses
+tmux's `=name` exact-match form, because an unadorned target prefix-matches.
+
+This supersedes the §3.1 hashed `session_name` formula. A collision now means
+two display names differ only where tmux cannot preserve their punctuation; it
+is rare enough that refusing the ambiguity is clearer than hiding it behind a
+generated suffix.
+
+## A68. `open` is universal and the canonical tree is an anchor
+
+With `session.backend = "none"`, a per-tree `open` performs the ordinary door
+and execs the same interactive shell program, arguments, environment, and cwd
+as `wt shell`; `open --no-attach` is an exit-zero no-op with a notice because
+there is no session to provision, while `open --agent X` refuses with a remedy
+naming `session.backend = "tmux"`. `close` is an exit-zero no-op carrying
+`closed:false` and a sessions-disabled notice. `open --all` remains tmux-only
+and tells callers to open trees individually otherwise. On tmux it skips
+canonical trees: the canonical checkout is an explicit anchor, not another
+fleet session.
+
+The `session.agent` default likewise does not select an agent for an explicit
+canonical open. An explicit `--agent` works there, and a recorded agent resumes
+as before. The attachment predicate, startup observation window, and
+agent-to-shell wrapper are unchanged. This supersedes §9.4's
+`SESSION_DISABLED` refusal for per-tree open and close.
+
+## A69. Automatic build has a backend-independent detached supervisor
+
+After a tree becomes ready, `new` launches its effective `build` task through a
+setsid/double-fork supervisor on both backends. The supervisor invokes the
+ordinary task path, so `needs`, locks, environment assembly, logging, and
+foreground `wt build` behavior remain one implementation. Its pid is recorded
+in `BuildState`. It writes `running` before launch and atomically replaces the
+status with `ok` or `failed` after the originating CLI has exited. Human output
+reports that the build started and names its log; JSON carries
+`{started, log, pid}` and never waits. A `running` status with a dead recorded
+pid is abandoned: doctor warns `BUILD_ABANDONED` with a `wt build <target>`
+remedy, list/status report `abandoned`, and an owned-command shim uses the
+ordinary not-built refusal rather than claiming that the build is in progress.
+A foreground `wt build` that resets the status to `running` records its own
+pid in the same step, so a live foreground run is never judged against the
+finished supervisor's dead pid.
+
+Build failure is subsequently surfaced by `status`, `doctor`, and owned-command
+shims. The tree state contains no window field and tmux owns no setup window.
+This supersedes A47's window mechanism and synchronous none-backend build;
+A47's automatic task choice, `--no-build` behavior, and task-graph rationale
+remain in force.
+
+## A70. Exported environment separates interface from mechanism
+
+The stable interface is `WT_TARGET`, `WT_LABEL`, `WT_NAME`, `WT_ROOT`,
+`WT_REPO`, `WT_HOME`, and `WT_BRANCH`. The mechanism tier —
+`WT_ACTIVATION`, `WT_PATH_PREFIX`, `WT_BIN`, `WT_SELF`, and `WT_TASK` — may
+change as door implementation changes. This supersedes the previous §5.5
+export list: `WT_SESSION`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, and `WT_SLOT` are
+deleted exports. Snapshot minimisation strips the remaining tree-specific keys,
+including `WT_BRANCH`, at repo and machine scope as appropriate.
+
+Derivations belong to template functions such as `{{name_snake()}}` and
+`{{name_short()}}`, which remain. A session name is redundant with the target
+after A67; a script addressing its own pane has tmux's `$TMUX_PANE`, and fleet
+lookup belongs through `wt list --json`. Shell initialisation therefore keeps
+completion and the PATH guard, removes the `wtcd` and `wtsh` helpers, and adds
+a guarded `(<target>) ` prompt prefix that is inert outside a door. The built-in
+Claude start recipe names the bare tree with
+`["claude", "--name", "{{name()}}"]`.
+
+## A71. Editing is a door
+
+`wt edit [target]` enters the ordinary door and replaces wt with an editor at
+the tree root. It resolves the command from the templated settings `editor`
+key, then verbatim `$VISUAL`, then verbatim `$EDITOR`; no value is `EDITOR_UNSET`, with a remedy
+that names `editor`. Like `exec` and `shell`, it is a passthrough door: the
+editor receives the full assembled environment and child status, while
+`--json` is refused with `JSON_UNSUPPORTED`. Terminal editors and cold GUI
+launches therefore see the tree exactly as tasks do. A GUI command that merely
+forwards to an existing process cannot change that process's environment;
+run configurations must use `wt exec`, or integrated terminals `wt shell`.
+Rationale: editing is the remaining everyday entrance into a worktree, and an
+editor that starts outside the door silently chooses the wrong binaries,
+ports, and rendered files.
+
+## A72. A worktree can outlive wt's adoption of it
+
+`wt forget <target> [--yes]` removes wt's records and owned artifacts for one
+live non-canonical tree without touching its directory, branch, or git
+worktree registration. Canonical trees use `unregister`. Resource records,
+live sessions, and door holders refuse with remedies to destroy or remove,
+close, and wait respectively. Consent is identical to `unregister`, because
+`.wt/` may contain application data: a terminal prompts, non-interactive use
+requires `--yes`, and a declined prompt exits successfully with
+`forgotten:false` and no mutation. Hash-owned rendered files and `.wt/` are
+cleaned, exclude entries and state are removed, and the registry entry becomes
+a tombstone with reason `forgotten`. Rationale: adoption can attach the wrong
+name or policy to a perfectly valid worktree; correcting that record must not
+pretend the checkout itself is disposable.
+
+## A73. Adoption and the command surface describe actual intent
+
+`adopt` accepts the same repeatable metadata assignments as `new`, plus a
+declared `--agent`; it records both without starting anything. A recorded
+agent makes the first `open` use the resume recipe, preserving the fact that
+an adopted tree already has history. `rm` and `ls` are the primary documented
+spellings while `remove` and `list` remain visible aliases. Help is ordered by
+intent — Everyday, Setup, Working inside a tree, Upkeep — and exposes the
+`test`, `lint`, `fmt`, and `build` run aliases. Human `ls --meta <key>` adds the
+selected value as a fleet column; JSON continues carrying the complete map.
+The JSON envelope keeps the canonical long command names `list` and `remove`
+regardless of which accepted spelling was typed; help spelling is a human
+interface, while the envelope is the stable machine interface.
+Finally, when a repo-scope configuration key is misplaced at settings top
+level, the error tells the user to put it below `[repos.<label>]`. Rationale:
+the terse verbs are the daily interface, adoption should preserve the same
+fleet facts as creation, and configuration errors should point across the
+scope boundary instead of merely saying that a familiar key is unknown.

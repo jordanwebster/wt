@@ -16,6 +16,7 @@ if [ "${1:-}" = "-V" ]; then
 fi
 if [ "${1:-}" = "has-session" ]; then
     session=${3:-}
+    session=${session#=}
     grep -Fqx "session=$session" "$state" 2>/dev/null
     exit $?
 fi

@@ -64,7 +64,8 @@ impl Tmux {
 
     /// Runs `has-session`, mapping tmux's ordinary absent status to false.
     pub fn has_session(&self, session: &str) -> Result<bool> {
-        let output = self.status(&["has-session", "-t", session])?;
+        let exact = exact_target(session);
+        let output = self.status(&["has-session", "-t", &exact])?;
         match output.child.code {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
@@ -113,7 +114,7 @@ impl Tmux {
             "pipe-pane",
             "-o",
             "-t",
-            session,
+            &exact_pane_target(session),
             &format!("cat > {}", shell_quote(capture)),
         ]));
         let output = proc::capture(&request, self.deadline).map_err(tool_error)?;
@@ -145,62 +146,25 @@ impl Tmux {
         }
     }
 
-    pub fn new_window(
-        &self,
-        session: &str,
-        name: &str,
-        cwd: &Path,
-        env: &BTreeMap<String, String>,
-        command: &[OsString],
-    ) -> Result<()> {
-        let Some((program, args)) = command.split_first() else {
-            return Err(CoreError::new(
-                ExitClass::State,
-                "CONFIG_INVALID",
-                "tmux window command is empty",
-                "configure a build task",
-            ));
-        };
-        let mut request = CommandRequest::new(&self.program);
-        request.env = self.env.clone();
-        request.args = proc::os_args(&["new-window", "-d", "-t", session, "-n", name, "-c"]);
-        request.args.push(cwd.as_os_str().to_owned());
-        for (key, value) in env {
-            request.args.push(OsString::from("-e"));
-            request.args.push(OsString::from(format!("{key}={value}")));
-        }
-        request.args.push(OsString::from("--"));
-        request.args.push(program.clone());
-        request.args.extend(args.iter().cloned());
-        request.args.push(OsString::from(";"));
-        request.args.extend(proc::os_args(&[
-            "set-option",
-            "-w",
-            "-t",
-            &format!("{session}:{name}"),
-            "remain-on-exit",
-            "on",
-        ]));
-        let output = proc::capture(&request, self.deadline).map_err(tool_error)?;
-        success(output, "create tmux window").map(|_| ())
-    }
-
     /// Kills one session; callers use `has_session` for idempotence.
     pub fn kill_session(&self, session: &str) -> Result<()> {
-        let output = self.status(&["kill-session", "-t", session])?;
+        let exact = exact_target(session);
+        let output = self.status(&["kill-session", "-t", &exact])?;
         success(output, "kill tmux session").map(|_| ())
     }
 
     /// Switches the current tmux client to the named session.
     pub fn switch_client(&self, session: &str) -> Result<()> {
-        let output = self.status(&["switch-client", "-t", session])?;
+        let exact = exact_target(session);
+        let output = self.status(&["switch-client", "-t", &exact])?;
         success(output, "switch tmux client").map(|_| ())
     }
 
     /// Replaces wt with an attaching tmux client, preserving terminal semantics.
     pub fn attach_session(&self, session: &str) -> Result<()> {
+        let exact = exact_target(session);
         let error = Command::new(&self.program)
-            .args(["attach-session", "-t", session])
+            .args(["attach-session", "-t", &exact])
             .exec();
         Err(tool_error(CoreError::new(
             ExitClass::External,
@@ -216,6 +180,14 @@ impl Tmux {
         request.env = self.env.clone();
         proc::capture(&request, self.deadline).map_err(tool_error)
     }
+}
+
+fn exact_target(session: &str) -> String {
+    format!("={session}")
+}
+
+fn exact_pane_target(session: &str) -> String {
+    format!("={session}:")
 }
 
 fn shell_quote(path: &Path) -> String {
@@ -335,6 +307,18 @@ mod tests {
         assert!(args.contains("-c\n/tmp/tree\n-e\nWT_HOME=/tmp/wt-home\n"));
         assert!(args.contains("/bin/sh\n-c\n"));
         assert!(args.contains("\nwt\nexec\n;\npipe-pane\n"));
+        assert!(args.contains("pipe-pane\n-o\n-t\n=wt_test:\n"));
+    }
+
+    #[test]
+    fn session_targets_are_exact_matches() {
+        let script = "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/record\"\nexit 1\n";
+        let (_dir, tmux, record) = stub(script);
+        assert!(!tmux.has_session("repo/work").unwrap());
+        assert_eq!(
+            fs::read_to_string(record).unwrap(),
+            "has-session\n-t\n=repo/work\n"
+        );
     }
 
     #[test]

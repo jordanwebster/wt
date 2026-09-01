@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -10,15 +11,60 @@ use wt_core::report::{
 use wt_core::settings::SessionBackend;
 use wt_core::{CoreError, ExitClass};
 
-use crate::cli::Open;
+use crate::cli::{Open, ShellDoor};
 
 use super::{door, shell, AfterRender, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Open) -> Result<Output, CoreError> {
     let backend_notice = super::register::resolve_session_backend(context)?;
-    require_tmux_backend(context)?;
+    if context.settings.session.backend == SessionBackend::None {
+        if args.all {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "OPEN_ALL_REQUIRES_TMUX",
+                "`wt open --all` requires the tmux session backend",
+                "open trees individually with `wt open <target>`",
+            ));
+        }
+        if args.agent.is_some() {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "AGENT_REQUIRES_TMUX",
+                "`wt open --agent` requires a session backend",
+                "set `session.backend = \"tmux\"` in `$WT_HOME/config.toml` and retry",
+            ));
+        }
+        if args.no_attach {
+            context.resolve(args.target.as_deref())?;
+            let mut output = Output::data(SessionsData {
+                sessions: Vec::new(),
+            })?
+            .with_notices([Notice {
+                level: NoticeLevel::Info,
+                code: "SESSIONS_DISABLED".to_owned(),
+                subject: args.target.clone(),
+                message: "sessions are disabled; nothing was provisioned".to_owned(),
+            }]);
+            if let Some(notice) = backend_notice {
+                output = output.with_notices([notice]);
+            }
+            return Ok(output);
+        }
+        return shell::run(
+            context,
+            ShellDoor {
+                target: args.target,
+            },
+        );
+    }
     let trees = if args.all {
-        context.registry.trees.clone()
+        context
+            .registry
+            .trees
+            .iter()
+            .filter(|tree| !tree.canonical)
+            .cloned()
+            .collect()
     } else {
         let target = context.resolve(args.target.as_deref())?;
         vec![context.tree(&target)?]
@@ -75,12 +121,22 @@ pub(crate) fn open_new_after_summary(
         })
         .expect("opening one tree produces one session");
     if build {
-        start_build(context, &target.to_string())?;
+        match start_build(context, &target.to_string()) {
+            Ok(build) => println!("build started  {}", build.log),
+            Err(error) => eprintln!(
+                "wt: BUILD_START_FAILED — automatic build for {target} did not start: {}; remedy: {}",
+                error.message, error.remedy
+            ),
+        }
+        let _ = std::io::stdout().flush();
     }
     attach(context, &session.name)
 }
 
-pub(crate) fn start_build(context: &mut Context, target: &str) -> Result<(), CoreError> {
+pub(crate) fn start_build(
+    context: &mut Context,
+    target: &str,
+) -> Result<wt_core::lifecycle::BuildState, CoreError> {
     let target = context.resolve(Some(target))?;
     let tree = context.tree(&target)?;
     let logs = Path::new(tree.path.as_str()).join(".wt/logs");
@@ -88,18 +144,7 @@ pub(crate) fn start_build(context: &mut Context, target: &str) -> Result<(), Cor
     let log = logs.join("wt-setup.log");
     let status = Path::new(tree.path.as_str()).join(".wt/build.status");
     wt_sys::fsx::write_store(&status, b"running\n")?;
-    let window =
-        (context.settings.session.backend == SessionBackend::Tmux).then(|| "wt:setup".to_owned());
-    let holder = context.holder(target.to_string(), "build")?;
-    context.mutate_state(&target, &holder, |state| {
-        state.build = Some(wt_core::lifecycle::BuildState {
-            started: wt_sys::fsx::timestamp()?,
-            window: window.clone(),
-            log: log.to_string_lossy().into_owned(),
-        });
-        Ok(())
-    })?;
-
+    let started = wt_sys::fsx::timestamp()?;
     let running_binary = std::env::current_exe().map_err(|error| {
         CoreError::new(
             ExitClass::Internal,
@@ -108,48 +153,9 @@ pub(crate) fn start_build(context: &mut Context, target: &str) -> Result<(), Cor
             "retry and report this wt bug if it repeats",
         )
     })?;
-    if context.settings.session.backend == SessionBackend::Tmux {
-        let inner = vec![
-            running_binary.clone().into_os_string(),
-            OsString::from("exec"),
-            OsString::from("--no-gate"),
-            OsString::from(target.to_string()),
-            OsString::from("--"),
-            running_binary.into_os_string(),
-            OsString::from("build"),
-            OsString::from(target.to_string()),
-        ];
-        let env = [
-            (
-                "WT_HOME".to_owned(),
-                context.home.to_string_lossy().into_owned(),
-            ),
-            (
-                "WT_BUILD_LOG".to_owned(),
-                log.to_string_lossy().into_owned(),
-            ),
-            (
-                "WT_BACKGROUND_BUILD_STATUS".to_owned(),
-                status.to_string_lossy().into_owned(),
-            ),
-        ]
-        .into_iter()
-        .collect();
-        let launched = tmux(context).new_window(
-            &tree.session_name,
-            "wt:setup",
-            Path::new(tree.path.as_str()),
-            &env,
-            &inner,
-        );
-        if launched.is_err() {
-            let _ = wt_sys::fsx::write_store(&status, b"failed\n");
-        }
-        return launched;
-    }
-
     let mut request = wt_sys::proc::CommandRequest::new(running_binary);
     request.args = wt_sys::proc::os_args(&["build", &target.to_string()]);
+    request.cwd = Some(Path::new(tree.path.as_str()).to_path_buf());
     request.env.insert(
         "WT_BUILD_LOG".to_owned(),
         log.to_string_lossy().into_owned(),
@@ -165,25 +171,20 @@ pub(crate) fn start_build(context: &mut Context, target: &str) -> Result<(), Cor
         "WT_BACKGROUND_BUILD_STATUS".to_owned(),
         status.to_string_lossy().into_owned(),
     );
-    let output = match wt_sys::proc::run(&request, None, None, wt_sys::proc::Tee::Inherit) {
-        Ok(output) => output,
-        Err(error) => {
-            let _ = wt_sys::fsx::write_store(&status, b"failed\n");
-            return Err(error);
-        }
+    let pid = wt_sys::proc::spawn_detached(&request).inspect_err(|_| {
+        let _ = wt_sys::fsx::write_store(&status, b"failed\n");
+    })?;
+    let build = wt_core::lifecycle::BuildState {
+        started,
+        log: log.to_string_lossy().into_owned(),
+        pid,
     };
-    if output.success() {
-        wt_sys::fsx::write_store(&status, b"ok\n")?;
+    let holder = context.holder(target.to_string(), "build")?;
+    context.mutate_state(&target, &holder, |state| {
+        state.build = Some(build.clone());
         Ok(())
-    } else {
-        wt_sys::fsx::write_store(&status, b"failed\n")?;
-        Err(CoreError::new(
-            ExitClass::ChildFailed,
-            "TASK_FAILED",
-            format!("background build exited {}", output.mapped_exit()),
-            format!("inspect {}", log.display()),
-        ))
-    }
+    })?;
+    Ok(build)
 }
 
 pub(crate) fn should_attach(context: &Context, no_attach: bool) -> bool {
@@ -221,18 +222,6 @@ pub(crate) fn attach(context: &Context, session: &str) -> Result<(), CoreError> 
     } else {
         tmux.attach_session(session)
     }
-}
-
-pub(crate) fn require_tmux_backend(context: &Context) -> Result<(), CoreError> {
-    if context.settings.session.backend == SessionBackend::None {
-        return Err(CoreError::new(
-            ExitClass::State,
-            "SESSION_DISABLED",
-            "`session.backend` is `none`",
-            "set `session.backend = \"tmux\"` in `$WT_HOME/config.toml`",
-        ));
-    }
-    Ok(())
 }
 
 fn open_trees(
@@ -305,7 +294,7 @@ fn open_tree(
     let mut created = false;
     let mut reported_agent = tree.agent.clone();
     if !existing {
-        let launch = launch_command(context, &tree, agent_override)?;
+        let launch = launch_command(context, &tree, &gate.env, agent_override)?;
         let running_binary = std::env::current_exe().map_err(|error| {
             CoreError::new(
                 ExitClass::Internal,
@@ -326,7 +315,7 @@ fn open_tree(
         wt_sys::fsx::create_private_dir(&capture_dir)?;
         let capture = capture_dir.join(format!(
             "session-{}-{}.log",
-            tree.session_name,
+            tree.session_name.replace('/', "_"),
             std::process::id()
         ));
         if let Err(error) = tmux.new_session(
@@ -386,18 +375,6 @@ pub(crate) fn session_failure_notice(target: &str, error: &CoreError) -> Notice 
     }
 }
 
-pub(crate) fn build_failure_notice(target: &str, error: &CoreError) -> Notice {
-    Notice {
-        level: NoticeLevel::Warn,
-        code: "BUILD_FAILED".to_owned(),
-        subject: Some(target.to_owned()),
-        message: format!(
-            "automatic build for {target} failed: {}; run `wt build {target}` to retry",
-            error.message
-        ),
-    }
-}
-
 struct Launch {
     argv: Vec<OsString>,
     agent: Option<String>,
@@ -407,16 +384,19 @@ struct Launch {
 fn launch_command(
     context: &Context,
     tree: &TreeRec,
+    assembled: &wt_core::env::EnvOutput,
     agent_override: Option<&str>,
 ) -> Result<Launch, CoreError> {
     if let Some(agent) = agent_override {
-        return agent_launch(context, agent, false, true);
+        return agent_launch(context, assembled, agent, false, true);
     }
     if let Some(agent) = tree.agent.as_deref() {
-        return agent_launch(context, agent, true, false);
+        return agent_launch(context, assembled, agent, true, false);
     }
-    if let Some(agent) = context.settings.session.agent.as_deref() {
-        return agent_launch(context, agent, false, true);
+    if !tree.canonical {
+        if let Some(agent) = context.settings.session.agent.as_deref() {
+            return agent_launch(context, assembled, agent, false, true);
+        }
     }
     Ok(Launch {
         argv: shell::command_argv(context),
@@ -427,6 +407,7 @@ fn launch_command(
 
 fn agent_launch(
     context: &Context,
+    assembled: &wt_core::env::EnvOutput,
     agent: &str,
     resume: bool,
     record: bool,
@@ -457,7 +438,7 @@ fn agent_launch(
         )),
         OsString::from("wt-agent"),
     ];
-    argv.extend(command_argv(command));
+    argv.extend(command_argv(command, assembled)?);
     Ok(Launch {
         argv,
         agent: Some(agent.to_owned()),
@@ -476,14 +457,24 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r#"'"'"'"#))
 }
 
-fn command_argv(command: &Command) -> Vec<OsString> {
+fn command_argv(
+    command: &Command,
+    assembled: &wt_core::env::EnvOutput,
+) -> Result<Vec<OsString>, CoreError> {
+    let template = wt_core::template::Context {
+        vars: &assembled.vars,
+        functions: &assembled.functions,
+    };
     match command {
-        Command::Argv(argv) => argv.iter().map(OsString::from).collect(),
-        Command::Shell(shell) => vec![
+        Command::Argv(argv) => argv
+            .iter()
+            .map(|value| wt_core::template::expand(value, &template).map(OsString::from))
+            .collect(),
+        Command::Shell(shell) => Ok(vec![
             OsString::from("sh"),
             OsString::from("-c"),
-            OsString::from(shell),
-        ],
+            OsString::from(wt_core::template::expand(shell, &template)?),
+        ]),
     }
 }
 

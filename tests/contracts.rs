@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use common::Harness;
 use predicates::prelude::*;
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 const BASIC: &str = r#"
 ports = ["http"]
 [env]
-APP_PORT = "${ports.http}"
+APP_PORT = "{{ports.http}}"
 [files.".wt/generated"]
-content = "port=${ports.http}"
+content = "port={{ports.http}}"
 [task.hello]
 run = "printf hello"
 "#;
@@ -25,6 +26,21 @@ fn configure_backend_none(h: &Harness) {
         &h.home.join("config.toml"),
         &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
     );
+}
+
+fn wait_for_text(path: &Path, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if wt_sys::fsx::read_string(path).unwrap().as_deref() == Some(expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} never became {expected:?}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 const RESOURCE: &str = r#"
@@ -43,6 +59,7 @@ fn register_and_idempotence_have_envelopes() {
     assert_eq!(first["command"], "register");
     assert_eq!(first["data"]["registered"], true);
     assert_eq!(first["data"]["tree"]["phase"], "ready");
+    assert_eq!(first["data"]["tree"]["session_name"], "repo");
     let second = h.register(&repo);
     assert_eq!(second["data"]["registered"], false);
 }
@@ -52,7 +69,9 @@ fn truth_and_inspection_verbs_match_the_registered_tree() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
     h.register(&repo);
-    assert_eq!(h.json(&["list"])["data"]["trees"][0]["target"], "repo");
+    let list = h.json(&["ls"]);
+    assert_eq!(list["command"], "list");
+    assert_eq!(list["data"]["trees"][0]["target"], "repo");
     assert_eq!(h.json(&["status", "repo"])["data"]["phase"], "ready");
     assert_eq!(
         h.json(&["path", "repo"])["data"]["path"],
@@ -69,6 +88,68 @@ fn truth_and_inspection_verbs_match_the_registered_tree() {
     assert_eq!(h.json(&["config", "repo"])["data"]["target"], "repo");
     assert_eq!(h.json(&["locks", "repo"])["data"]["locks"][0]["level"], 1);
     assert_eq!(h.json(&["doctor", "repo"])["command"], "doctor");
+}
+
+#[test]
+fn phase_3_identity_and_environment_surface_are_exact() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo("repo", "");
+    h.register(&repo);
+    let created = h.json(&["new", "repo/feature.one", "--no-sync", "--no-open"]);
+    assert_eq!(created["data"]["tree"]["session_name"], "repo/feature_one");
+
+    let env = h.json(&["env", "repo/feature.one"])["data"]["env"]
+        .as_object()
+        .unwrap()
+        .clone();
+    for key in [
+        "WT_TARGET",
+        "WT_LABEL",
+        "WT_NAME",
+        "WT_ROOT",
+        "WT_REPO",
+        "WT_HOME",
+        "WT_BRANCH",
+        "WT_ACTIVATION",
+        "WT_PATH_PREFIX",
+        "WT_BIN",
+    ] {
+        assert!(env.contains_key(key), "missing {key}");
+    }
+    for key in ["WT_SESSION", "WT_NAME_SNAKE", "WT_NAME_SHORT", "WT_SLOT"] {
+        assert!(!env.contains_key(key), "deleted export {key} is present");
+    }
+
+    let collision = Harness::new();
+    configure_backend_none(&collision);
+    let dotted = collision.repo("dotted", "");
+    collision
+        .wt()
+        .args([
+            "register",
+            dotted.to_str().unwrap(),
+            "--label",
+            "a.b",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let underscored = collision.repo("underscored", "");
+    let output = collision
+        .wt()
+        .args([
+            "register",
+            underscored.to_str().unwrap(),
+            "--label",
+            "a_b",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    let refusal: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refusal["error"]["code"], "IDENTITY_COLLISION");
 }
 
 #[test]
@@ -124,6 +205,12 @@ fn section_4_1_tree_metadata_sets_lists_unsets_and_round_trips() {
         .unwrap();
     assert_eq!(work["meta"], updated["data"]["meta"]);
     h.wt()
+        .args(["ls", "--meta", "ticket"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ticket"))
+        .stdout(predicate::str::contains("ABC-124"));
+    h.wt()
         .args(["status", "repo/work"])
         .assert()
         .success()
@@ -143,6 +230,277 @@ fn section_4_1_tree_metadata_sets_lists_unsets_and_round_trips() {
         stored.meta,
         serde_json::from_value(updated["data"]["meta"].clone()).unwrap()
     );
+}
+
+#[test]
+fn edit_is_a_root_cwd_passthrough_door_with_documented_resolution() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    let port = NEXT_ISOLATED_PORT.fetch_add(32, Ordering::Relaxed);
+    common::write(
+        &h.home.join("config.toml"),
+        &format!("editor=['sh','-c','printf \"%s|%s|%s\" \"$PWD\" \"$WT_TARGET\" \"{{{{root()}}}}\"']\n[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
+    );
+    h.register(&repo);
+    let expected_root = std::fs::canonicalize(&repo).unwrap();
+    h.wt()
+        .env("VISUAL", "false")
+        .env("EDITOR", "false")
+        .args(["edit", "repo"])
+        .assert()
+        .success()
+        .stdout(format!(
+            "{}|repo|{}",
+            expected_root.display(),
+            expected_root.display()
+        ));
+
+    let output = h.wt().args(["edit", "repo", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let refusal: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refusal["error"]["code"], "JSON_UNSUPPORTED");
+
+    common::write(
+        &h.home.join("config.toml"),
+        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n"),
+    );
+    h.wt()
+        .env("VISUAL", "printf visual")
+        .env("EDITOR", "printf editor")
+        .args(["edit", "repo"])
+        .assert()
+        .success()
+        .stdout("visual");
+    h.wt()
+        .env("EDITOR", "printf editor")
+        .args(["edit", "repo"])
+        .assert()
+        .success()
+        .stdout("editor");
+    h.wt()
+        .env("EDITOR", "printf '{{literal}}'")
+        .args(["edit", "repo"])
+        .assert()
+        .success()
+        .stdout("{{literal}}");
+    h.wt()
+        .args(["edit", "repo"])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("EDITOR_UNSET"))
+        .stderr(predicate::str::contains("`editor` settings key"));
+}
+
+#[test]
+fn adopt_records_metadata_and_a_validated_agent_for_first_open_resume() {
+    let h = Harness::new();
+    let port = NEXT_ISOLATED_PORT.fetch_add(32, Ordering::Relaxed);
+    common::write(
+        &h.home.join("config.toml"),
+        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='tmux'\n"),
+    );
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+    let adopted = h.root.join("adopted-with-agent");
+    common::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "adopted-with-agent",
+            adopted.to_str().unwrap(),
+        ],
+    );
+    let value = h.json(&[
+        "adopt",
+        adopted.to_str().unwrap(),
+        "--label",
+        "repo",
+        "--name",
+        "adopted",
+        "--agent",
+        "codex",
+        "--meta",
+        "ticket=ABC-9",
+    ]);
+    assert_eq!(value["data"]["tree"]["agent"], "codex");
+    assert_eq!(
+        value["data"]["tree"]["meta"],
+        serde_json::json!({"ticket": "ABC-9"})
+    );
+    let opened = h.json(&["open", "repo/adopted", "--no-attach"]);
+    let session = opened["data"]["sessions"][0]["name"].as_str().unwrap();
+    let argv =
+        std::fs::read_to_string(h.shim_state.join("tmux").join(session).join("argv")).unwrap();
+    assert!(argv.lines().any(|line| line == "resume"));
+    assert!(argv.lines().any(|line| line == "--last"));
+
+    let other = h.root.join("adopted-invalid-agent");
+    common::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "adopted-invalid-agent",
+            other.to_str().unwrap(),
+        ],
+    );
+    h.wt()
+        .args([
+            "adopt",
+            other.to_str().unwrap(),
+            "--label",
+            "repo",
+            "--agent",
+            "missing",
+        ])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains(
+            "agent `missing` is not configured",
+        ));
+}
+
+#[test]
+fn forget_removes_only_wt_records_and_artifacts_and_requires_consent() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo("repo", "");
+    h.register(&repo);
+    h.wt()
+        .args(["forget", "repo", "--yes"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("USE_UNREGISTER"));
+    let created = h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
+    let tree = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
+    common::write(
+        &tree.join(".wt/config.toml"),
+        "[files.\"editor.local\"]\ncontent='tree={{name()}}'\n",
+    );
+    h.json(&["env", "repo/work"]);
+    assert!(tree.join("editor.local").exists());
+    assert!(std::fs::read_to_string(repo.join(".git/info/exclude"))
+        .unwrap()
+        .contains("/editor.local"));
+    let registry_before = std::fs::read(h.home.join("registry.json")).unwrap();
+
+    h.wt()
+        .args(["forget", "repo/work"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("CONFIRM_REQUIRED"));
+    assert_eq!(
+        std::fs::read(h.home.join("registry.json")).unwrap(),
+        registry_before
+    );
+    let declined = h.pty_output(&["forget", "repo/work"], b"n\n");
+    assert_eq!(declined.child.code, Some(0));
+    assert!(String::from_utf8_lossy(&declined.stdout).contains("Did not forget repo/work"));
+    assert_eq!(
+        std::fs::read(h.home.join("registry.json")).unwrap(),
+        registry_before
+    );
+
+    let forgotten = h.json(&["forget", "repo/work", "--yes"]);
+    assert_eq!(forgotten["data"]["forgotten"], true);
+    assert!(tree.exists());
+    assert!(!tree.join(".wt").exists());
+    assert!(!tree.join("editor.local").exists());
+    assert!(!std::fs::read_to_string(repo.join(".git/info/exclude"))
+        .unwrap()
+        .contains("/editor.local"));
+    assert!(tree.join(".git").exists());
+    assert!(common::branches(&repo).contains(&"work".to_owned()));
+    let registry: wt_core::model::Registry =
+        serde_json::from_slice(&std::fs::read(h.home.join("registry.json")).unwrap()).unwrap();
+    assert!(!registry.trees.iter().any(|entry| entry.name == "work"));
+    assert!(registry
+        .tombstones
+        .iter()
+        .any(|entry| entry.name == "work" && entry.reason == "forgotten"));
+    assert!(!h
+        .home
+        .join(wt_core::model::tree_state_path(
+            &wt_core::model::Target::parse("repo/work").unwrap()
+        ))
+        .exists());
+}
+
+#[test]
+fn forget_refuses_resources_sessions_and_door_holders_with_specific_remedies() {
+    let resources = Harness::new();
+    configure_backend_none(&resources);
+    let repo = resources.repo("repo", RESOURCE);
+    resources.register(&repo);
+    resources.json(&["new", "repo/work", "--no-sync", "--no-open"]);
+    resources.json(&["run", "service", "repo/work"]);
+    resources
+        .wt()
+        .args(["forget", "repo/work", "--yes"])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("RESOURCES_EXIST"))
+        .stderr(predicate::str::contains("wt destroy"))
+        .stderr(predicate::str::contains("wt rm"));
+
+    let sessions = Harness::new();
+    let port = NEXT_ISOLATED_PORT.fetch_add(32, Ordering::Relaxed);
+    common::write(
+        &sessions.home.join("config.toml"),
+        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='tmux'\n"),
+    );
+    let repo = sessions.repo("repo", BASIC);
+    sessions.register(&repo);
+    sessions.json(&["new", "repo/work", "--no-sync", "--no-attach"]);
+    sessions
+        .wt()
+        .args(["forget", "repo/work", "--yes"])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("SESSION_LIVE"))
+        .stderr(predicate::str::contains("wt close"));
+
+    let holders = Harness::new();
+    configure_backend_none(&holders);
+    let repo = holders.repo("repo", BASIC);
+    holders.register(&repo);
+    holders.json(&["new", "repo/work", "--no-sync", "--no-open"]);
+    let mut child = holders
+        .wt_std()
+        .args(["exec", "repo/work", "--", "sleep", "5"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    holders
+        .wt()
+        .args(["forget", "repo/work", "--yes"])
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("TREE_IN_USE"))
+        .stderr(predicate::str::contains("wait for the door holders"));
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn top_level_help_uses_intent_groups_and_primary_short_spellings() {
+    let h = Harness::new();
+    let output = h.wt().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    let headings = ["Everyday:", "Setup:", "Working inside a tree:", "Upkeep:"];
+    let positions = headings.map(|heading| help.find(heading).unwrap());
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(help.contains("ls           List registered trees [aliases: list]"));
+    assert!(help.contains("rm           Tear down and remove a linked tree [aliases: remove]"));
+    for alias in ["test", "lint", "fmt", "build"] {
+        assert!(help.contains(&format!("  {alias}")));
+    }
 }
 
 #[test]
@@ -228,7 +586,7 @@ fn run_json_keeps_one_envelope_on_stdout() {
 }
 
 #[test]
-fn shell_recipes_are_opaque_but_argv_and_rendered_scripts_are_templates() {
+fn shell_and_argv_recipes_are_templates_while_dollars_stay_literal() {
     let h = Harness::new();
     let repo = h.repo(
         "repo",
@@ -236,22 +594,40 @@ fn shell_recipes_are_opaque_but_argv_and_rendered_scripts_are_templates() {
 ports = ["http"]
 [vars]
 private = "secret"
+[env]
+OLD_TEMPLATE = '${root()}'
 [files."generated.sh"]
 marker = ""
-content = "printf '%s\\n' '$${h%??}' '${private}' '${ports.http}'"
+content = "printf '%s\\n' '$' '${HOME}' '$$' '${h%??}' '{{private}}' '{{ports.http}}'"
+[files."verbatim.j2"]
+marker = ""
+template = false
+content = "{{ jinja_value }} ${HOME} $$"
+[files."source-copy.j2"]
+marker = ""
+template = false
+source = "input.j2"
 [task.shell]
-run = '''h=abcdef; printf '%s|%s|%s|%s' '${root()}' '$HOME' '$$' "${h%??}"'''
+run = '''h=abcdef; printf '%s|%s|%s|%s|%s|%s|%s|%s' '{{root()}}' '$' '$HOME' '${HOME}' '$$' "${h%??}" '{{private}}' '{{ports.http}}' '''
 [task.argv]
-run = ["printf", "%s|%s", "${private}", "${ports.http}"]
+run = ["printf", "%s|%s", "{{private}}", "{{ports.http}}"]
 "#,
     );
+    common::write(&repo.join("input.j2"), "{{ source_value }} ${HOME} $$");
     h.register(&repo);
+    assert_eq!(
+        h.json(&["env", "repo"])["data"]["env"]["OLD_TEMPLATE"],
+        "${root()}"
+    );
 
     h.wt()
         .args(["run", "shell", "repo"])
         .assert()
         .success()
-        .stdout(predicate::eq("${root()}|$HOME|$$|abcd"));
+        .stdout(predicate::eq(format!(
+            "{}|$|$HOME|${{HOME}}|$$|abcd|secret|20000",
+            std::fs::canonicalize(&repo).unwrap().display()
+        )));
     h.wt()
         .args(["run", "argv", "repo"])
         .assert()
@@ -259,8 +635,41 @@ run = ["printf", "%s|%s", "${private}", "${ports.http}"]
         .stdout(predicate::eq("secret|20000"));
     assert_eq!(
         std::fs::read_to_string(repo.join("generated.sh")).unwrap(),
-        "printf '%s\\n' '${h%??}' 'secret' '20000'"
+        "printf '%s\\n' '$' '${HOME}' '$$' '${h%??}' 'secret' '20000'"
     );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("verbatim.j2")).unwrap(),
+        "{{ jinja_value }} ${HOME} $$"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("source-copy.j2")).unwrap(),
+        "{{ source_value }} ${HOME} $$"
+    );
+}
+
+#[test]
+fn shell_resource_run_exists_and_destroy_are_templated_before_sh_c() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        r#"
+[vars]
+leaf = ".service"
+[task.service]
+tied_to = "tree"
+run = "touch '{{root()}}/{{leaf}}'"
+exists = "test -f '{{root()}}/{{leaf}}'"
+destroy = "rm -f '{{root()}}/{{leaf}}'"
+"#,
+    );
+    h.register(&repo);
+    h.wt().args(["run", "service", "repo"]).assert().success();
+    assert!(repo.join(".service").exists());
+    h.wt()
+        .args(["destroy", "service", "repo", "--yes"])
+        .assert()
+        .success();
+    assert!(!repo.join(".service").exists());
 }
 
 #[test]
@@ -284,6 +693,64 @@ fn new_run_and_remove_form_an_idempotent_lifecycle() {
 }
 
 #[test]
+fn remove_resolves_bare_names_and_reports_unresolved_addresses() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    h.register(&repo);
+
+    h.json(&["new", "repo/inside", "--no-sync"]);
+    let output = h
+        .wt()
+        .current_dir(std::fs::canonicalize(&repo).unwrap())
+        .args(["remove", "inside", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let removed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(removed["data"]["target"], "repo/inside");
+    assert_eq!(removed["data"]["removed"], true);
+
+    h.json(&["new", "repo/outside", "--no-sync"]);
+    let output = h
+        .wt()
+        .current_dir(&h.root)
+        .args(["remove", "outside", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let unresolved: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(unresolved["error"]["code"], "NOT_FOUND");
+    assert_eq!(
+        unresolved["error"]["details"]["candidates"],
+        serde_json::json!(["repo/outside"])
+    );
+    assert!(unresolved["error"]["remedy"]
+        .as_str()
+        .unwrap()
+        .contains("repo/outside"));
+
+    let output = h
+        .wt()
+        .current_dir(&h.root)
+        .args(["remove", "repo/unknown", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let unknown: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(unknown["error"]["code"], "NOT_FOUND");
+    assert_eq!(
+        unknown["error"]["details"]["candidates"],
+        serde_json::json!([])
+    );
+    h.wt()
+        .current_dir(&h.root)
+        .args(["remove", "repo/unknown"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("NOT_FOUND — target is not live"));
+}
+
+#[test]
 fn backend_none_runs_build_plan_after_ready_and_respects_suppression() {
     let h = Harness::new();
     configure_backend_none(&h);
@@ -291,12 +758,12 @@ fn backend_none_runs_build_plan_after_ready_and_respects_suppression() {
     let config = format!(
         r#"
 [task.prepare]
-run = ["sh", "-c", "printf 'prepare\\n' >> \"$$EVENTS\""]
+run = ["sh", "-c", "printf 'prepare\\n' >> \"$EVENTS\""]
 [task.prepare.env]
 EVENTS = "{}"
 [task.build]
 needs = ["prepare"]
-run = ["sh", "-c", "printf 'build:%s\\n' \"$$(cat \"$$WT_ROOT/.wt/build.status\")\" >> \"$$EVENTS\""]
+run = ["sh", "-c", "printf 'build:%s\\n' \"$(cat \"$WT_ROOT/.wt/build.status\")\" >> \"$EVENTS\""]
 [task.build.env]
 EVENTS = "{}"
 "#,
@@ -307,6 +774,9 @@ EVENTS = "{}"
     h.register(&repo);
 
     let created = h.json(&["new", "repo/work", "--no-sync"]);
+    let status =
+        Path::new(created["data"]["tree"]["path"].as_str().unwrap()).join(".wt/build.status");
+    wait_for_text(&status, "ok\n");
     assert_eq!(
         std::fs::read_to_string(&events).unwrap(),
         "prepare\nbuild:running\n"
@@ -319,11 +789,9 @@ EVENTS = "{}"
     .unwrap()
     .unwrap();
     let build = state.build.unwrap();
-    assert!(build.window.is_none());
     assert!(Path::new(&build.log).ends_with(".wt/logs/wt-setup.log"));
     assert_eq!(created["data"]["tree"]["phase"], "ready");
-    let status =
-        Path::new(created["data"]["tree"]["path"].as_str().unwrap()).join(".wt/build.status");
+    assert_eq!(created["data"]["build"]["log"], build.log);
     assert_eq!(std::fs::read_to_string(&status).unwrap(), "ok\n");
 
     common::write(&events, "");
@@ -342,7 +810,7 @@ EVENTS = "{}"
 }
 
 #[test]
-fn backend_none_build_failure_is_one_envelope_and_a_terminal_status() {
+fn backend_none_build_failure_is_reported_after_new_returns() {
     let h = Harness::new();
     configure_backend_none(&h);
     let repo = h.repo(
@@ -351,7 +819,7 @@ fn backend_none_build_failure_is_one_envelope_and_a_terminal_status() {
 bin = ["bin"]
 commands = ["orbit"]
 [task.build]
-run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status\"; exit 9"]
+run = ["sh", "-c", "cat \"$WT_ROOT/.wt/build.status\" > \"$WT_ROOT/seen-status\"; exit 9"]
 "#,
     );
     common::write_executable(&h.shims.join("orbit"), "#!/bin/sh\nprintf 'INSTALLED\\n'\n");
@@ -362,16 +830,12 @@ run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status
         .args(["new", "repo/work", "--no-sync", "--json"])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(6));
+    assert_eq!(output.status.code(), Some(0));
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(envelope["ok"], false);
-    assert_eq!(envelope["error"]["code"], "TASK_FAILED");
-    assert!(envelope["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|notice| notice["code"] == "BUILD_FAILED"));
+    assert_eq!(envelope["ok"], true);
+    assert!(envelope["data"]["build"]["started"].is_string());
     let root = PathBuf::from(envelope["data"]["tree"]["path"].as_str().unwrap());
+    wait_for_text(&root.join(".wt/build.status"), "failed\n");
     assert_eq!(
         std::fs::read_to_string(root.join("seen-status")).unwrap(),
         "running\n"
@@ -380,6 +844,13 @@ run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status
         std::fs::read_to_string(root.join(".wt/build.status")).unwrap(),
         "failed\n"
     );
+    let status = h.json(&["status", "repo/work"]);
+    assert_eq!(status["data"]["build"]["state"], "failed");
+    assert!(h.json(&["doctor", "repo"])["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "BUILD_FAILED"));
 
     let refusal = h
         .wt()
@@ -414,7 +885,7 @@ run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status
 bin = ["bin"]
 commands = ["orbit"]
 [task.build]
-run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status\""]
+run = ["sh", "-c", "cat \"$WT_ROOT/.wt/build.status\" > \"$WT_ROOT/seen-status\""]
 "#,
     );
     h.json(&["build", "repo/work"]);
@@ -430,6 +901,111 @@ run = ["sh", "-c", "cat \"$$WT_ROOT/.wt/build.status\" > \"$$WT_ROOT/seen-status
         "D3",
         "backend none observed running inside the task\nfirst terminal status: failed\nretry observed running inside the task\nretry terminal status: ok",
     );
+}
+
+#[test]
+fn dead_build_supervisor_is_abandoned_for_status_doctor_and_shims() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo(
+        "repo",
+        r#"
+bin = ["bin"]
+commands = ["orbit"]
+[task.build]
+run = "true"
+"#,
+    );
+    h.register(&repo);
+    h.json(&["env", "repo"]);
+
+    let target = wt_core::model::Target::parse("repo").unwrap();
+    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
+    let mut state =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    let log = repo.join(".wt/logs/wt-setup.log");
+    state.build = Some(wt_core::lifecycle::BuildState {
+        started: wt_sys::fsx::timestamp().unwrap(),
+        log: log.to_string_lossy().into_owned(),
+        pid: u32::MAX,
+    });
+    wt_sys::fsx::write_json(&state_path, &state).unwrap();
+    common::write(&repo.join(".wt/build.status"), "running\n");
+
+    let listed = h.json(&["ls"]);
+    assert_eq!(listed["data"]["trees"][0]["build"]["state"], "abandoned");
+    assert_eq!(
+        h.json(&["status", "repo"])["data"]["build"]["state"],
+        "abandoned"
+    );
+    let doctor = h.json(&["doctor", "repo"]);
+    let finding = doctor["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "BUILD_ABANDONED")
+        .unwrap();
+    assert_eq!(finding["severity"], "warn");
+    assert!(finding["remedy"]
+        .as_str()
+        .unwrap()
+        .contains("wt build repo"));
+
+    let refusal = h
+        .wt()
+        .args(["exec", "repo", "--", "orbit"])
+        .output()
+        .unwrap();
+    assert_eq!(refusal.status.code(), Some(5));
+    let stderr = String::from_utf8_lossy(&refusal.stderr);
+    assert!(stderr.contains("COMMAND_NOT_BUILT"), "{stderr}");
+    assert!(stderr.contains("wt build repo"), "{stderr}");
+    assert!(!stderr.contains("build is in progress"), "{stderr}");
+}
+
+#[test]
+fn foreground_build_records_its_own_pid_over_a_dead_supervisor() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo(
+        "repo",
+        r#"
+[task.build]
+run = "true"
+"#,
+    );
+    h.register(&repo);
+    h.json(&["env", "repo"]);
+
+    let target = wt_core::model::Target::parse("repo").unwrap();
+    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
+    let mut state =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    state.build = Some(wt_core::lifecycle::BuildState {
+        started: wt_sys::fsx::timestamp().unwrap(),
+        log: repo
+            .join(".wt/logs/wt-setup.log")
+            .to_string_lossy()
+            .into_owned(),
+        pid: u32::MAX,
+    });
+    wt_sys::fsx::write_json(&state_path, &state).unwrap();
+    common::write(&repo.join(".wt/build.status"), "running\n");
+
+    h.json(&["build", "repo"]);
+
+    // The reset to `running` must carry the live pid, or the whole foreground
+    // run reads as abandoned against the finished supervisor's dead pid.
+    let state =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    assert_ne!(state.build.unwrap().pid, u32::MAX);
+    assert_eq!(h.json(&["status", "repo"])["data"]["build"]["state"], "ok");
 }
 
 #[test]
@@ -601,12 +1177,12 @@ fn section_10_1_trailing_args_append_to_argv_root_only_and_are_reported() {
         "repo",
         r#"
 [task.dependency]
-run=['${root()}/record-args', 'dependency', 'declared']
+run=['{{root()}}/record-args', 'dependency', 'declared']
 [task.argv]
-run=['${root()}/record-args', 'root', 'base']
+run=['{{root()}}/record-args', 'root', 'base']
 needs=['dependency']
 [task.test]
-run=['${root()}/record-args', 'alias', 'declared']
+run=['{{root()}}/record-args', 'alias', 'declared']
 "#,
     );
     common::write_executable(
@@ -831,7 +1407,7 @@ fn section_10_1_trailing_args_cross_single_scope_composite() {
         "repo",
         r#"
 [dirs."d1".task.check]
-run=['${root()}/record-args', 'check']
+run=['{{root()}}/record-args', 'check']
 "#,
     );
     wt_sys::fsx::create_private_dir(&repo.join("d1")).unwrap();
@@ -929,6 +1505,7 @@ fn session_transport_uses_inner_no_gate_door_without_tmux_e() {
     .unwrap();
     assert!(argv.contains("--no-gate"));
     assert!(!argv.lines().any(|line| line == "-e"));
+    assert!(!argv.lines().any(|line| line == "true"));
     assert_eq!(
         h.json(&["close", "repo"])["data"]["sessions"][0]["closed"],
         true
@@ -938,8 +1515,14 @@ fn session_transport_uses_inner_no_gate_door_without_tmux_e() {
 #[test]
 fn shell_init_and_completions_are_script_envelopes() {
     let h = Harness::new();
-    let init = h.json(&["shell-init", "zsh"]);
-    assert!(init["data"]["script"].as_str().unwrap().contains("wtcd"));
+    for shell in ["zsh", "bash", "fish"] {
+        let init = h.json(&["shell-init", shell]);
+        let script = init["data"]["script"].as_str().unwrap();
+        assert!(!script.contains("wtcd"));
+        assert!(!script.contains("wtsh"));
+        assert!(script.contains("WT_PATH_PREFIX"));
+        assert!(script.contains("WT_TARGET"));
+    }
     let completions = h.json(&["completions", "fish"]);
     assert!(completions["data"]["script"]
         .as_str()
@@ -1140,7 +1723,7 @@ fn open_all_reports_each_tree_and_continues_after_a_failure() {
     assert_eq!(envelope["ok"], false);
     assert_eq!(envelope["error"]["exit"], 5);
     let sessions = envelope["data"]["sessions"].as_array().unwrap();
-    assert_eq!(sessions.len(), 3);
+    assert_eq!(sessions.len(), 2);
     assert!(
         sessions.iter().any(|session| {
             session["target"] == "repo/one"
@@ -1149,11 +1732,9 @@ fn open_all_reports_each_tree_and_continues_after_a_failure() {
         }),
         "{envelope}"
     );
-    for target in ["repo", "repo/two"] {
-        assert!(sessions
-            .iter()
-            .any(|session| { session["target"] == target && session["created"] == true }));
-    }
+    assert!(sessions
+        .iter()
+        .any(|session| { session["target"] == "repo/two" && session["created"] == true }));
     common::proof_capture(
         "B6-partial",
         serde_json::to_string_pretty(&envelope)
@@ -1285,6 +1866,17 @@ fn tty_consent_accepts_and_declines_through_a_pseudoterminal() {
     assert!(shown.contains("discards uncommitted work"), "{shown}");
     assert!(shown.contains("1 file (1 untracked)"), "{shown}");
     assert!(shown.contains("Remove it? [y/N]"), "{shown}");
+    assert!(shown.contains("REMOVE_DECLINED"), "{shown}");
+    assert!(
+        shown.contains("Removal of `repo/work` was declined; nothing changed"),
+        "{shown}"
+    );
+    assert!(path.exists());
+
+    let output = h.pty_output(&["remove", "repo/work", "--json"], b"n\n");
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert!(shown.contains("\"code\":\"REMOVE_DECLINED\""), "{shown}");
+    assert!(shown.contains("\"removed\":false"), "{shown}");
     assert!(path.exists());
 
     assert_eq!(h.pty_status(&["remove", "repo/work"], b"y\n").code, Some(0));
@@ -1360,7 +1952,9 @@ fn rm_and_ls_are_accepted_spellings() {
         .unwrap()
         .iter()
         .any(|tree| tree["target"] == "repo/work"));
-    assert_eq!(h.json(&["rm", "repo/work"])["data"]["removed"], true);
+    let removed = h.json(&["rm", "repo/work"]);
+    assert_eq!(removed["command"], "remove");
+    assert_eq!(removed["data"]["removed"], true);
 }
 
 #[test]
@@ -1567,7 +2161,7 @@ fn register_repair_restores_only_a_replaced_canonical_checkout() {
     let h = Harness::new();
     let repo = h.repo(
         "repo",
-        "[files.'.wt/generated']\ncontent='restored ${target()}'\n[task.service]\nrun='true'\nexists='false'\ndestroy='true'\ntied_to='tree'\n",
+        "[files.'.wt/generated']\ncontent='restored {{target()}}'\n[task.service]\nrun='true'\nexists='false'\ndestroy='true'\ntied_to='tree'\n",
     );
     let registered = h.register(&repo);
     let tree_id = registered["data"]["tree"]["tree_id"]
@@ -2760,11 +3354,11 @@ ports=['http']
 bin=['bin']
 copy=['secret.txt']
 [vars]
-app_port="${ports.http}"
+app_port="{{ports.http}}"
 [env]
-APP_PORT='${app_port}'
+APP_PORT='{{app_port}}'
 [files.".wt/app.conf"]
-content='port=${app_port}'
+content='port={{app_port}}'
 [task.service]
 run='touch "$WT_ROOT/.service"'
 exists='test -f "$WT_ROOT/.service"'
@@ -3328,10 +3922,22 @@ fn remove_is_idempotent_and_text_run_preserves_child_status() {
         h.json(&["remove", "repo/work", "--yes"])["data"]["removed"],
         true
     );
-    assert_eq!(
-        h.json(&["remove", "repo/work", "--yes"])["data"]["removed"],
-        false
-    );
+    let repeated = h.json(&["remove", "repo/work", "--yes"]);
+    assert_eq!(repeated["data"]["removed"], false);
+    assert_eq!(repeated["notices"][0]["code"], "ALREADY_REMOVED");
+    assert_eq!(repeated["notices"][0]["subject"], "repo/work");
+    assert!(repeated["notices"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("No live tree exists"));
+
+    h.wt()
+        .args(["remove", "repo/work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+        "No live tree exists for `repo/work`; its tombstone records that it was already removed",
+    ));
 }
 
 #[test]
@@ -3342,7 +3948,9 @@ fn shell_scripts_do_not_depend_on_a_healthy_home() {
         .args(["shell-init", "zsh"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("wtcd"));
+        .stdout(predicate::str::contains("WT_PATH_PREFIX"))
+        .stdout(predicate::str::contains("($WT_TARGET) "))
+        .stdout(predicate::str::contains("wtcd").not());
     h.wt()
         .args(["completions", "bash"])
         .assert()
@@ -3363,7 +3971,7 @@ run='touch "$WT_ROOT/.service"'
 exists='test -f "$WT_ROOT/.service"'
 destroy='rm -f "$WT_ROOT/.service"'
 tied_to='tree'
-name='${{name()}}'
+name='{{{{name()}}}}'
 [task.long]
 exists='false'
 destroy='true'

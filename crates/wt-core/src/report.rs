@@ -151,6 +151,13 @@ pub struct VerifyTreeReport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BuildTreeReport {
+    pub state: String,
+    pub started: String,
+    pub log: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResourceReport {
     pub scope: String,
     pub task: String,
@@ -198,6 +205,7 @@ pub struct TreeReport {
     pub behind_default: Option<u32>,
     pub sync: SyncTreeReport,
     pub verify: Option<VerifyTreeReport>,
+    pub build: Option<BuildTreeReport>,
     pub session: String,
     pub session_name: String,
     pub agent: Option<String>,
@@ -316,6 +324,13 @@ pub struct UnregisterData {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ForgetData {
+    pub target: String,
+    pub forgotten: bool,
+    pub artifacts: Vec<ArtifactReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DestroyedReport {
     pub scope: String,
     pub task: String,
@@ -341,6 +356,7 @@ pub struct NewData {
     pub resumed: bool,
     pub sync: Option<Vec<StepReport>>,
     pub verify: Option<NewVerifyReport>,
+    pub build: Option<crate::lifecycle::BuildState>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AdoptData {
@@ -761,6 +777,7 @@ mod tests {
                 ok: true,
                 at: "TIME".to_owned(),
             }),
+            build: None,
             session: "no".to_owned(),
             session_name: "session".to_owned(),
             agent: None,
@@ -932,6 +949,7 @@ mod tests {
                     ok: true,
                     steps: vec![step("test")],
                 }),
+                build: None,
             },
         );
         snap(

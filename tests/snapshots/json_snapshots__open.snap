@@ -11,7 +11,7 @@ expression: "normalize(value, &h.root)"
         "created": true,
         "existing": false,
         "foreground": false,
-        "name": "wt_repo_canonical_be9ff5d9",
+        "name": "repo",
         "target": "repo"
       }
     ]

@@ -20,7 +20,7 @@ sync_inputs = ["Cargo.lock", "Cargo.toml"]
 # instead. CARGO_TARGET_DIR must remain unset so each tree's binary stays in
 # its own target directory (SPEC §9.2a).
 [tools.cargo.env]
-CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}/${name_short()}"
+CARGO_BUILD_BUILD_DIR = "{{home()}}/cache/cargo-build/{{label()}}/{{name_short()}}"
 
 [tools.cargo.task.sync]
 run = "cargo fetch"
@@ -47,7 +47,7 @@ sniff = [
 
 # Keep output ownership identical to the regular cargo tool above.
 [tools.cargo-nightly-fmt.env]
-CARGO_BUILD_BUILD_DIR = "${home()}/cache/cargo-build/${label()}/${name_short()}"
+CARGO_BUILD_BUILD_DIR = "{{home()}}/cache/cargo-build/{{label()}}/{{name_short()}}"
 
 [tools.cargo-nightly-fmt.task.sync]
 run = "cargo fetch"

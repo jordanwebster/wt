@@ -63,36 +63,16 @@ fn parse_parts(input: &str) -> Result<Vec<Part>, CoreError> {
     let mut literal = String::new();
     let mut index = 0;
     while index < chars.len() {
-        if chars[index] != '$' {
+        if chars[index] != '{' || chars.get(index + 1) != Some(&'{') {
             literal.push(chars[index]);
             index += 1;
             continue;
         }
-        if index + 1 >= chars.len() {
-            literal.push('$');
-            break;
-        }
-        if chars[index + 1] == '$' {
-            literal.push('$');
-            index += 2;
-            continue;
-        }
-        if chars[index + 1] != '{' {
-            if chars[index + 1].is_ascii_alphabetic() || chars[index + 1] == '_' {
-                let mut end = index + 2;
-                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
-                {
-                    end += 1;
-                }
-                let name = chars[index + 1..end].iter().collect::<String>();
-                return Err(not_template_syntax(&format!("${name}")));
-            }
-            literal.push('$');
-            index += 1;
-            continue;
-        }
-        let Some(relative_close) = chars[index + 2..].iter().position(|ch| *ch == '}') else {
-            return Err(invalid("unclosed `${...}` expression"));
+        let Some(relative_close) = chars[index + 2..]
+            .windows(2)
+            .position(|pair| pair == ['}', '}'])
+        else {
+            return Err(invalid("unclosed `{{...}}` expression"));
         };
         let close = index + 2 + relative_close;
         let body = chars[index + 2..close].iter().collect::<String>();
@@ -101,7 +81,7 @@ fn parse_parts(input: &str) -> Result<Vec<Part>, CoreError> {
             parts.push(Part::Literal(std::mem::take(&mut literal)));
         }
         parts.push(Part::Expression(expression));
-        index = close + 1;
+        index = close + 2;
     }
     if !literal.is_empty() {
         parts.push(Part::Literal(literal));
@@ -110,44 +90,33 @@ fn parse_parts(input: &str) -> Result<Vec<Part>, CoreError> {
 }
 
 fn parse_expression(input: &str) -> Result<Expression, CoreError> {
-    let input = input.trim();
-    if input.starts_with("WT_") && valid_identifier(input) {
-        return Err(not_template_syntax(&format!("${{{input}}}")));
+    if input.chars().any(char::is_whitespace) {
+        return Err(invalid("template expressions may not contain whitespace"));
     }
     if let Some(name) = input.strip_prefix("ports.") {
         if valid_port_name(name) {
             return Ok(Expression::Port(name.to_owned()));
         }
-        return Err(invalid("invalid port reference in `${...}`"));
+        return Err(invalid("invalid port reference in `{{...}}`"));
     }
     if valid_identifier(input) {
         return Ok(Expression::Var(input.to_owned()));
     }
     let Some(open) = input.find('(') else {
-        return Err(invalid("invalid `${...}` expression"));
+        return Err(invalid("invalid `{{...}}` expression"));
     };
     let Some(arguments) = input.strip_suffix(')') else {
-        return Err(invalid("invalid function call in `${...}`"));
+        return Err(invalid("invalid function call in `{{...}}`"));
     };
-    let name = input[..open].trim();
+    let name = &input[..open];
     if !valid_identifier(name) {
-        return Err(invalid("invalid function name in `${...}`"));
+        return Err(invalid("invalid function name in `{{...}}`"));
     }
-    let arguments = arguments[open + 1..].trim();
+    let arguments = &arguments[open + 1..];
     if !arguments.is_empty() {
         return Err(invalid("template function takes no arguments"));
     }
     Ok(Expression::Call(Call::Simple(name.to_owned())))
-}
-
-/// A bare `$name` is not template syntax. wt deliberately refuses rather than
-/// treating it as literal text: a value that silently renders as its own name
-/// produces a wrong environment with nothing on screen to say so, which is the
-/// failure the template language exists to prevent (SPEC §5.2).
-fn not_template_syntax(spelling: &str) -> CoreError {
-    invalid(&format!(
-        "`{spelling}` is not template syntax; write `${{...}}` to evaluate a value, or `$$` for a literal dollar"
-    ))
 }
 
 fn invalid(message: &str) -> CoreError {
@@ -330,8 +299,8 @@ pub fn resolve_vars(
     Ok(resolved)
 }
 
-/// Extracts shell variables used by legacy resource snapshots. Shell syntax is
-/// not template syntax, so parameter operators are deliberately ignored.
+/// Extracts shell variables used by resource recipes. Parameter operators are
+/// deliberately ignored; this scan only protects scope-stripped snapshots.
 pub fn shell_references(input: &str) -> BTreeSet<String> {
     let chars: Vec<char> = input.chars().collect();
     let mut references = BTreeSet::new();
@@ -410,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn sole_evaluation_form_distinguishes_vars_functions_and_dollars() {
+    fn sole_evaluation_form_distinguishes_vars_functions_and_literal_dollars() {
         let vars = BTreeMap::from([("prefix".to_owned(), "one".to_owned())]);
         let functions = functions();
         let context = Context {
@@ -418,49 +387,49 @@ mod tests {
             functions: &functions,
         };
         assert_eq!(
-            expand("${prefix}/${root()}/${ports.http}/$$/$-", &context).unwrap(),
-            "one//tree/20016/$/$-"
+            expand("{{prefix}}/{{root()}}/{{ports.http}}/$$/$-", &context).unwrap(),
+            "one//tree/20016/$$/$-"
         );
     }
 
     #[test]
-    fn a_bare_dollar_name_is_refused_rather_than_rendered_literally() {
-        // Every one of these once rendered as its own name, producing a wrong
-        // environment silently. The refusal is uniform: no spelling is special
-        // and none is guessed at on the caller's behalf.
-        for spelling in [
-            "$WT_PORT_HTTP",
-            "${WT_ROOT}",
-            "$WT_REPO",
-            "$HOME",
-            "$DATABASE_URL",
-            "$_private",
-        ] {
-            let error = validate(spelling).unwrap_err();
-            assert_eq!(error.code.0, "CONFIG_INVALID");
-            assert!(error.message.contains(spelling), "{}", error.message);
-            assert!(error.message.contains("$$"), "{}", error.message);
-            assert!(error.message.contains("${...}"), "{}", error.message);
-        }
+    fn every_dollar_spelling_is_literal() {
+        let input = "$WT_PORT_HTTP/${HOME}/$WT_REPO/$HOME/$DATABASE_URL/$_private/$$";
         assert_eq!(
             expand(
-                "$$/$-",
+                input,
                 &Context {
                     vars: &BTreeMap::new(),
                     functions: &functions()
                 }
             )
             .unwrap(),
-            "$/$-"
+            input
         );
+    }
+
+    #[test]
+    fn double_open_brace_is_always_strict_template_syntax() {
+        for invalid_input in [
+            "{{",
+            "{{name}",
+            "{{ name}}",
+            "{{name }}",
+            "{{root( )}}",
+            "{{ports.HTTP}}",
+            "{{root(arg)}}",
+        ] {
+            let error = validate(invalid_input).unwrap_err();
+            assert_eq!(error.code.0, "CONFIG_INVALID", "{invalid_input}");
+        }
     }
 
     #[test]
     fn dag_resolution_is_independent_of_declaration_order() {
         let declarations = BTreeMap::from([
-            ("last".to_owned(), "${middle}/c".to_owned()),
+            ("last".to_owned(), "{{middle}}/c".to_owned()),
             ("first".to_owned(), "a".to_owned()),
-            ("middle".to_owned(), "${first}/b".to_owned()),
+            ("middle".to_owned(), "{{first}}/b".to_owned()),
         ]);
         let resolved = resolve_vars(&declarations, &functions()).unwrap();
         assert_eq!(resolved["last"], "a/b/c");
@@ -469,20 +438,20 @@ mod tests {
     #[test]
     fn cycles_unknown_names_and_closed_functions_are_distinct() {
         let cycle = BTreeMap::from([
-            ("a".to_owned(), "${b}".to_owned()),
-            ("b".to_owned(), "${a}".to_owned()),
+            ("a".to_owned(), "{{b}}".to_owned()),
+            ("b".to_owned(), "{{a}}".to_owned()),
         ]);
         assert_eq!(
             resolve_vars(&cycle, &functions()).unwrap_err().code.0,
             "VARS_CYCLE"
         );
-        let unknown = BTreeMap::from([("a".to_owned(), "${missing}".to_owned())]);
+        let unknown = BTreeMap::from([("a".to_owned(), "{{missing}}".to_owned())]);
         assert_eq!(
             resolve_vars(&unknown, &functions()).unwrap_err().code.0,
             "VARS_UNKNOWN"
         );
-        assert!(validate_calls("${mystery()}", &BTreeSet::new()).is_err());
-        assert!(validate_calls("${ports.missing}", &BTreeSet::new()).is_err());
+        assert!(validate_calls("{{mystery()}}", &BTreeSet::new()).is_err());
+        assert!(validate_calls("{{ports.missing}}", &BTreeSet::new()).is_err());
     }
 
     #[test]
@@ -493,9 +462,25 @@ mod tests {
             functions: &functions,
         };
         assert_eq!(
-            expand("${ports.http}:${ports.http}", &context).unwrap(),
+            expand("{{ports.http}}:{{ports.http}}", &context).unwrap(),
             "20016:20016"
         );
-        assert!(validate_calls("${ports.missing}", &BTreeSet::new()).is_err());
+        assert!(validate_calls("{{ports.missing}}", &BTreeSet::new()).is_err());
+    }
+
+    #[test]
+    fn old_template_spelling_is_literal_without_a_hint() {
+        let input = "${root()}";
+        assert_eq!(
+            expand(
+                input,
+                &Context {
+                    vars: &BTreeMap::new(),
+                    functions: &functions(),
+                },
+            )
+            .unwrap(),
+            input
+        );
     }
 }

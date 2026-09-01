@@ -6,8 +6,8 @@ use wt_core::config::TiedTo;
 use wt_core::lifecycle::{DerivedPhase, RepoState};
 use wt_core::model::{Label, TreeRec};
 use wt_core::report::{
-    DirtyReport, LastErrorReport, LastProbeReport, ListData, PortReport, ResourceReport,
-    SyncTreeReport, TreeReport, UpstreamReport, VerifyTreeReport,
+    BuildTreeReport, DirtyReport, LastErrorReport, LastProbeReport, ListData, PortReport,
+    ResourceReport, SyncTreeReport, TreeReport, UpstreamReport, VerifyTreeReport,
 };
 use wt_core::resource::{ProbeResult, ResourceKey, ResourceRecord, ResourceState};
 use wt_core::CoreError;
@@ -18,6 +18,9 @@ use super::context::target_of;
 use super::{door, executor, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: List) -> Result<Output, CoreError> {
+    if let Some(key) = args.meta.as_deref() {
+        wt_core::model::validate_meta(key, "")?;
+    }
     let selected = context
         .registry
         .trees
@@ -76,7 +79,13 @@ pub(crate) fn run(context: &mut Context, args: List) -> Result<Output, CoreError
             right.holder.pid,
         ))
     });
-    Output::data(ListData { trees, locks })
+    let data = ListData { trees, locks };
+    if let Some(key) = args.meta.as_deref() {
+        let text = super::human::render_list_meta(data.clone(), key);
+        Output::text(data, text)
+    } else {
+        Output::data(data)
+    }
 }
 
 pub(crate) fn tree_report(
@@ -180,6 +189,18 @@ fn tree_report_with_shared(
         (None, None, None, None, None, Vec::new())
     };
     let session = session_state(context, tree);
+    let build = state
+        .as_ref()
+        .and_then(|state| state.build.as_ref())
+        .map(|build| {
+            let status = Path::new(tree.path.as_str()).join(".wt/build.status");
+            wt_sys::fsx::read_string(&status).map(|value| BuildTreeReport {
+                state: normalise_build_status(value.as_deref(), build.pid),
+                started: build.started.clone(),
+                log: build.log.clone(),
+            })
+        })
+        .transpose()?;
     let mut ports = tree
         .ports
         .iter()
@@ -274,6 +295,7 @@ fn tree_report_with_shared(
             ok: verify.ok,
             at: verify.at.clone(),
         }),
+        build,
         session,
         session_name: tree.session_name.clone(),
         agent: tree.agent.clone(),
@@ -294,6 +316,17 @@ fn tree_report_with_shared(
             .transpose()?
             .flatten(),
     })
+}
+
+fn normalise_build_status(value: Option<&str>, pid: u32) -> String {
+    match value.map(str::trim) {
+        Some("running") if wt_sys::proc::process_alive(pid) => "running",
+        Some("running") => "abandoned",
+        Some("ok") => "ok",
+        Some("failed") => "failed",
+        _ => "unknown",
+    }
+    .to_owned()
 }
 
 #[derive(Default)]

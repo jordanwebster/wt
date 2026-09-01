@@ -30,9 +30,9 @@ impl Shell {
 #[command(
     name = "wt",
     version,
-    about = "Worktree manager for humans and coding agents"
+    about = "Worktree manager for humans and coding agents",
+    override_help = "Worktree manager for humans and coding agents\n\nUsage: wt [OPTIONS] <COMMAND>\n\nEveryday:\n  new          Create or resume a linked worktree\n  open         Open or attach to an agent session\n  edit         Open a tree in the configured editor\n  test         Run the test task\n  lint         Run the lint task\n  fmt          Run the format task\n  build        Run the build task\n  run          Run a declared task\n  ls           List registered trees [aliases: list]\n  status       Report one tree's state and tasks\n  rm           Tear down and remove a linked tree [aliases: remove]\n\nSetup:\n  clone        Clone and register a repository\n  register     Register a canonical checkout\n  adopt        Adopt an existing git worktree\n  shell-init   Print shell helper initialisation\n  completions  Print dynamic shell completions\n\nWorking inside a tree:\n  exec         Run a one-shot command through a passthrough door\n  shell        Start an interactive shell door\n  env          Print a tree's assembled environment\n  path         Print a tree root\n  which        Resolve a command through a tree door's PATH\n  tasks        List effective tasks\n  config       Show effective configuration origins\n  meta         Show or edit a tree's user metadata\n\nUpkeep:\n  sync         Synchronise a tree's dependencies\n  doctor       Diagnose registered state and tooling\n  prune        Report or clean stale tree records\n  close        Close agent sessions\n  forget       Forget wt's records for a linked tree without removing it\n  destroy      Destroy a declared resource\n  refresh      Destroy and recreate a declared resource\n  locks        List wt coordination locks\n  unregister   Tear down and forget a registered repository\n\nOptions:\n      --json           Emit one stable JSON envelope\n      --yes            Consent to destructive operations without prompting\n      --quiet          Suppress optional notices\n      --verbose        Show notices even when stderr is not a terminal\n      --color <COLOR>  Control coloured terminal output [default: auto] [possible values: auto, always, never]\n      --home <DIR>     Use an alternate wt state directory\n  -h, --help           Print help\n  -V, --version        Print version\n\nExample: wt register . && wt new repo/feature"
 )]
-#[command(after_help = "Example: wt register . && wt new repo/feature")]
 pub struct Cli {
     /// Emit one stable JSON envelope.
     #[arg(long, global = true)]
@@ -58,29 +58,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Register a canonical checkout.
-    Register(Register),
-    /// Tear down and forget a registered repository.
-    Unregister(Unregister),
-    /// Clone and register a repository.
-    Clone(CloneRepo),
     /// Create or resume a linked worktree.
     New(New),
-    /// Adopt an existing git worktree.
-    Adopt(Adopt),
-    /// List registered trees.
-    #[command(alias = "ls")]
-    List(List),
-    /// Report one tree's state and tasks.
-    Status(Status),
-    /// Show or edit a tree's user metadata.
-    Meta(Meta),
-    /// Print a tree root.
-    Path(TargetArg),
-    /// Run a declared task.
-    Run(Run),
-    /// Synchronise a tree's dependencies.
-    Sync(Sync),
+    /// Open or attach to an agent session.
+    Open(Open),
+    /// Open a tree in the configured editor.
+    Edit(Edit),
     /// Run the test task.
     #[command(after_help = "Example: wt test project/feature")]
     Test(AliasRun),
@@ -93,6 +76,29 @@ pub enum Command {
     /// Run the build task.
     #[command(after_help = "Example: wt build project/feature")]
     Build(AliasRun),
+    /// Run a declared task.
+    Run(Run),
+    /// List registered trees.
+    #[command(name = "ls", visible_alias = "list")]
+    List(List),
+    /// Report one tree's state and tasks.
+    Status(Status),
+    /// Tear down and remove a linked tree.
+    #[command(name = "rm", visible_alias = "remove")]
+    Remove(Remove),
+
+    /// Clone and register a repository.
+    Clone(CloneRepo),
+    /// Register a canonical checkout.
+    Register(Register),
+    /// Adopt an existing git worktree.
+    Adopt(Adopt),
+    /// Print shell helper initialisation.
+    ShellInit(Script),
+    /// Print dynamic shell completions.
+    #[command(after_help = "Example: wt completions zsh")]
+    Completions(Script),
+
     /// Run a one-shot command through a passthrough door.
     #[command(
         override_help = "Run a one-shot command through a passthrough door.\n\nUsage: wt exec [OPTIONS] [TARGET] -- <CMD>...\n\nArguments:\n  [TARGET]  Registered tree target\n  <CMD>...  Command and arguments to execute\n\nOptions:\n      --yes            Consent without prompting\n      --quiet          Suppress optional notices\n      --verbose        Show notices when stderr is not a terminal\n      --color <COLOR>  Control coloured output [default: auto] [possible values: auto, always, never]\n      --home <DIR>     Use an alternate wt state directory\n  -h, --help           Print help\n\nPassthrough door; not a task (see `wt run`); no `--json` (A20).\n\nExample: wt exec project/feature -- env"
@@ -102,71 +108,101 @@ pub enum Command {
     Shell(ShellDoor),
     /// Print a tree's assembled environment.
     Env(Env),
-    /// Open or attach to an agent session.
-    Open(Open),
-    /// Close agent sessions.
-    Close(Close),
-    /// Tear down and remove a linked tree.
-    #[command(alias = "rm")]
-    Remove(Remove),
+    /// Print a tree root.
+    Path(TargetArg),
+    /// Resolve a command through a tree door's PATH.
+    Which(Which),
+    /// List effective tasks.
+    Tasks(Tasks),
+    /// Show effective configuration origins.
+    Config(Config),
+    /// Show or edit a tree's user metadata.
+    Meta(Meta),
+
+    /// Synchronise a tree's dependencies.
+    Sync(Sync),
+    /// Diagnose registered state and tooling.
+    Doctor(Doctor),
     /// Report or clean stale tree records.
     Prune(Prune),
+    /// Close agent sessions.
+    Close(Close),
+    /// Forget wt's records for a linked tree without removing it.
+    Forget(Forget),
     /// Destroy a declared resource.
     Destroy(ResourceAction),
     /// Destroy and recreate a declared resource.
     #[command(after_help = "Example: wt refresh daemon project/feature --yes")]
     Refresh(ResourceAction),
-    /// Diagnose registered state and tooling.
-    Doctor(Doctor),
-    /// List effective tasks.
-    Tasks(Tasks),
-    /// Show effective configuration origins.
-    Config(Config),
-    /// Resolve a command through a tree door's PATH.
-    Which(Which),
     /// List wt coordination locks.
     Locks(Locks),
-    /// Print shell helper initialisation.
-    ShellInit(Script),
-    /// Print dynamic shell completions.
-    #[command(after_help = "Example: wt completions zsh")]
-    Completions(Script),
+    /// Tear down and forget a registered repository.
+    Unregister(Unregister),
 }
 
 impl Command {
     pub const fn name(&self) -> &'static str {
         match self {
-            Self::Register(_) => "register",
-            Self::Unregister(_) => "unregister",
-            Self::Clone(_) => "clone",
             Self::New(_) => "new",
-            Self::Adopt(_) => "adopt",
-            Self::List(_) => "list",
-            Self::Status(_) => "status",
-            Self::Meta(_) => "meta",
-            Self::Path(_) => "path",
-            Self::Run(_) => "run",
-            Self::Sync(_) => "sync",
+            Self::Open(_) => "open",
+            Self::Edit(_) => "edit",
             Self::Test(_) => "test",
             Self::Lint(_) => "lint",
             Self::Fmt(_) => "fmt",
             Self::Build(_) => "build",
+            Self::Run(_) => "run",
+            Self::List(_) => "list",
+            Self::Status(_) => "status",
+            Self::Remove(_) => "remove",
+            Self::Clone(_) => "clone",
+            Self::Register(_) => "register",
+            Self::Adopt(_) => "adopt",
+            Self::ShellInit(_) => "shell-init",
+            Self::Completions(_) => "completions",
             Self::Exec(_) => "exec",
             Self::Shell(_) => "shell",
             Self::Env(_) => "env",
-            Self::Open(_) => "open",
-            Self::Close(_) => "close",
-            Self::Remove(_) => "remove",
-            Self::Prune(_) => "prune",
-            Self::Destroy(_) => "destroy",
-            Self::Refresh(_) => "refresh",
-            Self::Doctor(_) => "doctor",
+            Self::Path(_) => "path",
+            Self::Which(_) => "which",
             Self::Tasks(_) => "tasks",
             Self::Config(_) => "config",
-            Self::Which(_) => "which",
+            Self::Meta(_) => "meta",
+            Self::Sync(_) => "sync",
+            Self::Doctor(_) => "doctor",
+            Self::Prune(_) => "prune",
+            Self::Close(_) => "close",
+            Self::Forget(_) => "forget",
+            Self::Destroy(_) => "destroy",
+            Self::Refresh(_) => "refresh",
             Self::Locks(_) => "locks",
-            Self::ShellInit(_) => "shell-init",
-            Self::Completions(_) => "completions",
+            Self::Unregister(_) => "unregister",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    #[test]
+    fn override_help_names_every_subcommand() {
+        let mut command = Cli::command();
+        let names = command
+            .get_subcommands()
+            .map(|subcommand| subcommand.get_name().to_owned())
+            .collect::<Vec<_>>();
+        let help = command.render_help().to_string();
+        for name in names {
+            assert!(
+                help.lines().any(|line| {
+                    line.trim_start()
+                        .strip_prefix(&name)
+                        .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+                }),
+                "override_help omits clap subcommand `{name}`"
+            );
         }
     }
 }
@@ -238,10 +274,15 @@ pub struct Adopt {
     pub label: Option<String>,
     #[arg(long)]
     pub name: Option<String>,
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Attach opaque metadata to the adopted tree.
+    #[arg(long = "meta", value_name = "k=v")]
+    pub meta: Vec<String>,
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = "Example: wt list --json")]
+#[command(after_help = "Example: wt ls --json")]
 pub struct List {
     pub label: Option<String>,
     #[arg(long)]
@@ -250,6 +291,9 @@ pub struct List {
     pub fast: bool,
     #[arg(long)]
     pub disk: bool,
+    /// Add one metadata value column to the human table.
+    #[arg(long, value_name = "KEY")]
+    pub meta: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -343,6 +387,14 @@ pub struct Exec {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    after_help = "Terminal editors and cold GUI launches inherit the full door environment; a GUI editor CLI that forwards to an already-running instance does not (use `wt exec` in run configs or a `wt shell` terminal profile — see the cookbook).\n\nExample: wt edit project/feature"
+)]
+pub struct Edit {
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Args)]
 #[command(after_help = "Example: wt shell project/feature")]
 pub struct ShellDoor {
     pub target: Option<String>,
@@ -382,7 +434,13 @@ pub struct Close {
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = "Example: wt remove project/feature")]
+#[command(after_help = "Example: wt forget project/feature --yes")]
+pub struct Forget {
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = "Example: wt rm project/feature")]
 pub struct Remove {
     pub target: String,
     #[arg(long)]
@@ -464,40 +522,41 @@ pub struct Script {
 
 pub fn parse() -> Cli {
     let names = [
-        "register",
-        "unregister",
-        "clone",
         "new",
-        "adopt",
-        "list",
-        "status",
-        "meta",
-        "path",
-        "run",
-        "sync",
+        "open",
+        "edit",
         "test",
         "lint",
         "fmt",
         "build",
+        "run",
+        "ls",
+        "list",
+        "status",
+        "rm",
+        "remove",
+        "clone",
+        "register",
+        "adopt",
+        "shell-init",
+        "completions",
         "exec",
         "shell",
         "env",
-        "open",
-        "close",
-        "remove",
-        "prune",
-        "destroy",
-        "refresh",
-        "doctor",
+        "path",
+        "which",
         "tasks",
         "config",
-        "which",
+        "meta",
+        "sync",
+        "doctor",
+        "prune",
+        "close",
+        "forget",
+        "destroy",
+        "refresh",
         "locks",
-        "shell-init",
-        "completions",
-        // Accepted spellings (A55); clap maps them to their verbs.
-        "rm",
-        "ls",
+        "unregister",
     ];
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut skip = false;

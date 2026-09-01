@@ -267,7 +267,7 @@ mod tests {
     fn pure_doctor_findings_cover_resource_names_and_adapter_metadata() {
         let findings = resource_name_findings(
             "db",
-            Some("aspire-${label()}-${name_snake()}"),
+            Some("aspire-{{label()}}-{{name_snake()}}"),
             &"x".repeat(64),
         )
         .unwrap();

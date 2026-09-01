@@ -369,7 +369,7 @@ fn environment_claim_overrides_restores_and_keeps_ports_out_of_children() {
     );
     let repo = harness.repo(
         "repo",
-        "ports=['http']\n[env]\nDATABASE_URL='tree-db'\nAPP_PORT=\"${ports.http}\"\n",
+        "ports=['http']\n[env]\nDATABASE_URL='tree-db'\nAPP_PORT=\"{{ports.http}}\"\n",
     );
     harness.register(&repo);
     let output = harness
@@ -472,13 +472,13 @@ fn vars_and_functions_render_real_environment_and_files() {
         r#"ports=['http']
 [vars]
 leaf='value'
-composed="${root()}/${leaf}/${ports.http}"
+composed="{{root()}}/{{leaf}}/{{ports.http}}"
 [env]
-COMPOSED='${composed}'
-ALL='${home()}|${repo()}|${branch()}|${label()}|${name()}|${name_snake()}|${name_short()}|${target()}'
+COMPOSED='{{composed}}'
+ALL='{{home()}}|{{repo()}}|{{branch()}}|{{label()}}|{{name()}}|{{name_snake()}}|{{name_short()}}|{{target()}}'
 [files.generated]
 marker=''
-content='${composed}'
+content='{{composed}}'
 "#,
     );
     harness.register(&repo);
@@ -516,12 +516,12 @@ content='${composed}'
 #[test]
 fn configuration_failures_are_captured_with_names_and_locations() {
     let cases = [
-        ("cycle", "[vars]\na='${b}'\nb='${a}'", "VARS_CYCLE"),
-        ("unknown", "[vars]\na='${missing}'", "VARS_UNKNOWN"),
-        ("function", "[env]\nA='${mystery()}'", "CONFIG_INVALID"),
+        ("cycle", "[vars]\na='{{b}}'\nb='{{a}}'", "VARS_CYCLE"),
+        ("unknown", "[vars]\na='{{missing}}'", "VARS_UNKNOWN"),
+        ("function", "[env]\nA='{{mystery()}}'", "CONFIG_INVALID"),
         (
             "port",
-            "ports=['http']\n[env]\nA=\"${ports.missing}\"",
+            "ports=['http']\n[env]\nA=\"{{ports.missing}}\"",
             "CONFIG_INVALID",
         ),
     ];
@@ -537,15 +537,10 @@ fn configuration_failures_are_captured_with_names_and_locations() {
 }
 
 #[test]
-fn legacy_template_spelling_is_rejected_at_its_source_location() {
-    let source = "ports=['http']\n[env]\nAPP_PORT = \"$WT_PORT_HTTP\"\nROOT = '$WT_ROOT'\n";
-    let error = wt_core::config::parse(source, "legacy.wt.toml").unwrap_err();
-    assert_eq!(error.code.0, "CONFIG_INVALID");
-    assert!(error.message.contains("legacy.wt.toml:3:13"));
-    assert!(error.message.contains("$WT_PORT_HTTP"));
-    assert!(error.message.contains("$$"));
-    assert!(error.message.contains("${...}"));
-    proof_capture("C3", format!("legacy: {error}"));
+fn dollar_spellings_are_literal_without_rename_diagnostics() {
+    let source = "ports=['http']\n[env]\nAPP_PORT = \"$WT_PORT_HTTP\"\nROOT = '${root()}'\n";
+    let config = wt_core::config::parse(source, "literal.wt.toml").unwrap();
+    wt_core::config::validate_resolved(&config, 16).unwrap();
 }
 
 #[test]
@@ -592,6 +587,14 @@ fn shim_fast_path_has_no_door_effects_and_is_well_below_the_door_budget() {
 
     wt_sys::fsx::remove_path(&work.join("target/debug/orbit")).unwrap();
     write(&work.join(".wt/build.status"), "running\n");
+    let target = wt_core::model::Target::parse("repo/work").unwrap();
+    let state_path = harness.home.join(wt_core::model::tree_state_path(&target));
+    let mut state =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    state.build.as_mut().unwrap().pid = std::process::id();
+    wt_sys::fsx::write_json(&state_path, &state).unwrap();
     refusal_env.insert(
         "WT_BUDGET_TRACE".to_owned(),
         budget_trace.to_string_lossy().into_owned(),

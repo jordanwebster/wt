@@ -221,13 +221,12 @@ fn recorded_build_progress(root: &Path, target: &str) -> Option<String> {
     let state_path = home.join(wt_core::model::tree_state_path(&target_value));
     let state: serde_json::Value = serde_json::from_slice(&std::fs::read(state_path).ok()?).ok()?;
     let build = state.get("build")?.as_object()?;
+    let pid = u32::try_from(build.get("pid")?.as_u64()?).ok()?;
+    if !process_alive(pid) {
+        return None;
+    }
     let log = build.get("log")?.as_str()?;
-    let window = build.get("window").and_then(serde_json::Value::as_str);
-    let location = window.map_or_else(
-        || format!("log `{log}`"),
-        |window| format!("window `{window}`; watch log `{log}`"),
-    );
-    Some(format!("; the build is in progress in {location}"))
+    Some(format!("; the build is in progress; watch log `{log}`"))
 }
 
 fn shim_refusal(message: String) -> i32 {
@@ -378,6 +377,139 @@ pub fn run(
     tee: Tee,
 ) -> Result<ProcessOutput> {
     run_with_header(request, log, None, timeout, tee)
+}
+
+/// Starts a process in a new session through an intermediate child, so the
+/// launched process is reparented and outlives the invoking CLI.
+pub fn spawn_detached(request: &CommandRequest) -> Result<u32> {
+    trace_spawn(request)?;
+    let mut pipe = [0; 2];
+    // SAFETY: `pipe` points to two writable integers.
+    if unsafe { libc::pipe(pipe.as_mut_ptr()) } < 0 {
+        return Err(io_error("create detached-spawn pipe")(
+            std::io::Error::last_os_error(),
+        ));
+    }
+    for fd in pipe {
+        // SAFETY: both descriptors were just created by `pipe`.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            // SAFETY: both descriptors remain owned by this process.
+            unsafe {
+                libc::close(pipe[0]);
+                libc::close(pipe[1]);
+            }
+            return Err(io_error("mark detached-spawn pipe close-on-exec")(
+                std::io::Error::last_os_error(),
+            ));
+        }
+    }
+    // SAFETY: fork duplicates this process. The child performs only the
+    // bounded session/fork/exec sequence below and exits with `_exit`.
+    let first = unsafe { libc::fork() };
+    if first < 0 {
+        // SAFETY: both descriptors were created by `pipe` and remain owned here.
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
+        return Err(io_error("fork detached supervisor")(
+            std::io::Error::last_os_error(),
+        ));
+    }
+    if first == 0 {
+        // SAFETY: the child owns its duplicated descriptors.
+        unsafe { libc::close(pipe[0]) };
+        if unsafe { libc::setsid() } < 0 {
+            detached_child_error(pipe[1], "setsid failed");
+        }
+        // SAFETY: the second fork creates the reparented supervisor process.
+        let second = unsafe { libc::fork() };
+        if second < 0 {
+            detached_child_error(pipe[1], "second fork failed");
+        }
+        if second > 0 {
+            // SAFETY: the intermediate child must not run Rust destructors.
+            unsafe { libc::_exit(0) };
+        }
+        let supervisor_pid = std::process::id();
+        detached_child_write(pipe[1], format!("{supervisor_pid}\n").as_bytes());
+        let mut command = build_command(request, false);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let error = command.exec();
+        detached_child_error(pipe[1], &format!("exec failed: {error}"));
+    }
+
+    // SAFETY: the parent no longer writes to the exec-status pipe.
+    unsafe { libc::close(pipe[1]) };
+    let mut status = 0;
+    // SAFETY: `first` is this process's direct child and `status` is writable.
+    if unsafe { libc::waitpid(first, &mut status, 0) } < 0 {
+        // SAFETY: close the still-owned read descriptor on the error path.
+        unsafe { libc::close(pipe[0]) };
+        return Err(io_error("wait for detached supervisor")(
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: the read descriptor is uniquely owned here and transferred to File.
+    let mut reader = unsafe { File::from_raw_fd(pipe[0]) };
+    let mut error = String::new();
+    reader
+        .read_to_string(&mut error)
+        .map_err(io_error("read detached-spawn status"))?;
+    let mut lines = error.lines();
+    let supervisor_pid = lines.next().and_then(|line| line.parse::<u32>().ok());
+    let child_error = lines.collect::<Vec<_>>().join("\n");
+    if let Some(supervisor_pid) = supervisor_pid.filter(|_| child_error.is_empty()) {
+        Ok(supervisor_pid)
+    } else {
+        Err(CoreError::new(
+            ExitClass::External,
+            "SPAWN_FAILED",
+            format!(
+                "could not spawn detached `{}`: {}",
+                request.program.to_string_lossy(),
+                if child_error.is_empty() {
+                    error.trim()
+                } else {
+                    &child_error
+                }
+            ),
+            "verify that the command is executable and retry",
+        ))
+    }
+}
+
+fn detached_child_error(fd: RawFd, message: &str) -> ! {
+    detached_child_write(fd, message.as_bytes());
+    // SAFETY: the forked child must not run Rust destructors.
+    unsafe { libc::_exit(127) }
+}
+
+fn detached_child_write(fd: RawFd, bytes: &[u8]) {
+    // SAFETY: `fd` is the child's live pipe descriptor and `bytes` is valid for
+    // the duration of the write.
+    unsafe {
+        libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+    }
+}
+
+/// Reports whether a recorded process id still names a live process.
+pub fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 performs only an existence/permission check.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Runs a child like [`run`] and writes a header only to the task log.

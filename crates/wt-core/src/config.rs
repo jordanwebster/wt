@@ -70,12 +70,20 @@ impl Command {
 pub struct FileDef {
     pub content: Option<String>,
     pub source: Option<RelPath>,
+    #[serde(default = "default_file_template", skip_serializing_if = "is_true")]
+    pub template: bool,
     #[serde(default = "default_marker")]
     pub marker: String,
     #[serde(default = "default_mode")]
     pub mode: String,
 }
 
+fn default_file_template() -> bool {
+    true
+}
+fn is_true(value: &bool) -> bool {
+    *value
+}
 fn default_marker() -> String {
     "#".to_owned()
 }
@@ -462,13 +470,15 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
             )?;
         }
         for (path, file) in &effective.files {
-            if let Some(content) = &file.content {
-                validate_template_value(
-                    content,
-                    &effective.vars,
-                    &ports,
-                    effective.locations.get(&format!("file:{path}")),
-                )?;
+            if file.template {
+                if let Some(content) = &file.content {
+                    validate_template_value(
+                        content,
+                        &effective.vars,
+                        &ports,
+                        effective.locations.get(&format!("file:{path}")),
+                    )?;
+                }
             }
         }
         for (task_id, task) in &effective.tasks {
@@ -490,20 +500,19 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                         .get(&format!("task:{task_id}:env:{key}")),
                 )?;
             }
-            for command in [
-                task.run.as_ref(),
-                task.exists.as_ref(),
-                task.destroy.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                match command {
-                    Command::Shell(_) => {}
-                    Command::Argv(argv) => {
-                        for value in argv {
-                            validate_template_value(value, &effective.vars, &ports, None)?;
-                        }
+            for (field, command) in [
+                ("run", task.run.as_ref()),
+                ("exists", task.exists.as_ref()),
+                ("destroy", task.destroy.as_ref()),
+            ] {
+                if let Some(command) = command {
+                    for value in command.texts() {
+                        validate_template_value(
+                            value,
+                            &effective.vars,
+                            &ports,
+                            effective.locations.get(&format!("task:{task_id}:{field}")),
+                        )?;
                     }
                 }
             }
@@ -518,7 +527,8 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
         for task in effective.tasks.values() {
             if matches!(task.tied_to, Some(TiedTo::Repo | TiedTo::Machine)) {
                 let mut calls = BTreeSet::new();
-                let mut legacy_references = BTreeSet::new();
+                let mut shell_references = BTreeSet::new();
+                let mut port_references = BTreeSet::new();
                 for command in [
                     task.run.as_ref(),
                     task.exists.as_ref(),
@@ -529,38 +539,32 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                 {
                     match command {
                         Command::Shell(shell) => {
-                            legacy_references.extend(template::shell_references(shell));
+                            shell_references.extend(template::shell_references(shell));
+                            calls.extend(template::calls(shell)?);
+                            port_references.extend(template::port_references(shell)?);
                         }
                         Command::Argv(argv) => {
                             for value in argv {
                                 calls.extend(template::calls(value)?);
+                                port_references.extend(template::port_references(value)?);
                             }
                         }
                     }
                 }
                 for text in task.name.iter().chain(task.env.values()) {
                     calls.extend(template::calls(text)?);
+                    port_references.extend(template::port_references(text)?);
                 }
                 let tree_call = calls.iter().any(|call| {
                     matches!(
                         call.name(),
                         "root" | "branch" | "name" | "name_snake" | "name_short" | "target"
                     )
-                }) || task.name.iter().chain(task.env.values()).any(|text| {
-                    template::port_references(text).is_ok_and(|ports| !ports.is_empty())
-                });
-                let legacy_tree_reference = legacy_references.iter().any(|name| {
+                }) || !port_references.is_empty();
+                let shell_tree_reference = shell_references.iter().any(|name| {
                     matches!(
                         name.as_str(),
-                        "WT_ROOT"
-                            | "WT_TARGET"
-                            | "WT_NAME"
-                            | "WT_NAME_SNAKE"
-                            | "WT_NAME_SHORT"
-                            | "WT_SLOT"
-                            | "WT_SESSION"
-                            | "WT_BIN"
-                            | "PATH"
+                        "WT_ROOT" | "WT_TARGET" | "WT_NAME" | "WT_BRANCH" | "WT_BIN" | "PATH"
                     ) || name.starts_with("WT_PORT_")
                 });
                 let machine = task.tied_to == Some(TiedTo::Machine);
@@ -568,11 +572,11 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                     && calls
                         .iter()
                         .any(|call| matches!(call.name(), "label" | "repo"));
-                let legacy_repo_reference = machine
-                    && legacy_references
+                let shell_repo_reference = machine
+                    && shell_references
                         .iter()
                         .any(|name| matches!(name.as_str(), "WT_LABEL" | "WT_REPO"));
-                if tree_call || legacy_tree_reference || repo_call || legacy_repo_reference {
+                if tree_call || shell_tree_reference || repo_call || shell_repo_reference {
                     let scope = if machine { "machine" } else { "repo" };
                     let specificity = if machine {
                         "tree- or repo-specific"
@@ -601,7 +605,7 @@ fn validate_template_value(
             return Err(located(
                 CoreError::new(
                     ExitClass::State,
-                    "VARS_UNKNOWN",
+                    "CONFIG_INVALID",
                     format!("unknown vars name `{reference}`"),
                     "declare the variable in `vars` or correct the reference",
                 ),
@@ -742,10 +746,12 @@ fn validate_scope(scope: &Scope) -> Result<(), CoreError> {
             if !is_mode(&file.mode) {
                 return Err(invalid("file mode must be a four-digit octal string"));
             }
-            if let Some(content) = &file.content {
-                template::validate(content).map_err(|error| {
-                    located(error, scope.locations.get(&format!("file:{path}")))
-                })?;
+            if file.template {
+                if let Some(content) = &file.content {
+                    template::validate(content).map_err(|error| {
+                        located(error, scope.locations.get(&format!("file:{path}")))
+                    })?;
+                }
             }
         }
     }
@@ -836,24 +842,14 @@ fn validate_task(
         template::validate(value)
             .map_err(|error| located(error, locations.get(&format!("task:{id}:env:{key}"))))?;
     }
-    for command in [
-        task.run.as_ref(),
-        task.exists.as_ref(),
-        task.destroy.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if let Command::Argv(argv) = command {
-            for text in argv {
+    for (field, command) in [
+        ("run", task.run.as_ref()),
+        ("exists", task.exists.as_ref()),
+        ("destroy", task.destroy.as_ref()),
+    ] {
+        if let Some(command) = command {
+            for text in command.texts() {
                 template::validate(text).map_err(|error| {
-                    let field = if task.run.as_ref() == Some(command) {
-                        "run"
-                    } else if task.exists.as_ref() == Some(command) {
-                        "exists"
-                    } else {
-                        "destroy"
-                    };
                     located(error, locations.get(&format!("task:{id}:{field}")))
                 })?;
             }
@@ -1172,10 +1168,10 @@ mod tests {
 
     #[test]
     fn resolved_validation_treats_env_names_as_vars_and_rejects_repo_tree_functions() {
-        let chained = parse("[env]\nA='${B}'\nB='value'", "x").unwrap();
+        let chained = parse("[env]\nA='{{B}}'\nB='value'", "x").unwrap();
         assert_eq!(
             validate_resolved(&chained, 16).unwrap_err().code.0,
-            "VARS_UNKNOWN"
+            "CONFIG_INVALID"
         );
         let repo = parse(
             "[task.db]\ntied_to='repo'\nexists='test -e $WT_ROOT'\ndestroy='drop'",
@@ -1193,6 +1189,16 @@ mod tests {
         )
         .unwrap();
         assert!(validate_resolved(&opaque, 16).is_ok());
+
+        let templated = parse(
+            "[task.db]\ntied_to='repo'\nexists=\"test -e '{{root()}}'\"\ndestroy='drop'",
+            "x",
+        )
+        .unwrap();
+        assert!(validate_resolved(&templated, 16)
+            .unwrap_err()
+            .message
+            .contains("tree-specific"));
     }
 
     #[test]
@@ -1201,11 +1207,11 @@ mod tests {
             "$WT_ROOT",
             "$WT_LABEL",
             "$WT_REPO",
-            "${root()}",
-            "${label()}",
-            "${repo()}",
+            "{{root()}}",
+            "{{label()}}",
+            "{{repo()}}",
         ] {
-            let source = if reference.starts_with('$') && !reference.starts_with("${") {
+            let source = if reference.starts_with('$') {
                 format!(
                     "[task.setup]\ntied_to='machine'\nexists='test -n {reference}'\ndestroy='true'"
                 )
@@ -1227,7 +1233,7 @@ mod tests {
         }
 
         let portable = parse(
-            "[task.setup]\ntied_to='machine'\nexists='test -n $WT_HOME'\ndestroy='true'\n[task.setup.env]\nVALUE='${home()}'",
+            "[task.setup]\ntied_to='machine'\nexists='test -n $WT_HOME'\ndestroy='true'\n[task.setup.env]\nVALUE='{{home()}}'",
             "x",
         )
         .unwrap();
@@ -1247,26 +1253,25 @@ mod tests {
     #[test]
     fn resolved_validation_applies_every_scope_sensitive_row() {
         let task_cycle = parse(
-            "[dirs.sub.task.t]\nrun='true'\n[dirs.sub.task.t.env]\nA='${missing}'\nB='one'",
+            "[dirs.sub.task.t]\nrun='true'\n[dirs.sub.task.t.env]\nA='{{missing}}'\nB='one'",
             "x",
         )
         .unwrap();
         assert_eq!(
             validate_resolved(&task_cycle, 16).unwrap_err().code.0,
-            "VARS_UNKNOWN"
+            "CONFIG_INVALID"
         );
 
-        let alias = parse("[dirs.sub.env]\nA='${B}'\nB='one'", "x").unwrap();
+        let alias = parse("[dirs.sub.env]\nA='{{B}}'\nB='one'", "x").unwrap();
         assert_eq!(
             validate_resolved(&alias, 16).unwrap_err().code.0,
-            "VARS_UNKNOWN"
+            "CONFIG_INVALID"
         );
 
-        let unknown = parse("[dirs.sub.env]\nA='${nonsense}'", "x").unwrap();
-        assert!(validate_resolved(&unknown, 16)
-            .unwrap_err()
-            .message
-            .contains("nonsense"));
+        let unknown = parse("[dirs.sub.env]\nA='{{nonsense}}'", "x").unwrap();
+        let error = validate_resolved(&unknown, 16).unwrap_err();
+        assert_eq!(error.code.0, "CONFIG_INVALID");
+        assert!(error.message.contains("nonsense"));
 
         assert!(parse(
             "[dirs.sub]\ncopy=['generated']\n[dirs.sub.files.generated]\ncontent='x'",
@@ -1332,6 +1337,20 @@ mod tests {
     }
 
     #[test]
+    fn strict_template_validation_covers_shell_commands_and_file_opt_out() {
+        let error = parse("[task.t]\nrun='echo {{ name}}'", "repo/.wt.toml").unwrap_err();
+        assert_eq!(error.code.0, "CONFIG_INVALID");
+        assert!(error.message.contains("repo/.wt.toml:2:"));
+        assert!(error.message.contains("whitespace"));
+
+        assert!(parse(
+            "[files.generated]\ncontent='{{ jinja }}'\ntemplate=false",
+            "repo/.wt.toml",
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn removed_seed_key_is_refused_as_unknown() {
         let config = parse("seed=['cache']", "repo/.wt.toml").unwrap_err();
         assert_eq!(config.code.0, "CONFIG_INVALID");
@@ -1377,7 +1396,7 @@ mod tests {
     #[test]
     fn vars_failures_name_every_involved_key_with_source_locations() {
         let cycle = parse(
-            "[vars]\nfirst='${second}'\nsecond='${first}'",
+            "[vars]\nfirst='{{second}}'\nsecond='{{first}}'",
             "repo/.wt.toml",
         )
         .unwrap();
@@ -1386,7 +1405,7 @@ mod tests {
         assert!(error.message.contains("`first` at repo/.wt.toml:2:"));
         assert!(error.message.contains("`second` at repo/.wt.toml:3:"));
 
-        let unknown = parse("[vars]\nknown='${missing}'", "repo/.wt.toml").unwrap();
+        let unknown = parse("[vars]\nknown='{{missing}}'", "repo/.wt.toml").unwrap();
         let error = validate_resolved(&unknown, 16).unwrap_err();
         assert_eq!(error.code.0, "VARS_UNKNOWN");
         assert!(error.message.contains("missing"));
@@ -1396,8 +1415,11 @@ mod tests {
     #[test]
     fn unknown_functions_and_ports_name_the_call_and_location() {
         for (source, call) in [
-            ("[env]\nA='${mystery()}'", "mystery()"),
-            ("ports=['http']\n[env]\nA=\"${ports.admin}\"", "ports.admin"),
+            ("[env]\nA='{{mystery()}}'", "mystery()"),
+            (
+                "ports=['http']\n[env]\nA=\"{{ports.admin}}\"",
+                "ports.admin",
+            ),
         ] {
             let config = parse(source, "repo/.wt.toml").unwrap();
             let error = validate_resolved(&config, 16).unwrap_err();

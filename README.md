@@ -14,7 +14,7 @@ with it.
 wt register ~/source/orbit
 wt new orbit/fix-scrolling        # creates the tree, lands you inside it
 orbit serve                       # this tree's build, on this tree's port
-wt remove orbit/fix-scrolling     # or `wt rm`
+wt rm orbit/fix-scrolling
 ```
 
 ## A worktree owns its names
@@ -38,7 +38,7 @@ The guarantee runs both ways. If this worktree hasn't built `orbit` yet, `wt`
 
 ```console
 $ orbit serve
-orbit: this worktree's build isn't ready yet (still building, see window wt:setup).
+orbit: this worktree's build isn't ready yet (still building; see the reported log).
        Run /usr/local/bin/orbit if you meant the installed copy.
 ```
 
@@ -61,17 +61,17 @@ bin      = ["target/debug"]       # where its binaries are built
 ports    = ["http", "db"]         # allocated per worktree
 
 [vars]                            # private: never leaves this file
-db_name = "orbit_${name_snake()}"
-db_url  = "postgres://localhost:${ports.db}/${db_name}"
+db_name = "orbit_{{name_snake()}}"
+db_url  = "postgres://localhost:{{ports.db}}/{{db_name}}"
 
 [env]                             # claimed: what your app actually sees
-DATABASE_URL = "${db_url}"
-PORT         = "${ports.http}"
+DATABASE_URL = "{{db_url}}"
+PORT         = "{{ports.http}}"
 
 [files."config/local.yaml"]       # rendered fresh for each worktree
 content = """
-database: ${db_url}
-port: ${ports.http}
+database: {{db_url}}
+port: {{ports.http}}
 """
 ```
 
@@ -86,51 +86,54 @@ generated name doesn't become ambient state in every process you launch.
 
 ## Values and functions
 
-Anything in `${…}` is evaluated. A bare name is a constant you defined; a name
+Anything in `{{…}}` is evaluated. A bare name is a constant you defined; a name
 with parentheses is a function `wt` provides.
 
 | | |
 |---|---|
-| `${db_url}` | a constant from your own `[vars]` |
-| `${name()}` | the worktree's name |
-| `${name_snake()}` | the same, safe for identifiers |
-| `${label()}` | the repository's label |
-| `${name_short()}` | a short unique name, stable for the worktree's life |
-| `${target()}` | `label/name`, how you address it |
-| `${branch()}` | the branch checked out when the process started |
-| `${home()}` | the resolved wt home |
-| `${root()}` | the worktree's absolute path |
-| `${repo()}` | the registered checkout's absolute path |
-| `${ports.http}` | the port you named `http` |
+| `{{db_url}}` | a constant from your own `[vars]` |
+| `{{name()}}` | the worktree's name |
+| `{{name_snake()}}` | the same, safe for identifiers |
+| `{{label()}}` | the repository's label |
+| `{{name_short()}}` | a short unique name, stable for the worktree's life |
+| `{{target()}}` | `label/name`, how you address it |
+| `{{branch()}}` | the branch checked out when the process started |
+| `{{home()}}` | the resolved wt home |
+| `{{root()}}` | the worktree's absolute path |
+| `{{repo()}}` | the registered checkout's absolute path |
+| `{{ports.http}}` | the port you named `http` |
 
-Ports are a lookup, not an allocation: `${ports.db}` is the port you named
+Ports are a lookup, not an allocation: `{{ports.db}}` is the port you named
 `db` in the `ports` list, it returns the same number every time, and a name
 keeps its number when the list is reordered or extended.
 
-**Recipes are never touched.** A task's `run`, `exists` or `destroy` written as
-a shell string belongs entirely to the shell — `${h%??}` and `$HOME` mean what
-bash says they mean. When a recipe needs a port or a private value, hand it
-over by name:
+Shell-string and argv recipes use the same templates. Shell strings are filled
+before `sh -c`, with substitutions inserted verbatim, so quote path-valued
+substitutions. Dollar signs belong entirely to the shell: `${h%??}`, `$HOME`,
+and `$$` reach it unchanged.
 
 ```toml
-[task.check.env]
-DB_PORT = "${ports.db}"
-
 [task.check]
-run = "psql -p $DB_PORT -c 'select 1'"
+run = "psql -p '{{ports.db}}' -c 'select 1'"
 ```
 
 Written as a list instead of a string there is no shell to collide with, so
 each element is filled in directly:
 
 ```toml
-run = ["psql", "-p", "${ports.db}", "-c", "select 1"]
+run = ["psql", "-p", "{{ports.db}}", "-c", "select 1"]
 ```
 
-Use `$$` for a literal dollar sign — including inside a `files` entry that
-generates a shell script, where `$${h%??}` keeps the dollar for bash. `wt config <target>` shows every value
-with the layer it came from, which is the fastest way to answer "why is it
-that?".
+Every `{{` starts a template expression; whitespace inside an expression is
+invalid. Set `template = false` on a `files` entry whose content or source uses
+literal `{{` syntax, such as Jinja, Helm, or GitHub Actions. `wt config
+<target>` shows every value with the layer it came from.
+
+Shell recipes have no `template = false` opt-out. Go-template output such as
+`docker inspect --format '{{.State.Status}}'` therefore cannot appear literally
+in a shell-string recipe; use argv form, or splice the braces through shell
+variables, for example `b='{{' e='}}'; docker inspect --format
+"${b}.State.Status${e}"`.
 
 ## Install
 
@@ -185,16 +188,16 @@ Created orbit/fix-scrolling
 ```
 
 You land inside the worktree, in its own session, with its environment live.
-With tmux, the repository's `build` task runs in a second window in the
-background; with `session.backend = "none"`, it runs synchronously. While a
-build is running, a command this worktree owns says so instead of running the
-wrong one.
+On either session backend, the repository's `build` task starts in a detached
+supervisor and reports its log path without making `wt new` wait. While a build
+is running, a command this worktree owns says so instead of running the wrong
+one; `wt status` and `wt doctor` report completion or failure.
 
 ```sh
 wt new orbit/review-42 --from pr:42 --no-attach   # provision, don't enter
 wt new orbit/scratch --no-open                    # no session at all
 wt new orbit/ticket-42 --meta ticket=ABC-42       # attach opaque fleet data
-wt list
+wt ls
 wt status orbit/fix-scrolling
 ```
 
@@ -206,7 +209,7 @@ cannot read them, and no behaviour depends on them. Keys match
 a key spelled `JIRA-ID` is refused for the capitals and the dash.
 
 Worktrees live under `$WT_HOME/trees/<label>/<name>` by default. `wt path`
-prints the exact root, and `wtcd` from shell initialization changes to it.
+prints the exact root.
 
 ### Doors: `run`, `exec`, `shell`, and sessions
 
@@ -218,12 +221,15 @@ wt run build orbit/fix-scrolling   # declared task, captured log
 wt test orbit/fix-scrolling        # aliases: test/lint/fmt/build
 wt test orbit/fix-scrolling -- tests/api.rs -q
 wt exec orbit/fix-scrolling -- env # one-shot command; child's stdio/status
+wt edit orbit/fix-scrolling        # editor at the tree root, through the door
 wt shell orbit/fix-scrolling       # interactive, non-login shell
 wt which orbit/fix-scrolling orbit # resolve a name through this worktree
 ```
 
-`exec` and `shell` hand the terminal to the child and therefore do not support
-`--json`. Use `wt env --json` to inspect what a child will receive.
+`exec`, `edit`, and `shell` hand the terminal to the child and therefore do not
+support `--json`. `edit` uses the templated settings `editor`, then `$VISUAL`,
+then `$EDITOR`; environment fallback values are used verbatim. Use `wt env
+--json` to inspect what a child will receive.
 
 Arguments after `--` go to one resolved task recipe only; its dependencies do
 not receive them. An argv recipe gets the arguments appended. A shell recipe
@@ -242,6 +248,13 @@ wt open orbit/fix-scrolling --agent codex
 wt open --all
 wt close orbit/fix-scrolling
 ```
+
+With `session.backend = "none"`, a per-tree `open` enters the same interactive
+shell as `wt shell`, `open --no-attach` is a notified no-op, and `open --agent`
+refuses until `session.backend = "tmux"`; `open --all` is tmux-only. With tmux,
+`open --all` skips the canonical checkout, which is the repository anchor and
+can be opened explicitly. The configured `session.agent` default likewise does
+not apply to that canonical checkout; an explicit `--agent` still does.
 
 A coding agent starts only when `wt` *creates* a session, never when it
 attaches to one that already exists — a session is provisioning, and an agent
@@ -265,7 +278,7 @@ start  = ["codex"]
 resume = ["codex", "resume", "--last"]
 ```
 
-Remove a worktree when finished. `wt remove` (or `wt rm`) asks only when the
+Remove a worktree when finished. `wt rm` (`wt remove` is an alias) asks only when the
 removal would destroy work: uncommitted changes, or commits no remote carries
 on a branch it is about to delete. A clean worktree whose commits are pushed is
 removed without a prompt. `--force` permits a removal that loses work and is
@@ -274,9 +287,16 @@ refused rather than guessed at. The other destructive commands — `unregister`,
 `destroy`, `refresh`, `prune` — prompt on a terminal and require `--yes`
 otherwise.
 
+Targets use the same address rules as every other command: a bare name first
+resolves within the current repository label, then as a label itself; an
+unresolved name reports fully qualified candidates. Repeating removal with an
+explicit `label/name` after it has been tombstoned succeeds as an explained
+no-op.
+
 ```sh
 wt rm orbit/fix-scrolling            # asks only if there is work to lose
 wt rm orbit/fix-scrolling --force    # discards it without asking
+wt forget orbit/mis-adopted --yes    # forget wt records; keep the directory
 wt prune --yes
 ```
 
@@ -287,6 +307,10 @@ when its commits are on a remote, since `origin` can restore it; a branch
 carrying unpushed commits is kept, and the summary says so. `--delete-branch`
 deletes it either way, `--keep-branch` never does. `wt prune` reports or
 repairs stale records and out-of-band deletions.
+
+`wt forget` recovers a mis-adoption without touching the directory, branch, or
+Git worktree registration. It removes wt's owned artifacts and records, then
+you can adopt the existing worktree again with the correct name or policy.
 
 ## `.wt.toml` reference
 
@@ -302,7 +326,7 @@ Top-level keys:
   until it is built would make `wt build` unrunnable.
 - `bin`: relative directories prepended to `PATH`. Where the binaries are;
   `commands` is which names they provide.
-- `ports`: named ports, reachable as `${ports.<name>}`.
+- `ports`: named ports, reachable as `{{ports.<name>}}`.
 - `vars`: private values, composed from functions and from each other. Never
   exported. Evaluated as a dependency graph, so order in the file does not
   matter; a cycle or an unknown name is an error naming the keys involved.
@@ -339,15 +363,15 @@ needs = ["cli-login", "database", "build"]
 ```
 
 **The task named `build` runs automatically after a worktree is created.** It
-runs in a background tmux window, or synchronously when the session backend is
-`none`. Give it `needs` to pull in whatever else setup requires:
+runs under the same detached supervisor on either session backend. Give it
+`needs` to pull in whatever else setup requires:
 
 ```toml
 [task.database]
 tied_to = "tree"
-exists  = "psql -lqt | cut -d'|' -f1 | grep -qw ${db_name}"
-run     = "createdb ${db_name} && sqlx migrate run"
-destroy = "dropdb ${db_name}"
+exists  = "psql -lqt | cut -d'|' -f1 | grep -qw '{{db_name}}'"
+run     = "createdb '{{db_name}}' && sqlx migrate run"
+destroy = "dropdb '{{db_name}}'"
 
 [task.build]
 run   = "cargo build"
@@ -416,11 +440,18 @@ separately, so cap what one repository's worktrees may run at once.
 
 ## Environment rules
 
-Inside a worktree, `wt` sets its identity — `WT_LABEL`, `WT_NAME`,
-`WT_NAME_SNAKE`, `WT_NAME_SHORT`, `WT_TARGET`, `WT_BRANCH`, `WT_ROOT`,
-`WT_REPO`, `WT_HOME`, `WT_SLOT`, `WT_SESSION`, `WT_BIN` — so `cd $WT_ROOT`
-works and scripts can find their bearings. `WT_TASK` is set while a task runs;
-`WT_SELF` in resource recipes.
+Inside a worktree, `wt` exports two tiers:
+
+| Tier | Variables | Change policy |
+| --- | --- | --- |
+| Interface | `WT_TARGET`, `WT_LABEL`, `WT_NAME`, `WT_ROOT`, `WT_REPO`, `WT_HOME`, `WT_BRANCH` | Stable scripting interface; changes are announced deliberately. |
+| Mechanism | `WT_ACTIVATION`, `WT_PATH_PREFIX`, `WT_BIN`, `WT_SELF`, `WT_TASK` | Internal door/task plumbing; may change as the mechanism evolves. |
+
+Name transformations belong in template functions such as `{{name_snake()}}`
+and `{{name_short()}}`, not environment variables. `WT_SESSION`,
+`WT_NAME_SNAKE`, `WT_NAME_SHORT`, and `WT_SLOT` are not exported. Inside tmux,
+use tmux's `$TMUX_PANE` for the current pane and `wt ls --json` for registry
+lookup.
 
 Ports are **not** exported. They are an input to your configuration, not part
 of your application's environment: your app reads `PORT` or `DATABASE_URL`
@@ -460,12 +491,12 @@ any default.
 A fresh worktree starts warm **in that ecosystem's own terms**, not by copying
 build output around. Cargo 1.91+ separates build intermediates from outputs;
 the adapter gives every tree its own
-`${home()}/cache/cargo-build/${label()}/${name_short()}` build directory —
+`{{home()}}/cache/cargo-build/{{label()}}/{{name_short()}}` build directory —
 private, because Cargo's unit hashes ignore the workspace path, so trees
 sharing one directory would corrupt each other's generated code and
 freshness — while each tree keeps its binaries in its own `target/`. The
 directory is deleted with the tree, `wt prune` reaps orphans, and
-`wt list --disk` sizes it (`cache_kb`). Cross-tree warmth comes from
+`wt ls --disk` sizes it (`cache_kb`). Cross-tree warmth comes from
 content-addressed caches instead: install sccache and set
 `rustc-wrapper = "sccache"` in `~/.cargo/config.toml [build]`, and every tree
 compiles shared dependencies as cache hits. pnpm hard-links packages from its
@@ -529,14 +560,17 @@ $WT_HOME/
   ...                         rendered files and application-owned data
 ```
 
-Useful maintenance commands: `wt list --probe --disk`, `wt doctor`, `wt locks`,
-`wt prune`, and `wt unregister <label> --yes`. `shell-init` emits `wtcd`,
-`wtsh`, completion support, and a guard that restores a worktree's binary
-prefix if a shell startup file reordered `PATH`:
+Useful maintenance commands: `wt ls --probe --disk`, `wt doctor`, `wt locks`,
+`wt prune`, and `wt unregister <label> --yes`. `shell-init` keeps completion
+support, restores a worktree's binary prefix if a shell startup file reordered
+`PATH`, and adds a guarded `(<target>) ` prompt prefix inside door shells:
 
 ```sh
 eval "$(wt shell-init zsh)"
 ```
+
+See the [cookbook](docs/cookbook.md) for policy shims, agent wrappers, and
+editor integration patterns.
 
 Normative behaviour lives in [spec/SPEC.md](spec/SPEC.md). The original problem
 statement is at [spec/problem-statement.md](spec/problem-statement.md).

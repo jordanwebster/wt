@@ -5,7 +5,7 @@ expression: "normalize(value, &h.root)"
 {
   "command": "shell-init",
   "data": {
-    "script": "wtcd() { local p; p=\"$(command wt path -- \"$@\")\" || return $?; builtin cd -- \"$p\"; }\nwtsh() { eval \"$(command wt env --sh -- \"$@\")\"; }\nif [ -n \"$WT_PATH_PREFIX\" ] && [ \"${PATH#\"$WT_PATH_PREFIX:\"}\" = \"$PATH\" ]; then PATH=\"$WT_PATH_PREFIX:$PATH\"; export PATH; echo \"wt: PATH_NOT_SHADOWED — re-prepended $WT_PATH_PREFIX\" >&2; fi",
+    "script": "if [ -n \"$WT_PATH_PREFIX\" ] && [ \"${PATH#\"$WT_PATH_PREFIX:\"}\" = \"$PATH\" ]; then PATH=\"$WT_PATH_PREFIX:$PATH\"; export PATH; echo \"wt: PATH_NOT_SHADOWED — re-prepended $WT_PATH_PREFIX\" >&2; fi\nif [ -n \"${WT_TARGET:-}\" ]; then case \"${PS1:-}\" in \"($WT_TARGET) \"*) ;; *) PS1=\"($WT_TARGET) ${PS1:-}\" ;; esac; fi",
     "shell": "zsh"
   },
   "error": null,

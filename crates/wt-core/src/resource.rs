@@ -16,20 +16,16 @@ pub struct ResourceKey {
     pub task: String,
 }
 
-pub fn default_name(key: &ResourceKey, name_short: &str) -> String {
+pub fn default_name_template(key: &ResourceKey) -> String {
     let scoped_task = if key.scope.as_str() == "." {
         key.task.clone()
     } else {
         format!("{}/{}", key.scope, key.task)
     };
     let prefix = match key.tied_to {
-        TiedTo::Tree => name_short.to_owned(),
-        TiedTo::Repo => key
-            .label
-            .as_ref()
-            .expect("repo-tied resource keys carry a label")
-            .to_string(),
-        TiedTo::Machine => "machine".to_owned(),
+        TiedTo::Tree => "{{name_short()}}",
+        TiedTo::Repo => "{{label()}}",
+        TiedTo::Machine => "machine",
     };
     format!("{prefix}_{}", name_snake(&scoped_task))
 }
@@ -1660,15 +1656,12 @@ mod tests {
     #[test]
     fn default_names_distinguish_tree_repo_and_machine_resources() {
         let tree = snapshot(true).key;
-        assert_eq!(
-            default_name(&tree, "repo_work_12345678"),
-            "repo_work_12345678_db"
-        );
+        assert_eq!(default_name_template(&tree), "{{name_short()}}_db");
         let mut repo = tree.clone();
         repo.tied_to = TiedTo::Repo;
         repo.name = None;
         repo.scope = RelDir::new("services/api").unwrap();
-        assert_eq!(default_name(&repo, "ignored"), "repo_services_api_db");
+        assert_eq!(default_name_template(&repo), "{{label()}}_services_api_db");
 
         let tree_json = serde_json::to_value(&tree).unwrap();
         assert_eq!(tree_json["name"], "work");
@@ -1679,7 +1672,7 @@ mod tests {
         let mut machine = repo;
         machine.tied_to = TiedTo::Machine;
         machine.label = None;
-        assert_eq!(default_name(&machine, "ignored"), "machine_services_api_db");
+        assert_eq!(default_name_template(&machine), "machine_services_api_db");
         let machine_json = serde_json::to_value(&machine).unwrap();
         assert!(machine_json["label"].is_null());
         assert!(machine_json["name"].is_null());

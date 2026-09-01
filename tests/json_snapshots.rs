@@ -8,9 +8,9 @@ const COMPLETE: &str = r#"
 ports = ["http"]
 sync_inputs = ["README.md"]
 [env]
-APP_PORT = "${ports.http}"
+APP_PORT = "{{ports.http}}"
 [files.".wt/generated"]
-content = "port=${ports.http}"
+content = "port={{ports.http}}"
 [task.hello]
 run = "true"
 [task.test]
@@ -89,6 +89,7 @@ fn every_verb_has_a_normalized_json_contract_snapshot() {
             "adopted",
         ],
     );
+    snapshot(&h, "forget", &["forget", "repo/adopted", "--yes"]);
 
     let source = h.repo("source", "");
     let clone_path = h.root.join("clone");
