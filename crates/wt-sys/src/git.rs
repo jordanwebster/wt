@@ -267,15 +267,16 @@ impl Git {
         Ok(())
     }
 
-    /// Reads one effective config value as seen from the worktree at `tree`;
-    /// an unset key is `None`.
-    pub fn config_get_in(&self, tree: &Path, key: &str) -> Result<Option<String>> {
-        let args = proc::os_args(&["config", "--get", key]);
+    /// Reads one effective boolean config value as seen from the worktree
+    /// at `tree`. Unset is `None`; a malformed value also reads as `None`
+    /// because callers use this as a best-effort observation, never as a
+    /// gate on real work.
+    pub fn config_bool_in(&self, tree: &Path, key: &str) -> Result<Option<bool>> {
+        let args = proc::os_args(&["config", "--type=bool", "--get", key]);
         let output = self.invoke_request(tree, Class::Query, args, false, &[])?;
         match output.child.code {
-            Some(0) => Ok(Some(text(&output.stdout))),
-            Some(1) => Ok(None),
-            _ => Err(command_failed(Class::Query, &[], &output)),
+            Some(0) => Ok(Some(text(&output.stdout) == "true")),
+            _ => Ok(None),
         }
     }
 
