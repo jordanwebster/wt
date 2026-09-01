@@ -22,8 +22,19 @@ pub struct Tmux {
 
 impl Tmux {
     pub fn new(program: impl Into<OsString>, deadline: Duration) -> Self {
+        let program = program.into();
+        // Resolved here rather than left to the spawn's PATH search: execvp
+        // skips a PATH entry that fails to exec with ENOENT and carries on to
+        // the next, so a broken tmux first on PATH would silently give way to
+        // another one further along and report *its* sessions. The first
+        // executable match is the one the user means; if it cannot run, that
+        // is the answer.
+        let program = program
+            .to_str()
+            .and_then(proc::on_path)
+            .map_or(program, OsString::from);
         Self {
-            program: program.into(),
+            program,
             deadline,
             env: BTreeMap::new(),
         }
