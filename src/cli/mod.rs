@@ -151,9 +151,9 @@ impl Command {
             Self::Fmt(_) => "fmt",
             Self::Build(_) => "build",
             Self::Run(_) => "run",
-            Self::List(_) => "ls",
+            Self::List(_) => "list",
             Self::Status(_) => "status",
-            Self::Remove(_) => "rm",
+            Self::Remove(_) => "remove",
             Self::Clone(_) => "clone",
             Self::Register(_) => "register",
             Self::Adopt(_) => "adopt",
@@ -176,6 +176,33 @@ impl Command {
             Self::Refresh(_) => "refresh",
             Self::Locks(_) => "locks",
             Self::Unregister(_) => "unregister",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    #[test]
+    fn override_help_names_every_subcommand() {
+        let mut command = Cli::command();
+        let names = command
+            .get_subcommands()
+            .map(|subcommand| subcommand.get_name().to_owned())
+            .collect::<Vec<_>>();
+        let help = command.render_help().to_string();
+        for name in names {
+            assert!(
+                help.lines().any(|line| {
+                    line.trim_start()
+                        .strip_prefix(&name)
+                        .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+                }),
+                "override_help omits clap subcommand `{name}`"
+            );
         }
     }
 }

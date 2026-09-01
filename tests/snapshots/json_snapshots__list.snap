@@ -3,7 +3,7 @@ source: tests/json_snapshots.rs
 expression: "normalize(value, &h.root)"
 ---
 {
-  "command": "ls",
+  "command": "list",
   "data": {
     "locks": [],
     "trees": [

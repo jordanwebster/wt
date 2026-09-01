@@ -7,6 +7,7 @@ expression: "normalize(value, &h.root)"
   "data": {
     "build": {
       "log": "<log>",
+      "pid": "<pid>",
       "started": "<started>"
     },
     "created": true,

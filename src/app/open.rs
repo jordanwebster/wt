@@ -26,6 +26,30 @@ pub(crate) fn run(context: &mut Context, args: Open) -> Result<Output, CoreError
                 "open trees individually with `wt open <target>`",
             ));
         }
+        if args.agent.is_some() {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "AGENT_REQUIRES_TMUX",
+                "`wt open --agent` requires a session backend",
+                "set `session.backend = \"tmux\"` in `$WT_HOME/config.toml` and retry",
+            ));
+        }
+        if args.no_attach {
+            context.resolve(args.target.as_deref())?;
+            let mut output = Output::data(SessionsData {
+                sessions: Vec::new(),
+            })?
+            .with_notices([Notice {
+                level: NoticeLevel::Info,
+                code: "SESSIONS_DISABLED".to_owned(),
+                subject: args.target.clone(),
+                message: "sessions are disabled; nothing was provisioned".to_owned(),
+            }]);
+            if let Some(notice) = backend_notice {
+                output = output.with_notices([notice]);
+            }
+            return Ok(output);
+        }
         return shell::run(
             context,
             ShellDoor {
@@ -120,16 +144,7 @@ pub(crate) fn start_build(
     let log = logs.join("wt-setup.log");
     let status = Path::new(tree.path.as_str()).join(".wt/build.status");
     wt_sys::fsx::write_store(&status, b"running\n")?;
-    let build = wt_core::lifecycle::BuildState {
-        started: wt_sys::fsx::timestamp()?,
-        log: log.to_string_lossy().into_owned(),
-    };
-    let holder = context.holder(target.to_string(), "build")?;
-    context.mutate_state(&target, &holder, |state| {
-        state.build = Some(build.clone());
-        Ok(())
-    })?;
-
+    let started = wt_sys::fsx::timestamp()?;
     let running_binary = std::env::current_exe().map_err(|error| {
         CoreError::new(
             ExitClass::Internal,
@@ -156,10 +171,19 @@ pub(crate) fn start_build(
         "WT_BACKGROUND_BUILD_STATUS".to_owned(),
         status.to_string_lossy().into_owned(),
     );
-    if let Err(error) = wt_sys::proc::spawn_detached(&request) {
+    let pid = wt_sys::proc::spawn_detached(&request).inspect_err(|_| {
         let _ = wt_sys::fsx::write_store(&status, b"failed\n");
-        return Err(error);
-    }
+    })?;
+    let build = wt_core::lifecycle::BuildState {
+        started,
+        log: log.to_string_lossy().into_owned(),
+        pid,
+    };
+    let holder = context.holder(target.to_string(), "build")?;
+    context.mutate_state(&target, &holder, |state| {
+        state.build = Some(build.clone());
+        Ok(())
+    })?;
     Ok(build)
 }
 
@@ -291,7 +315,7 @@ fn open_tree(
         wt_sys::fsx::create_private_dir(&capture_dir)?;
         let capture = capture_dir.join(format!(
             "session-{}-{}.log",
-            tree.session_name,
+            tree.session_name.replace('/', "_"),
             std::process::id()
         ));
         if let Err(error) = tmux.new_session(

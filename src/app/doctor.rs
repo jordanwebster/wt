@@ -121,6 +121,16 @@ fn tree_findings(
                 format!("automatic build is running; log: {}", build.log),
                 "wait for completion or inspect the build log",
             )),
+            "abandoned" => findings.push(finding(
+                Severity::Warn,
+                "BUILD_ABANDONED",
+                &report.target,
+                format!("automatic build was abandoned; log: {}", build.log),
+                format!(
+                    "inspect the log and run `wt build {}` to retry",
+                    report.target
+                ),
+            )),
             "failed" => findings.push(finding(
                 Severity::Warn,
                 "BUILD_FAILED",
@@ -136,7 +146,19 @@ fn tree_findings(
                 "inspect the log and run `wt build` to establish a fresh status",
             )),
             "ok" => {}
-            _ => unreachable!("list normalises build status values"),
+            value => findings.push(finding(
+                Severity::Warn,
+                "BUILD_STATUS_UNKNOWN",
+                &report.target,
+                format!(
+                    "automatic build has unrecognised status `{value}`; log: {}",
+                    build.log
+                ),
+                format!(
+                    "inspect the log and run `wt build {}` to establish a fresh status",
+                    report.target
+                ),
+            )),
         }
     }
     if report.phase == "missing"

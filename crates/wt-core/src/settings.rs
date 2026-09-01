@@ -199,14 +199,12 @@ impl Default for Settings {
 
 pub fn parse(source: &str) -> Result<Settings, CoreError> {
     let mut settings: Settings = toml::from_str(source).map_err(|error| {
-        let remedy = misplaced_repo_key(source).map_or_else(
-            || "fix `$WT_HOME/config.toml`".to_owned(),
-            |key| {
-                format!(
-                    "`{key}` is a repo-scope key; put it under `[repos.<label>]` in `$WT_HOME/config.toml`"
-                )
-            },
-        );
+        let mut remedy = "fix `$WT_HOME/config.toml`".to_owned();
+        if let Some(key) = misplaced_repo_key(source) {
+            remedy.push_str(&format!(
+                "; `{key}` is a repo-scope key; put it under `[repos.<label>]` in `$WT_HOME/config.toml`"
+            ));
+        }
         CoreError::new(
             ExitClass::State,
             "SETTINGS_INVALID",
@@ -537,6 +535,7 @@ mod tests {
             assert_eq!(error.code.0, "SETTINGS_INVALID");
         }
         let error = parse("env={ FOO='bar' }").unwrap_err();
+        assert!(error.remedy.starts_with("fix `$WT_HOME/config.toml`;"));
         assert!(error.remedy.contains("repo-scope key"));
         assert!(error.remedy.contains("[repos.<label>]"));
         for source in [

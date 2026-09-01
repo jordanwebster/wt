@@ -541,7 +541,6 @@ fn dollar_spellings_are_literal_without_rename_diagnostics() {
     let source = "ports=['http']\n[env]\nAPP_PORT = \"$WT_PORT_HTTP\"\nROOT = '${root()}'\n";
     let config = wt_core::config::parse(source, "literal.wt.toml").unwrap();
     wt_core::config::validate_resolved(&config, 16).unwrap();
-    proof_capture("C3", "dollar spellings: literal");
 }
 
 #[test]
@@ -588,6 +587,14 @@ fn shim_fast_path_has_no_door_effects_and_is_well_below_the_door_budget() {
 
     wt_sys::fsx::remove_path(&work.join("target/debug/orbit")).unwrap();
     write(&work.join(".wt/build.status"), "running\n");
+    let target = wt_core::model::Target::parse("repo/work").unwrap();
+    let state_path = harness.home.join(wt_core::model::tree_state_path(&target));
+    let mut state =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    state.build.as_mut().unwrap().pid = std::process::id();
+    wt_sys::fsx::write_json(&state_path, &state).unwrap();
     refusal_env.insert(
         "WT_BUDGET_TRACE".to_owned(),
         budget_trace.to_string_lossy().into_owned(),

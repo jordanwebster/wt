@@ -971,6 +971,12 @@ This is the opt-out for Jinja, Helm, GitHub Actions, and other formats that own
 `{{`; literal `{{` in any non-file template remains unsupported, an accepted
 limitation.
 
+Shell recipes have no `template = false` opt-out, so literal Go-template
+output such as Docker `--format '{{.State.Status}}'` cannot appear directly in
+a shell-string recipe; use argv form or splice the braces through shell
+variables, for example `b='{{' e='}}'; docker inspect --format
+"${b}.State.Status${e}"`.
+
 This supersedes A44's `${...}`/`$$` syntax and never-template-shell rule, and
 the untouched-shell clause in A58; A44's distinction between declared
 constants, functions, and port lookups and A58's argument-forwarding behavior
@@ -999,10 +1005,13 @@ generated suffix.
 
 With `session.backend = "none"`, a per-tree `open` performs the ordinary door
 and execs the same interactive shell program, arguments, environment, and cwd
-as `wt shell`; `close` is an exit-zero no-op carrying `closed:false` and a
-sessions-disabled notice. `open --all` remains tmux-only and tells callers to
-open trees individually otherwise. On tmux it skips canonical trees: the
-canonical checkout is an explicit anchor, not another fleet session.
+as `wt shell`; `open --no-attach` is an exit-zero no-op with a notice because
+there is no session to provision, while `open --agent X` refuses with a remedy
+naming `session.backend = "tmux"`. `close` is an exit-zero no-op carrying
+`closed:false` and a sessions-disabled notice. `open --all` remains tmux-only
+and tells callers to open trees individually otherwise. On tmux it skips
+canonical trees: the canonical checkout is an explicit anchor, not another
+fleet session.
 
 The `session.agent` default likewise does not select an agent for an explicit
 canonical open. An explicit `--agent` works there, and a recorded agent resumes
@@ -1015,10 +1024,14 @@ agent-to-shell wrapper are unchanged. This supersedes §9.4's
 After a tree becomes ready, `new` launches its effective `build` task through a
 setsid/double-fork supervisor on both backends. The supervisor invokes the
 ordinary task path, so `needs`, locks, environment assembly, logging, and
-foreground `wt build` behavior remain one implementation. It writes `running`
-before launch and atomically replaces the status with `ok` or `failed` after
-the originating CLI has exited. Human output reports that the build started and
-names its log; JSON carries `{started, log}` and never waits.
+foreground `wt build` behavior remain one implementation. Its pid is recorded
+in `BuildState`. It writes `running` before launch and atomically replaces the
+status with `ok` or `failed` after the originating CLI has exited. Human output
+reports that the build started and names its log; JSON carries
+`{started, log, pid}` and never waits. A `running` status with a dead recorded
+pid is abandoned: doctor warns `BUILD_ABANDONED` with a `wt build <target>`
+remedy, list/status report `abandoned`, and an owned-command shim uses the
+ordinary not-built refusal rather than claiming that the build is in progress.
 
 Build failure is subsequently surfaced by `status`, `doctor`, and owned-command
 shims. The tree state contains no window field and tmux owns no setup window.
@@ -1049,7 +1062,7 @@ Claude start recipe names the bare tree with
 
 `wt edit [target]` enters the ordinary door and replaces wt with an editor at
 the tree root. It resolves the command from the templated settings `editor`
-key, then `$VISUAL`, then `$EDITOR`; no value is `EDITOR_UNSET`, with a remedy
+key, then verbatim `$VISUAL`, then verbatim `$EDITOR`; no value is `EDITOR_UNSET`, with a remedy
 that names `editor`. Like `exec` and `shell`, it is a passthrough door: the
 editor receives the full assembled environment and child status, while
 `--json` is refused with `JSON_UNSUPPORTED`. Terminal editors and cold GUI
@@ -1085,6 +1098,9 @@ spellings while `remove` and `list` remain visible aliases. Help is ordered by
 intent — Everyday, Setup, Working inside a tree, Upkeep — and exposes the
 `test`, `lint`, `fmt`, and `build` run aliases. Human `ls --meta <key>` adds the
 selected value as a fleet column; JSON continues carrying the complete map.
+The JSON envelope keeps the canonical long command names `list` and `remove`
+regardless of which accepted spelling was typed; help spelling is a human
+interface, while the envelope is the stable machine interface.
 Finally, when a repo-scope configuration key is misplaced at settings top
 level, the error tells the user to put it below `[repos.<label>]`. Rationale:
 the terse verbs are the daily interface, adoption should preserve the same

@@ -3,7 +3,7 @@ source: tests/json_snapshots.rs
 expression: "normalize(value, &h.root)"
 ---
 {
-  "command": "rm",
+  "command": "remove",
   "data": {
     "branch_deleted": true,
     "branch_kept": null,

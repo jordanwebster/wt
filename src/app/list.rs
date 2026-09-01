@@ -195,12 +195,7 @@ fn tree_report_with_shared(
         .map(|build| {
             let status = Path::new(tree.path.as_str()).join(".wt/build.status");
             wt_sys::fsx::read_string(&status).map(|value| BuildTreeReport {
-                state: value
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| matches!(*value, "running" | "ok" | "failed"))
-                    .unwrap_or("unknown")
-                    .to_owned(),
+                state: normalise_build_status(value.as_deref(), build.pid),
                 started: build.started.clone(),
                 log: build.log.clone(),
             })
@@ -321,6 +316,17 @@ fn tree_report_with_shared(
             .transpose()?
             .flatten(),
     })
+}
+
+fn normalise_build_status(value: Option<&str>, pid: u32) -> String {
+    match value.map(str::trim) {
+        Some("running") if wt_sys::proc::process_alive(pid) => "running",
+        Some("running") => "abandoned",
+        Some("ok") => "ok",
+        Some("failed") => "failed",
+        _ => "unknown",
+    }
+    .to_owned()
 }
 
 #[derive(Default)]

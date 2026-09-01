@@ -69,7 +69,9 @@ fn truth_and_inspection_verbs_match_the_registered_tree() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
     h.register(&repo);
-    assert_eq!(h.json(&["list"])["data"]["trees"][0]["target"], "repo");
+    let list = h.json(&["ls"]);
+    assert_eq!(list["command"], "list");
+    assert_eq!(list["data"]["trees"][0]["target"], "repo");
     assert_eq!(h.json(&["status", "repo"])["data"]["phase"], "ready");
     assert_eq!(
         h.json(&["path", "repo"])["data"]["path"],
@@ -275,6 +277,12 @@ fn edit_is_a_root_cwd_passthrough_door_with_documented_resolution() {
         .assert()
         .success()
         .stdout("editor");
+    h.wt()
+        .env("EDITOR", "printf '{{literal}}'")
+        .args(["edit", "repo"])
+        .assert()
+        .success()
+        .stdout("{{literal}}");
     h.wt()
         .args(["edit", "repo"])
         .assert()
@@ -896,6 +904,68 @@ run = ["sh", "-c", "cat \"$WT_ROOT/.wt/build.status\" > \"$WT_ROOT/seen-status\"
 }
 
 #[test]
+fn dead_build_supervisor_is_abandoned_for_status_doctor_and_shims() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo(
+        "repo",
+        r#"
+bin = ["bin"]
+commands = ["orbit"]
+[task.build]
+run = "true"
+"#,
+    );
+    h.register(&repo);
+    h.json(&["env", "repo"]);
+
+    let target = wt_core::model::Target::parse("repo").unwrap();
+    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
+    let mut state =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    let log = repo.join(".wt/logs/wt-setup.log");
+    state.build = Some(wt_core::lifecycle::BuildState {
+        started: wt_sys::fsx::timestamp().unwrap(),
+        log: log.to_string_lossy().into_owned(),
+        pid: u32::MAX,
+    });
+    wt_sys::fsx::write_json(&state_path, &state).unwrap();
+    common::write(&repo.join(".wt/build.status"), "running\n");
+
+    let listed = h.json(&["ls"]);
+    assert_eq!(listed["data"]["trees"][0]["build"]["state"], "abandoned");
+    assert_eq!(
+        h.json(&["status", "repo"])["data"]["build"]["state"],
+        "abandoned"
+    );
+    let doctor = h.json(&["doctor", "repo"]);
+    let finding = doctor["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "BUILD_ABANDONED")
+        .unwrap();
+    assert_eq!(finding["severity"], "warn");
+    assert!(finding["remedy"]
+        .as_str()
+        .unwrap()
+        .contains("wt build repo"));
+
+    let refusal = h
+        .wt()
+        .args(["exec", "repo", "--", "orbit"])
+        .output()
+        .unwrap();
+    assert_eq!(refusal.status.code(), Some(5));
+    let stderr = String::from_utf8_lossy(&refusal.stderr);
+    assert!(stderr.contains("COMMAND_NOT_BUILT"), "{stderr}");
+    assert!(stderr.contains("wt build repo"), "{stderr}");
+    assert!(!stderr.contains("build is in progress"), "{stderr}");
+}
+
+#[test]
 fn from_resolution_fetches_prs_and_names_branch_holders() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
@@ -1402,11 +1472,14 @@ fn session_transport_uses_inner_no_gate_door_without_tmux_e() {
 #[test]
 fn shell_init_and_completions_are_script_envelopes() {
     let h = Harness::new();
-    let init = h.json(&["shell-init", "zsh"]);
-    let script = init["data"]["script"].as_str().unwrap();
-    assert!(!script.contains("wtcd"));
-    assert!(!script.contains("wtsh"));
-    assert!(script.contains("($WT_TARGET) "));
+    for shell in ["zsh", "bash", "fish"] {
+        let init = h.json(&["shell-init", shell]);
+        let script = init["data"]["script"].as_str().unwrap();
+        assert!(!script.contains("wtcd"));
+        assert!(!script.contains("wtsh"));
+        assert!(script.contains("WT_PATH_PREFIX"));
+        assert!(script.contains("WT_TARGET"));
+    }
     let completions = h.json(&["completions", "fish"]);
     assert!(completions["data"]["script"]
         .as_str()

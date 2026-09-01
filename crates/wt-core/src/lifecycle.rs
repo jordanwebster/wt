@@ -53,6 +53,8 @@ pub struct VerifyState {
 pub struct BuildState {
     pub started: String,
     pub log: String,
+    #[serde(default)]
+    pub pid: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

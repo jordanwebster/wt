@@ -211,7 +211,7 @@ fn session_gets_resolved_home_even_when_server_captured_another_one() {
 }
 
 #[test]
-fn open_reports_a_session_that_dies_during_startup() {
+fn open_reports_canonical_and_linked_sessions_that_die_during_startup() {
     let Some(private) = PrivateTmux::new(false, false) else {
         eprintln!("skipping private-tmux startup test: tmux is not installed");
         return;
@@ -244,6 +244,26 @@ fn open_reports_a_session_that_dies_during_startup() {
     assert!(message.contains("DEAD_SHELL_OUTPUT"), "{message}");
     let session = wt_core::session::name("repo", "canonical");
     assert!(!private.has_session(&session));
+
+    private
+        .harness
+        .json(&["new", "repo/work", "--no-sync", "--no-open"]);
+    let linked_output = private
+        .harness
+        .wt()
+        .args(["open", "repo/work", "--no-attach", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(linked_output.status.code(), Some(7));
+    let linked: serde_json::Value = serde_json::from_slice(&linked_output.stdout).unwrap();
+    assert_eq!(linked["error"]["code"], "SESSION_CREATE_FAILED");
+    assert!(linked["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("DEAD_SHELL_OUTPUT"));
+    let linked_session = wt_core::session::name("repo", "work");
+    assert!(!private.has_session(&linked_session));
+    assert!(!private.harness.home.join("tmp/session-repo").exists());
     common::proof_capture(
         "E2",
         format!(
@@ -885,6 +905,20 @@ fn backend_none_never_invokes_tmux_for_truth_or_teardown() {
         .success()
         .stdout(predicates::str::contains("target=repo/work"))
         .stdout(predicates::str::contains("args=-i"));
+    let no_attach = harness.json(&["open", "repo/work", "--no-attach"]);
+    assert!(no_attach["data"]["sessions"].as_array().unwrap().is_empty());
+    assert!(no_attach["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "SESSIONS_DISABLED"));
+    harness
+        .wt()
+        .args(["open", "repo/work", "--agent", "probe"])
+        .assert()
+        .code(5)
+        .stderr(predicates::str::contains("AGENT_REQUIRES_TMUX"))
+        .stderr(predicates::str::contains("session.backend = \"tmux\""));
     let close = harness.json(&["close", "repo/work"]);
     assert_eq!(close["data"]["sessions"][0]["closed"], false);
     assert!(close["notices"]

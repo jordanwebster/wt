@@ -129,6 +129,12 @@ invalid. Set `template = false` on a `files` entry whose content or source uses
 literal `{{` syntax, such as Jinja, Helm, or GitHub Actions. `wt config
 <target>` shows every value with the layer it came from.
 
+Shell recipes have no `template = false` opt-out. Go-template output such as
+`docker inspect --format '{{.State.Status}}'` therefore cannot appear literally
+in a shell-string recipe; use argv form, or splice the braces through shell
+variables, for example `b='{{' e='}}'; docker inspect --format
+"${b}.State.Status${e}"`.
+
 ## Install
 
 ```sh
@@ -215,12 +221,15 @@ wt run build orbit/fix-scrolling   # declared task, captured log
 wt test orbit/fix-scrolling        # aliases: test/lint/fmt/build
 wt test orbit/fix-scrolling -- tests/api.rs -q
 wt exec orbit/fix-scrolling -- env # one-shot command; child's stdio/status
+wt edit orbit/fix-scrolling        # editor at the tree root, through the door
 wt shell orbit/fix-scrolling       # interactive, non-login shell
 wt which orbit/fix-scrolling orbit # resolve a name through this worktree
 ```
 
-`exec` and `shell` hand the terminal to the child and therefore do not support
-`--json`. Use `wt env --json` to inspect what a child will receive.
+`exec`, `edit`, and `shell` hand the terminal to the child and therefore do not
+support `--json`. `edit` uses the templated settings `editor`, then `$VISUAL`,
+then `$EDITOR`; environment fallback values are used verbatim. Use `wt env
+--json` to inspect what a child will receive.
 
 Arguments after `--` go to one resolved task recipe only; its dependencies do
 not receive them. An argv recipe gets the arguments appended. A shell recipe
@@ -241,10 +250,11 @@ wt close orbit/fix-scrolling
 ```
 
 With `session.backend = "none"`, a per-tree `open` enters the same interactive
-shell as `wt shell`; `open --all` is tmux-only. With tmux, `open --all` skips
-the canonical checkout, which is the repository anchor and can be opened
-explicitly. The configured `session.agent` default likewise does not apply to
-that canonical checkout; an explicit `--agent` still does.
+shell as `wt shell`, `open --no-attach` is a notified no-op, and `open --agent`
+refuses until `session.backend = "tmux"`; `open --all` is tmux-only. With tmux,
+`open --all` skips the canonical checkout, which is the repository anchor and
+can be opened explicitly. The configured `session.agent` default likewise does
+not apply to that canonical checkout; an explicit `--agent` still does.
 
 A coding agent starts only when `wt` *creates* a session, never when it
 attaches to one that already exists — a session is provisioning, and an agent
@@ -286,6 +296,7 @@ no-op.
 ```sh
 wt rm orbit/fix-scrolling            # asks only if there is work to lose
 wt rm orbit/fix-scrolling --force    # discards it without asking
+wt forget orbit/mis-adopted --yes    # forget wt records; keep the directory
 wt prune --yes
 ```
 
@@ -296,6 +307,10 @@ when its commits are on a remote, since `origin` can restore it; a branch
 carrying unpushed commits is kept, and the summary says so. `--delete-branch`
 deletes it either way, `--keep-branch` never does. `wt prune` reports or
 repairs stale records and out-of-band deletions.
+
+`wt forget` recovers a mis-adoption without touching the directory, branch, or
+Git worktree registration. It removes wt's owned artifacts and records, then
+you can adopt the existing worktree again with the correct name or policy.
 
 ## `.wt.toml` reference
 
