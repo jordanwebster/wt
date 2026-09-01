@@ -58,6 +58,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: taiki-e/upload-rust-binary-action@v1
+        env:
+          # blake3 compiles NEON C on aarch64, and cc-rs looks for a
+          # musl-prefixed gcc that the runner lacks. The code calls nothing
+          # from libc, so the host compiler on the arm runner builds it fine.
+          CC_aarch64_unknown_linux_musl: gcc
         with:
           bin: wt
           target: ${{ matrix.target }}
