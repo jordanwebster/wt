@@ -67,5 +67,15 @@ terminal profile for integrated terminals. Repository-owned editor files can
 be rendered per tree with `files`, for example a `.vscode/settings.json` whose
 content uses `{{root()}}`, private vars, or declared ports.
 
-The stable and mechanism environment tiers are listed in
-[Environment rules](../README.md#environment-rules).
+## Environment tiers
+
+| Tier | Variables | Change policy |
+| --- | --- | --- |
+| Interface | `WT_TARGET`, `WT_LABEL`, `WT_NAME`, `WT_ROOT`, `WT_REPO`, `WT_HOME`, `WT_BRANCH` | Stable scripting interface; changes are announced deliberately. |
+| Mechanism | `WT_ACTIVATION`, `WT_PATH_PREFIX`, `WT_BIN`, `WT_SELF`, `WT_TASK` | Internal door/task plumbing; may change as the mechanism evolves. |
+
+Name transformations belong in template functions such as `{{name_snake()}}`;
+`WT_SESSION`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, and `WT_SLOT` are not
+exported. See [Environment rules](../README.md#environment-rules) for the
+full rules, including why ports are configuration inputs rather than
+environment.

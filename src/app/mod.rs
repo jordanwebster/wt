@@ -317,6 +317,10 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
                 .flatten();
             if let Some(path) = &status {
                 let _ = wt_sys::fsx::write_store(path, b"running\n");
+                // The recorded pid otherwise still names the finished
+                // supervisor, and a dead pid beside a `running` status reads
+                // as abandoned (A69) — for the whole foreground run.
+                record_build_pid(context, target.as_deref());
             }
             let result = run::run(context, args.into_run("build"));
             record_build_result(status.as_deref(), &result);
@@ -341,6 +345,21 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::ShellInit(args) => shell_init::run(context, args),
         Command::Completions(args) => completions::run(context, args),
     }
+}
+
+fn record_build_pid(context: &Context, target: Option<&str>) {
+    let Ok(target) = context.resolve(target) else {
+        return;
+    };
+    let Ok(holder) = context.holder(target.to_string(), "build") else {
+        return;
+    };
+    let _ = context.mutate_state(&target, &holder, |state| {
+        if let Some(build) = state.build.as_mut() {
+            build.pid = std::process::id();
+        }
+        Ok(())
+    });
 }
 
 fn build_status_path(context: &Context, target: Option<&str>) -> Option<std::path::PathBuf> {

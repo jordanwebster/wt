@@ -1032,6 +1032,9 @@ reports that the build started and names its log; JSON carries
 pid is abandoned: doctor warns `BUILD_ABANDONED` with a `wt build <target>`
 remedy, list/status report `abandoned`, and an owned-command shim uses the
 ordinary not-built refusal rather than claiming that the build is in progress.
+A foreground `wt build` that resets the status to `running` records its own
+pid in the same step, so a live foreground run is never judged against the
+finished supervisor's dead pid.
 
 Build failure is subsequently surfaced by `status`, `doctor`, and owned-command
 shims. The tree state contains no window field and tmux owns no setup window.

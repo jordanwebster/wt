@@ -966,6 +966,49 @@ run = "true"
 }
 
 #[test]
+fn foreground_build_records_its_own_pid_over_a_dead_supervisor() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo(
+        "repo",
+        r#"
+[task.build]
+run = "true"
+"#,
+    );
+    h.register(&repo);
+    h.json(&["env", "repo"]);
+
+    let target = wt_core::model::Target::parse("repo").unwrap();
+    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
+    let mut state =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    state.build = Some(wt_core::lifecycle::BuildState {
+        started: wt_sys::fsx::timestamp().unwrap(),
+        log: repo
+            .join(".wt/logs/wt-setup.log")
+            .to_string_lossy()
+            .into_owned(),
+        pid: u32::MAX,
+    });
+    wt_sys::fsx::write_json(&state_path, &state).unwrap();
+    common::write(&repo.join(".wt/build.status"), "running\n");
+
+    h.json(&["build", "repo"]);
+
+    // The reset to `running` must carry the live pid, or the whole foreground
+    // run reads as abandoned against the finished supervisor's dead pid.
+    let state =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    assert_ne!(state.build.unwrap().pid, u32::MAX);
+    assert_eq!(h.json(&["status", "repo"])["data"]["build"]["state"], "ok");
+}
+
+#[test]
 fn from_resolution_fetches_prs_and_names_branch_holders() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
@@ -1909,7 +1952,9 @@ fn rm_and_ls_are_accepted_spellings() {
         .unwrap()
         .iter()
         .any(|tree| tree["target"] == "repo/work"));
-    assert_eq!(h.json(&["rm", "repo/work"])["data"]["removed"], true);
+    let removed = h.json(&["rm", "repo/work"]);
+    assert_eq!(removed["command"], "remove");
+    assert_eq!(removed["data"]["removed"], true);
 }
 
 #[test]
