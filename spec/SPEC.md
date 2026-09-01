@@ -683,8 +683,11 @@ enabled once, and never when `core.bare`/`core.worktree` would need
 relocating first). `doctor` reports an existing tree without the untracked
 cache — that key alone, since the monitor is platform-gated — as
 `STATUS_CACHE_OFF`. Tree observations are independent read-only scans, so a
-fleet `ls` may take them concurrently; output order and error selection are
-those of the sequential read.
+fleet `ls` may take them concurrently; concurrency changes neither output
+order nor which error is reported relative to the sequential
+implementation — the up-front shared resource-state read and the `--probe`
+prewalk surface their errors first, as they always have, and per-tree
+observation errors then surface in tree order, earliest tree first.
 
 Exclusive resource rows additionally show `holder|null` in JSON and the live
 holder in human output. A non-holder `--probe` skips the recipe and leaves its

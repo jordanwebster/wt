@@ -24,13 +24,21 @@ fn trace_records(h: &Harness) -> Vec<Record> {
     let text = std::fs::read_to_string(h.home.join("logs/wt.jsonl")).expect("timing log exists");
     text.lines()
         .map(|line| {
-            // A malformed record must fail the test: silently skipping one
-            // would let a "doctor never ran X" assertion pass vacuously.
+            // A malformed or field-stripped record must fail the test:
+            // silently coercing one would let a "doctor never ran X"
+            // assertion pass vacuously.
             let value = serde_json::from_str::<serde_json::Value>(line)
                 .unwrap_or_else(|error| panic!("malformed trace record {line:?}: {error}"));
+            let field = |key: &str| {
+                value[key]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("trace record without string {key}: {line:?}"))
+                    .to_owned()
+            };
             Record {
-                cmd: value["cmd"].as_str().unwrap_or_default().to_owned(),
-                name: value["name"].as_str().unwrap_or_default().to_owned(),
+                cmd: field("cmd"),
+                name: field("name"),
+                // Only wt-composed git argument lists carry an op.
                 op: value["op"].as_str().unwrap_or_default().to_owned(),
             }
         })
@@ -118,9 +126,11 @@ fn created_trees_get_git_status_caches_scoped_per_worktree() {
         "the canonical checkout is not reconfigured"
     );
     // The built-in filesystem monitor is platform- and version-gated;
-    // assert it exactly where the gate says it applies.
+    // assert it exactly where the gate says it applies. The harness PATH
+    // is shims:/usr/bin:/bin with no git shim, so wt's git is /usr/bin/git
+    // — version the same executable, not whatever leads the outer PATH.
     if cfg!(target_os = "macos")
-        && wt_sys::git::Git::version("git", Duration::from_secs(10)).unwrap() >= (2, 37, 0)
+        && wt_sys::git::Git::version("/usr/bin/git", Duration::from_secs(10)).unwrap() >= (2, 37, 0)
     {
         assert_eq!(
             git_output(&tree, &["config", "--worktree", "--get", "core.fsmonitor"]).as_deref(),
@@ -135,6 +145,19 @@ fn acceleration_survives_a_repo_with_worktree_config_already_enabled() {
     let h = Harness::new();
     let repo = h.repo("repo", "");
     common::git(&repo, &["config", "extensions.worktreeConfig", "true"]);
+    // The git-prescribed arrangement for such a repository: core.worktree
+    // lives in the main worktree's own config.worktree. An effective-value
+    // guard that cannot tell this from unmigrated shared config would skip
+    // acceleration here.
+    common::git(
+        &repo,
+        &[
+            "config",
+            "--worktree",
+            "core.worktree",
+            repo.to_str().unwrap(),
+        ],
+    );
     h.register(&repo);
     let created = h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
     let tree = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
@@ -249,22 +272,77 @@ fn list_reports_the_earliest_trees_error_first() {
     h.register(&first);
     let second = h.repo("bbb", "");
     h.register(&second);
-    // The earlier tree has corrupt state; the later tree has broken git
-    // metadata that the up-front fact collection would hit first. Error
-    // selection must match the sequential read: the earlier tree wins.
+    // The earlier tree has corrupt tree state; the later repository's
+    // corrupt HEAD makes every git command fail, including the up-front
+    // per-label fact queries (verified against the pre-fix build, which
+    // reported that later GIT_FAILED instead). Error selection must match
+    // the sequential read: the earlier tree's state error wins.
     let state_dir = h.home.join("state/aaa");
     let state_file = std::fs::read_dir(&state_dir)
         .unwrap()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .expect("aaa has a state file");
+        .find(|path| {
+            // Exactly the tree's state file — never the label's shared
+            // `_repo.json`, whose read happens up front by contract.
+            path.extension().is_some_and(|ext| ext == "json")
+                && path.file_stem().is_some_and(|stem| stem != "_repo")
+        })
+        .expect("aaa has a tree state file");
     common::write(&state_file, "not json");
     common::write(&second.join(".git/HEAD"), "garbage\n");
     let output = h.wt().args(["list", "--json"]).output().unwrap();
     assert!(!output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["error"]["code"], "STATE_CORRUPT");
+    // Two files could produce STATE_CORRUPT; the message's path pins the
+    // selection to the earlier tree's file.
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(state_file.to_str().unwrap()),
+        "the reported error names the earlier tree's state file: {}",
+        value["error"]["message"]
+    );
+}
+
+#[test]
+fn a_failed_fallback_reports_the_narrow_fetch_error() {
+    let h = Harness::new();
+    let repo = h.repo("repo", "");
+    h.register(&repo);
+    // With origin unreachable, both the narrow fetch and the wildcard
+    // fallback fail; the reported error must be the narrow one, which
+    // names the refs the creation asked for.
+    common::git(
+        &repo,
+        &["remote", "set-url", "origin", "/nonexistent/origin.git"],
+    );
+    let output = h
+        .wt()
+        .args([
+            "new",
+            "repo/x",
+            "--from",
+            "wanted",
+            "--no-sync",
+            "--no-open",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("refs/heads/wanted"),
+        "the narrow refspec is named: {message}"
+    );
+    assert!(
+        !message.contains("refs/heads/*"),
+        "the wildcard attempt's error is not the one reported: {message}"
+    );
 }
 
 #[test]
@@ -272,26 +350,41 @@ fn session_snapshot_keeps_the_three_session_answers() {
     let h = Harness::new();
     let repo = h.repo("repo", "");
     h.register(&repo);
-    h.json(&["open", "repo", "--agent", "codex", "--no-attach"]);
-    let session = |h: &Harness| {
-        h.json(&["list"])["data"]["trees"][0]["session"]
-            .as_str()
-            .unwrap()
-            .to_owned()
+    h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
+    let sessions = |h: &Harness| {
+        let list = h.json(&["list"]);
+        let of = |target: &str| {
+            list["data"]["trees"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tree| tree["target"] == target)
+                .unwrap()["session"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        (of("repo"), of("repo/work"))
     };
+    // No server, no sessions: everything is a definite no.
+    assert_eq!(sessions(&h), ("no".into(), "no".into()));
+    // One live session marks exactly its own tree, not every tree.
+    h.json(&["open", "repo", "--agent", "codex", "--no-attach"]);
     assert_eq!(
-        session(&h),
-        "yes",
-        "one live snapshot marks the exact session"
+        sessions(&h),
+        ("yes".into(), "no".into()),
+        "the snapshot discriminates by exact session name"
     );
     // A tmux that fails outright leaves every session unknown, never a
-    // false no.
+    // false no — whether it runs and fails or cannot be spawned at all.
     common::write_executable(&h.shims.join("tmux"), "#!/bin/sh\nexit 2\n");
-    assert_eq!(session(&h), "unknown");
+    assert_eq!(sessions(&h), ("unknown".into(), "unknown".into()));
+    wt_sys::fsx::remove_path(&h.shims.join("tmux")).unwrap();
+    assert_eq!(sessions(&h), ("unknown".into(), "unknown".into()));
     // Backend none answers without asking tmux at all.
     common::write(
         &h.home.join("config.toml"),
         "[session]\nbackend = \"none\"\n",
     );
-    assert_eq!(session(&h), "no");
+    assert_eq!(sessions(&h), ("no".into(), "no".into()));
 }

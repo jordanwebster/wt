@@ -254,9 +254,17 @@ impl Git {
             // those keys relocated first, so leave such a checkout alone.
             // With the extension already on, any such keys are already
             // where git prescribes and no migration question arises.
-            let bare = self.invoke_status(Class::Query, &["config", "--get", "core.bare"])?;
-            if bare.child.code == Some(0) && text(&bare.stdout) == "true" {
-                return Ok(());
+            let bare = self.invoke_status(
+                Class::Query,
+                &["config", "--type=bool", "--get", "core.bare"],
+            )?;
+            match bare.child.code {
+                // Unset, or an explicit false: safe to proceed.
+                Some(1) => {}
+                Some(0) if text(&bare.stdout) == "false" => {}
+                // True in any of git's spellings, an unparsable value, or a
+                // failed query: leave the checkout alone.
+                _ => return Ok(()),
             }
             let core_worktree =
                 self.invoke_status(Class::Query, &["config", "--get", "core.worktree"])?;
