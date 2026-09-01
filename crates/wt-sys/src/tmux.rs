@@ -62,6 +62,21 @@ impl Tmux {
         Ok((major, minor))
     }
 
+    /// Lists live session names in one query, so a fleet view costs one
+    /// tmux subprocess instead of one per tree. No running server means
+    /// no sessions, which tmux reports as its ordinary absent status.
+    pub fn session_names(&self) -> Result<std::collections::BTreeSet<String>> {
+        let output = self.status(&["list-sessions", "-F", "#{session_name}"])?;
+        match output.child.code {
+            Some(0) => Ok(String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect()),
+            Some(1) => Ok(std::collections::BTreeSet::new()),
+            _ => Err(tmux_failed("list sessions", &output)),
+        }
+    }
+
     /// Runs `has-session`, mapping tmux's ordinary absent status to false.
     pub fn has_session(&self, session: &str) -> Result<bool> {
         let exact = exact_target(session);

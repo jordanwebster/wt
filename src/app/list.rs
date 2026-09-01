@@ -37,16 +37,10 @@ pub(crate) fn run(context: &mut Context, args: List) -> Result<Output, CoreError
     } else {
         SharedResourceRecords::read(context, &selected)?
     };
+    let env = ReportEnv::collect(context, &selected, shared)?;
     let mut trees = Vec::new();
-    for tree in selected {
-        trees.push(tree_report_with_shared(
-            context,
-            &tree,
-            args.fast,
-            args.disk,
-            false,
-            Some(&shared),
-        )?);
+    for report in collect_reports(context, &selected, args.fast, args.disk, &env) {
+        trees.push(report?);
     }
     wt_core::report::sort_trees(&mut trees);
     let mut locks = Vec::new();
@@ -95,16 +89,165 @@ pub(crate) fn tree_report(
     disk: bool,
     probe: bool,
 ) -> Result<TreeReport, CoreError> {
-    tree_report_with_shared(context, tree, fast, disk, probe, None)
+    let target = target_of(tree);
+    let exists = matches!(
+        wt_sys::fsx::path_kind(Path::new(tree.path.as_str()))?,
+        wt_sys::fsx::PathKind::Directory
+    );
+    if probe && exists && context.identity_ok(tree)? {
+        let mut entered = door::enter(context, Some(&target.to_string()), "probe")?;
+        executor::refresh_all_declarations(context, &entered)?;
+        executor::probe_all_resources(context, &entered)?;
+        entered.release_gate();
+    }
+    let trees = std::slice::from_ref(tree);
+    let shared = SharedResourceRecords::read(context, trees)?;
+    let env = ReportEnv::collect(context, trees, shared)?;
+    tree_report_with_env(context, tree, fast, disk, &env)
 }
 
-fn tree_report_with_shared(
-    context: &mut Context,
+/// Per-invocation observations every tree report shares: repository-wide
+/// git facts collected once per label, one tmux session snapshot, and the
+/// repo/machine resource records. Collected up front so individual reports
+/// are read-only and can run concurrently.
+pub(crate) struct ReportEnv {
+    shared: SharedResourceRecords,
+    labels: BTreeMap<Label, LabelGitFacts>,
+    sessions: SessionSnapshot,
+}
+
+struct LabelGitFacts {
+    default_ref: String,
+    default_ref_exists: bool,
+}
+
+enum SessionSnapshot {
+    Disabled,
+    Unknown,
+    Live(BTreeSet<String>),
+}
+
+impl ReportEnv {
+    pub(crate) fn collect(
+        context: &Context,
+        trees: &[TreeRec],
+        shared: SharedResourceRecords,
+    ) -> Result<Self, CoreError> {
+        let mut labels = BTreeMap::new();
+        for tree in trees {
+            if labels.contains_key(&tree.label) {
+                continue;
+            }
+            let exists = matches!(
+                wt_sys::fsx::path_kind(Path::new(tree.path.as_str()))?,
+                wt_sys::fsx::PathKind::Directory
+            );
+            if !exists || !context.identity_ok(tree)? {
+                continue;
+            }
+            // The refs below are shared repository state, so any healthy
+            // tree of the label observes the same answer.
+            let git = context.git(Path::new(tree.path.as_str()))?;
+            let default = git.default_branch()?;
+            let default_ref = format!("refs/remotes/origin/{default}");
+            let default_ref_exists = git.ref_exists(&default_ref)?;
+            labels.insert(
+                tree.label.clone(),
+                LabelGitFacts {
+                    default_ref,
+                    default_ref_exists,
+                },
+            );
+        }
+        let sessions = if context.settings.session.backend == wt_core::settings::SessionBackend::None
+        {
+            SessionSnapshot::Disabled
+        } else {
+            let timeout = wt_core::model::duration_millis(&context.settings.session.tmux_timeout)
+                .map(Duration::from_millis)
+                .unwrap_or(Duration::from_secs(10));
+            match wt_sys::tmux::Tmux::new("tmux", timeout).session_names() {
+                Ok(names) => SessionSnapshot::Live(names),
+                Err(_) => SessionSnapshot::Unknown,
+            }
+        };
+        Ok(Self {
+            shared,
+            labels,
+            sessions,
+        })
+    }
+
+    pub(crate) fn session_state(&self, tree: &TreeRec) -> String {
+        match &self.sessions {
+            SessionSnapshot::Disabled => "no",
+            SessionSnapshot::Unknown => "unknown",
+            SessionSnapshot::Live(names) => {
+                if names.contains(&tree.session_name()) {
+                    "yes"
+                } else {
+                    "no"
+                }
+            }
+        }
+        .to_owned()
+    }
+
+    /// The default-branch ref for one label when it is known to exist.
+    pub(crate) fn default_ref(&self, label: &Label) -> Option<&str> {
+        self.labels
+            .get(label)
+            .filter(|facts| facts.default_ref_exists)
+            .map(|facts| facts.default_ref.as_str())
+    }
+}
+
+/// Builds every report through a small worker pool: each report is an
+/// independent read-only observation of a different worktree, and `git
+/// status` dominates its cost, so the fleet pays for its slowest tree
+/// rather than the sum. Results keep input order; error selection matches
+/// the sequential loop by failing on the earliest tree that failed.
+fn collect_reports(
+    context: &Context,
+    trees: &[TreeRec],
+    fast: bool,
+    disk: bool,
+    env: &ReportEnv,
+) -> Vec<Result<TreeReport, CoreError>> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(trees.len())
+        .min(8);
+    if workers <= 1 {
+        return trees
+            .iter()
+            .map(|tree| tree_report_with_env(context, tree, fast, disk, env))
+            .collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::OnceLock<Result<TreeReport, CoreError>>> =
+        trees.iter().map(|_| std::sync::OnceLock::new()).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(tree) = trees.get(index) else { break };
+                let _ = slots[index].set(tree_report_with_env(context, tree, fast, disk, env));
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| slot.into_inner().expect("a worker visited every index"))
+        .collect()
+}
+
+fn tree_report_with_env(
+    context: &Context,
     tree: &wt_core::model::TreeRec,
     fast: bool,
     disk: bool,
-    probe: bool,
-    shared: Option<&SharedResourceRecords>,
+    env: &ReportEnv,
 ) -> Result<TreeReport, CoreError> {
     let target = target_of(tree);
     let timed = wt_sys::trace::span("span", "tree_report").about(target.to_string());
@@ -113,12 +256,6 @@ fn tree_report_with_shared(
         wt_sys::fsx::PathKind::Directory
     );
     let identity_ok = exists && context.identity_ok(tree)?;
-    if probe && identity_ok {
-        let mut entered = door::enter(context, Some(&target.to_string()), "probe")?;
-        executor::refresh_all_declarations(context, &entered)?;
-        executor::probe_all_resources(context, &entered)?;
-        entered.release_gate();
-    }
     let state = context.read_state(&target)?;
     let phase = context.phase(tree, state.as_ref())?;
     let (branch, detached_sha, dirty, upstream, behind_default, drift) = if exists && identity_ok {
@@ -136,40 +273,40 @@ fn tree_report_with_shared(
             None
         };
         let upstream = if let Some(branch) = branch.as_deref() {
-            if git.upstream_track(branch)? == "[gone]" {
+            let info = git.upstream_info(branch)?;
+            if info.gone {
                 None
             } else {
-                git.upstream(branch)?
+                info.name
                     .map(|upstream| git.ahead_behind("HEAD", &upstream))
                     .transpose()?
             }
         } else {
             None
         };
-        let default = git.default_branch()?;
-        let default_ref = format!("refs/remotes/origin/{default}");
-        let behind_default = if git.ref_exists(&default_ref)? {
-            Some(to_u32(git.ahead_behind("HEAD", &default_ref)?.behind))
-        } else {
-            None
-        };
-        let drift = if fast || !git.ref_exists(&default_ref)? {
-            Vec::new()
-        } else {
-            let inputs = state
-                .as_ref()
-                .and_then(|state| state.sync.as_ref())
-                .map(|sync| sync.inputs.keys().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            if inputs.is_empty() {
-                Vec::new()
-            } else {
-                let names = git
-                    .diff_name_only("HEAD", &default_ref, &[])?
-                    .into_iter()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>();
-                wt_core::drift::drift(&names, &inputs)
+        let default_ref = env.default_ref(&tree.label);
+        let behind_default = default_ref
+            .map(|default_ref| git.ahead_behind("HEAD", default_ref))
+            .transpose()?
+            .map(|counts| to_u32(counts.behind));
+        let drift = match default_ref.filter(|_| !fast) {
+            None => Vec::new(),
+            Some(default_ref) => {
+                let inputs = state
+                    .as_ref()
+                    .and_then(|state| state.sync.as_ref())
+                    .map(|sync| sync.inputs.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                if inputs.is_empty() {
+                    Vec::new()
+                } else {
+                    let names = git
+                        .diff_name_only("HEAD", default_ref, &[])?
+                        .into_iter()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>();
+                    wt_core::drift::drift(&names, &inputs)
+                }
             }
         };
         (
@@ -189,7 +326,7 @@ fn tree_report_with_shared(
     } else {
         (None, None, None, None, None, Vec::new())
     };
-    let session = session_state(context, tree);
+    let session = env.session_state(tree);
     let build = state
         .as_ref()
         .and_then(|state| state.build.as_ref())
@@ -227,28 +364,7 @@ fn tree_report_with_shared(
         .into_iter()
         .flat_map(|state| state.resources.values().cloned())
         .collect::<Vec<_>>();
-    if let Some(shared) = shared {
-        resource_records.extend(shared.for_tree(tree));
-    } else {
-        resource_records.extend(
-            wt_sys::fsx::read_json::<RepoState>(
-                &context
-                    .home
-                    .join(wt_core::model::repo_state_path(&tree.label)),
-                "STATE_CORRUPT",
-            )?
-            .into_iter()
-            .flat_map(|state| state.resources.into_values()),
-        );
-        resource_records.extend(
-            wt_sys::fsx::read_json::<RepoState>(
-                &context.home.join(wt_core::model::machine_state_path()),
-                "STATE_CORRUPT",
-            )?
-            .into_iter()
-            .flat_map(|state| state.resources.into_values()),
-        );
-    }
+    resource_records.extend(env.shared.for_tree(tree));
     let resources = resource_reports(context, resource_records)?;
     let sync = state.as_ref().and_then(|state| state.sync.as_ref());
     let changed = if exists && identity_ok {
@@ -333,12 +449,12 @@ fn normalise_build_status(value: Option<&str>, pid: u32) -> String {
 }
 
 #[derive(Default)]
-struct SharedResourceRecords {
+pub(crate) struct SharedResourceRecords {
     records: BTreeMap<ResourceKey, ResourceRecord>,
 }
 
 impl SharedResourceRecords {
-    fn read(context: &Context, trees: &[TreeRec]) -> Result<Self, CoreError> {
+    pub(crate) fn read(context: &Context, trees: &[TreeRec]) -> Result<Self, CoreError> {
         if trees.is_empty() {
             return Ok(Self::default());
         }
@@ -534,22 +650,6 @@ fn resource_reports(
         ))
     });
     Ok(reports)
-}
-
-fn session_state(context: &Context, tree: &wt_core::model::TreeRec) -> String {
-    if context.settings.session.backend == wt_core::settings::SessionBackend::None {
-        return "no".to_owned();
-    }
-    let timeout = wt_core::model::duration_millis(&context.settings.session.tmux_timeout)
-        .map(Duration::from_millis)
-        .unwrap_or(Duration::from_secs(10));
-    match wt_sys::tmux::Tmux::new("tmux", timeout).has_session(&tree.session_name()) {
-        Ok(true) => "yes",
-        Ok(false) => "no",
-        Err(error) if error.code.0 == "TOOL_MISSING" => "unknown",
-        Err(_) => "unknown",
-    }
-    .to_owned()
 }
 
 pub(crate) const fn phase_name(phase: DerivedPhase) -> &'static str {

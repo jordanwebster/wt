@@ -169,6 +169,7 @@ s="$WT_SHIM_STATE/tmux"; mkdir -p "$s"
 case "$1" in
   -V) echo "tmux 3.4" ;;
   has-session) n=${3#=}; [ -d "$s/$n" ] ;;
+  list-sessions) (cd "$s" 2>/dev/null && find . -type f -name cwd | sed 's|^\./||; s|/cwd$||') || true ;;
   new-session)
     shift; n=""; c="."
     while [ $# -gt 0 ]; do

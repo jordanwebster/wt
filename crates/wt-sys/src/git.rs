@@ -94,6 +94,14 @@ pub struct AheadBehind {
     pub behind: u64,
 }
 
+/// One branch's upstream name and whether that upstream is gone, read
+/// together so callers pay one subprocess instead of two.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UpstreamInfo {
+    pub name: Option<String>,
+    pub gone: bool,
+}
+
 impl Git {
     /// Opens a git effects handle without spending a validation subprocess.
     pub fn open(repo: &Path, deadlines: Deadlines) -> Result<Self> {
@@ -209,8 +217,66 @@ impl Git {
                 args.push(start.into());
             }
         }
-        self.invoke_os(Class::Worktree, args)?;
+        // Parallel checkout: one worker per core populates the new tree.
+        // Passed through the environment (git >= 2.31, wt's floor) so the
+        // timing log still names the operation `worktree add`.
+        let extra_env = [
+            ("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()),
+            ("GIT_CONFIG_KEY_0".to_owned(), "checkout.workers".to_owned()),
+            ("GIT_CONFIG_VALUE_0".to_owned(), "0".to_owned()),
+        ];
+        let output = self.invoke_request(&self.repo, Class::Worktree, args.clone(), false, &extra_env)?;
+        ensure_success(Class::Worktree, &args, output)?;
         crate::failpoint::new_g()
+    }
+
+    /// Best-effort enablement of git's own exact status caches for one
+    /// freshly created worktree: the untracked cache everywhere, plus the
+    /// built-in filesystem monitor where git supports it (macOS and
+    /// Windows, git >= 2.37). Scoped through `extensions.worktreeConfig`
+    /// so no other checkout of the repository changes behaviour. Both
+    /// caches keep `git status` output exact — git invalidates them
+    /// itself — they only shrink the working-tree scan.
+    pub fn accelerate_status(&self, tree: &Path) -> Result<()> {
+        // A repository carrying `core.bare` or `core.worktree` in shared
+        // config would need those keys relocated before enabling
+        // `extensions.worktreeConfig` is safe; leave such a checkout alone.
+        let bare = self.invoke_status(Class::Query, &["config", "--get", "core.bare"])?;
+        if bare.child.code == Some(0) && text(&bare.stdout) == "true" {
+            return Ok(());
+        }
+        let core_worktree = self.invoke_status(Class::Query, &["config", "--get", "core.worktree"])?;
+        if core_worktree.child.code == Some(0) {
+            return Ok(());
+        }
+        self.invoke(
+            Class::Worktree,
+            &["config", "extensions.worktreeConfig", "true"],
+        )?;
+        let set = |key: &str, value: &str| -> Result<()> {
+            let args = proc::os_args(&["config", "--worktree", key, value]);
+            let output = self.invoke_request(tree, Class::Worktree, args.clone(), false, &[])?;
+            ensure_success(Class::Worktree, &args, output).map(|_| ())
+        };
+        set("core.untrackedCache", "true")?;
+        if cfg!(any(target_os = "macos", windows))
+            && Self::version(self.program.clone(), self.deadlines.query)? >= (2, 37, 0)
+        {
+            set("core.fsmonitor", "true")?;
+        }
+        Ok(())
+    }
+
+    /// Reads one effective config value as seen from the worktree at `tree`;
+    /// an unset key is `None`.
+    pub fn config_get_in(&self, tree: &Path, key: &str) -> Result<Option<String>> {
+        let args = proc::os_args(&["config", "--get", key]);
+        let output = self.invoke_request(tree, Class::Query, args, false, &[])?;
+        match output.child.code {
+            Some(0) => Ok(Some(text(&output.stdout))),
+            Some(1) => Ok(None),
+            _ => Err(command_failed(Class::Query, &[], &output)),
+        }
     }
 
     /// Executes one bounded forced or ordinary `git worktree remove`.
@@ -245,6 +311,19 @@ impl Git {
     /// Fetches ordinary origin branches without changing any local branch.
     pub fn fetch_origin_branches(&self) -> Result<()> {
         self.fetch("origin", "+refs/heads/*:refs/remotes/origin/*")
+    }
+
+    /// Fetches the named origin branches in one command. Fails when any
+    /// branch does not exist on the remote; callers fall back to the
+    /// wildcard fetch to preserve the resolve-anything behaviour.
+    pub fn fetch_origin_named(&self, branches: &BTreeSet<String>) -> Result<()> {
+        let mut args = vec![OsString::from("fetch"), OsString::from("origin")];
+        args.extend(
+            branches
+                .iter()
+                .map(|branch| OsString::from(format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"))),
+        );
+        self.invoke_os(Class::Fetch, args).map(|_| ())
     }
 
     /// Fetches a forge pull request, including the unknown-host fallback chain.
@@ -317,12 +396,16 @@ impl Git {
     }
 
     /// Returns porcelain-v1 status entries including untracked files.
+    ///
+    /// Status is the one query allowed to take git's optional locks: with
+    /// them, git persists the refreshed stat and untracked-cache data it
+    /// just computed, which is exactly what keeps the next status cheap.
+    /// Each worktree has its own index, so concurrent statuses of
+    /// different trees do not contend.
     pub fn status_porcelain(&self, tree: &Path) -> Result<Vec<StatusEntry>> {
-        let output = self.invoke_in(
-            tree,
-            Class::Query,
-            proc::os_args(&["status", "--porcelain=v1", "-z", "--untracked-files=normal"]),
-        )?;
+        let args = proc::os_args(&["status", "--porcelain=v1", "-z", "--untracked-files=normal"]);
+        let output = self.invoke_request(tree, Class::Query, args.clone(), true, &[])?;
+        let output = ensure_success(Class::Query, &args, output)?;
         parse_status_porcelain(&output.stdout)
     }
 
@@ -429,6 +512,26 @@ impl Git {
             Some(1) => Ok(None),
             _ => Err(command_failed(Class::Query, &[], &output)),
         }
+    }
+
+    /// Reads one branch's upstream short name and gone marker in one query.
+    ///
+    /// Git refnames cannot contain the unit separator, so `%1f` splits the
+    /// two fields unambiguously even for exotic branch names.
+    pub fn upstream_info(&self, branch: &str) -> Result<UpstreamInfo> {
+        let value = self.text(
+            Class::Query,
+            &[
+                "for-each-ref",
+                "--format=%(upstream:short)%1f%(upstream:track)",
+                &format!("refs/heads/{branch}"),
+            ],
+        )?;
+        let (name, track) = value.split_once('\u{1f}').unwrap_or((value.as_str(), ""));
+        Ok(UpstreamInfo {
+            name: (!name.is_empty()).then(|| name.to_owned()),
+            gone: track == "[gone]",
+        })
     }
 
     /// Reads the configured upstream short name for one local branch.
@@ -553,6 +656,17 @@ impl Git {
         class: Class,
         args: Vec<OsString>,
     ) -> Result<ProcessOutput> {
+        self.invoke_request(cwd, class, args, false, &[])
+    }
+
+    fn invoke_request(
+        &self,
+        cwd: &Path,
+        class: Class,
+        args: Vec<OsString>,
+        optional_locks: bool,
+        extra_env: &[(String, String)],
+    ) -> Result<ProcessOutput> {
         let mut request = CommandRequest {
             program: self.program.clone(),
             args,
@@ -569,11 +683,14 @@ impl Git {
         request
             .env
             .insert("GIT_LITERAL_PATHSPECS".to_owned(), "1".to_owned());
-        if class == Class::Query {
+        if class == Class::Query && !optional_locks {
             request
                 .env
                 .insert("GIT_OPTIONAL_LOCKS".to_owned(), "0".to_owned());
         }
+        request
+            .env
+            .extend(extra_env.iter().cloned());
         proc::capture_op(
             &request,
             self.deadlines.for_class(class),
