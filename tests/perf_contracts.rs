@@ -49,6 +49,9 @@ fn trace_records(h: &Harness) -> Vec<Record> {
 fn list_statuses_each_tree_once_and_doctor_never() {
     let h = Harness::new();
     let repo = h.repo("repo", "");
+    // The timing log these contracts read is opt-in; register preserves
+    // the existing settings when it records the session backend.
+    common::write(&h.home.join("config.toml"), "[logs]\ntrace = true\n");
     h.register(&repo);
     h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
     h.json(&["list"]);

@@ -111,11 +111,18 @@ on and write `{{ports.http}}` directly.
 
 ## Find out where the time went
 
-wt appends a line per event to `$WT_HOME/logs/wt.jsonl`: one for each child
-process it runs, one for each lock that made it wait, and one closing each
-command with its total. Everything carries a duration in `ms` and the `run` id
-of the invocation that produced it, so a slow command can be taken apart after
-the fact — no flag to remember beforehand.
+With the timing log enabled, wt appends a line per event to
+`$WT_HOME/logs/wt.jsonl`: one for each child process it runs, one for each
+lock that made it wait, and one closing each command with its total.
+Everything carries a duration in `ms` and the `run` id of the invocation that
+produced it, so once the log is on, a slow command can be taken apart after
+the fact — no flag to remember per command. Turn it on in
+`$WT_HOME/config.toml`:
+
+```toml
+[logs]
+trace = true
+```
 
 ```sh
 # where the last `wt ls` spent its time
@@ -125,10 +132,5 @@ jq -r --arg run "$run" \
   ~/.wt/logs/wt.jsonl | sort -rn | head
 ```
 
-Recipe text never appears in the log; a task is named by its id. Turn the log
-off with `trace = false`:
-
-```toml
-[logs]
-trace = false
-```
+Recipe text never appears in the log; a task is named by its id. The log is
+off by default; `trace = false` turns it back off.

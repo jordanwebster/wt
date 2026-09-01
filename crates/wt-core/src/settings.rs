@@ -88,8 +88,9 @@ impl Default for LockWaits {
 #[serde(default, deny_unknown_fields)]
 pub struct LogSettings {
     pub keep: u16,
-    /// Whether wt appends its own timing log. On, because the log's whole use
-    /// is explaining a command that was already slow.
+    /// Whether wt appends its own timing log. Off by default: the log is a
+    /// diagnostic for investigating slow commands, not something every home
+    /// should accumulate; `[logs] trace = true` opts in.
     pub trace: bool,
 }
 
@@ -97,7 +98,7 @@ impl Default for LogSettings {
     fn default() -> Self {
         Self {
             keep: 20,
-            trace: true,
+            trace: false,
         }
     }
 }
