@@ -357,6 +357,7 @@ fn record_build_pid(context: &Context, target: Option<&str>) {
     let _ = context.mutate_state(&target, &holder, |state| {
         if let Some(build) = state.build.as_mut() {
             build.pid = std::process::id();
+            build.started = wt_sys::fsx::timestamp()?;
         }
         Ok(())
     });
