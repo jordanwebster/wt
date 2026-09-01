@@ -7,7 +7,7 @@ expression: "normalize(value, &h.root)"
   "data": {
     "counts": {
       "error": 0,
-      "info": 2,
+      "info": 3,
       "warn": 0
     },
     "findings": [
@@ -24,6 +24,13 @@ expression: "normalize(value, &h.root)"
         "remedy": "set `session.backend` in `$WT_HOME/config.toml` to change it",
         "severity": "info",
         "subject": "sessions"
+      },
+      {
+        "code": "STATUS_CACHE_OFF",
+        "message": "git's untracked cache is off, so each status scans the whole tree",
+        "remedy": "run `git config core.untrackedCache true` in this checkout (on macOS or Windows also `git config core.fsmonitor true`)",
+        "severity": "info",
+        "subject": "repo"
       }
     ]
   },

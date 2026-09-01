@@ -292,7 +292,6 @@ pub struct TreeIdentity {
     pub geometry: Geometry,
     pub ports: PortMap,
     pub name_short: String,
-    pub session_name: String,
 }
 
 impl TreeIdentity {
@@ -387,13 +386,45 @@ pub struct TreeRec {
     pub slot: u32,
     pub geometry: Geometry,
     pub ports: PortMap,
-    pub name_short: String,
-    pub session_name: String,
     pub created_at: String,
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub meta: BTreeMap<String, String>,
     pub source: TreeSource,
+}
+
+impl TreeRec {
+    pub fn target(&self) -> Target {
+        Target {
+            label: self.label.clone(),
+            name: self.name.clone(),
+        }
+    }
+
+    pub fn name_short(&self) -> String {
+        derived_short(&self.target())
+    }
+
+    pub fn session_name(&self) -> String {
+        derived_session(&self.target())
+    }
+}
+
+impl Tombstone {
+    pub fn target(&self) -> Target {
+        Target {
+            label: self.label.clone(),
+            name: self.name.clone(),
+        }
+    }
+
+    pub fn name_short(&self) -> String {
+        derived_short(&self.target())
+    }
+
+    pub fn session_name(&self) -> String {
+        derived_session(&self.target())
+    }
 }
 
 pub fn validate_meta(key: &str, value: &str) -> Result<(), CoreError> {
@@ -431,8 +462,6 @@ pub struct Tombstone {
     pub slot: u32,
     pub geometry: Geometry,
     pub ports: PortMap,
-    pub name_short: String,
-    pub session_name: String,
     pub path: AbsPath,
     pub materialized: Vec<RelPath>,
     pub removed_at: String,
@@ -466,8 +495,6 @@ impl Registry {
                     path: tree.path.as_str().to_owned(),
                     slot: tree.slot,
                     range: geometry_range(tree.geometry),
-                    name_short: tree.name_short.clone(),
-                    session_name: tree.session_name.clone(),
                 })
                 .collect(),
             tombstones: self
@@ -481,8 +508,6 @@ impl Registry {
                     path: tombstone.path.as_str().to_owned(),
                     slot: tombstone.slot,
                     range: geometry_range(tombstone.geometry),
-                    name_short: tombstone.name_short.clone(),
-                    session_name: tombstone.session_name.clone(),
                 })
                 .collect(),
         }
@@ -535,8 +560,6 @@ pub struct RegistryTreeView {
     pub path: String,
     pub slot: u32,
     pub range: (u32, u32),
-    pub name_short: String,
-    pub session_name: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -545,8 +568,17 @@ pub struct RegistryTombstoneView {
     pub path: String,
     pub slot: u32,
     pub range: (u32, u32),
-    pub name_short: String,
-    pub session_name: String,
+}
+
+/// The tmux name and the short name are functions of the address, so the
+/// registry stores neither: it records what was allocated, and anything the
+/// address already determines is derived where it is used.
+fn derived_short(target: &Target) -> String {
+    name_short(target.label.as_str(), &target.name)
+}
+
+fn derived_session(target: &Target) -> String {
+    crate::session::name(target.label.as_str(), &target.name)
 }
 
 pub fn validate_registry(view: &RegistryInvariantView) -> Result<(), CoreError> {
@@ -590,8 +622,8 @@ pub fn validate_registry(view: &RegistryInvariantView) -> Result<(), CoreError> 
         if !targets.insert(tree.target.clone())
             || !ids.insert(&tree.tree_id)
             || !slots.insert(tree.slot)
-            || !shorts.insert(&tree.name_short)
-            || !sessions.insert(&tree.session_name)
+            || !shorts.insert(derived_short(&tree.target))
+            || !sessions.insert(derived_session(&tree.target))
         {
             return Err(corrupt("duplicate tree identity or coordinate".to_owned()));
         }
@@ -609,8 +641,8 @@ pub fn validate_registry(view: &RegistryInvariantView) -> Result<(), CoreError> 
     for tombstone in &view.tombstones {
         if !targets.insert(tombstone.target.clone())
             || !slots.insert(tombstone.slot)
-            || !shorts.insert(&tombstone.name_short)
-            || !sessions.insert(&tombstone.session_name)
+            || !shorts.insert(derived_short(&tombstone.target))
+            || !sessions.insert(derived_session(&tombstone.target))
         {
             return Err(corrupt("duplicate tree address or coordinate".to_owned()));
         }
@@ -685,8 +717,6 @@ mod tests {
             path: "/repo".to_owned(),
             slot: 0,
             range: (20000, 20015),
-            name_short: "repo_c".to_owned(),
-            session_name: "s1".to_owned(),
         };
         let work = RegistryTreeView {
             target: Target {
@@ -698,8 +728,6 @@ mod tests {
             path: "/trees/work".to_owned(),
             slot: 1,
             range: (20016, 20031),
-            name_short: "repo_w".to_owned(),
-            session_name: "s2".to_owned(),
         };
         let view = RegistryInvariantView {
             labels: vec![(label, "/repo".to_owned(), "/repo/.git".to_owned())],
@@ -713,8 +741,6 @@ mod tests {
             path: work.path,
             slot: work.slot,
             range: work.range,
-            name_short: work.name_short,
-            session_name: work.session_name,
         });
         assert_eq!(
             validate_registry(&bad).unwrap_err().code.0,
@@ -752,8 +778,6 @@ mod tests {
                 slot: 0,
                 geometry,
                 ports: PortMap::from([(PortName::new("http").unwrap(), 0)]),
-                name_short: "repo_canonical_deadbeef".to_owned(),
-                session_name: "wt_repo_canonical_deadbeef".to_owned(),
                 created_at: "TIME".to_owned(),
                 agent: Some("codex".to_owned()),
                 meta: BTreeMap::from([("ticket".to_owned(), "ABC-123".to_owned())]),
@@ -773,8 +797,6 @@ mod tests {
                     ..geometry
                 },
                 ports: PortMap::new(),
-                name_short: "repo_old_deadbeef".to_owned(),
-                session_name: "wt_repo_old_deadbeef".to_owned(),
                 path: AbsPath::new("/trees/repo/old").unwrap(),
                 materialized: vec![RelPath::new("target").unwrap()],
                 removed_at: "TIME".to_owned(),
@@ -822,8 +844,6 @@ mod tests {
             path: "/repo".to_owned(),
             slot: 0,
             range: (20_000, 20_015),
-            name_short: "canonical".to_owned(),
-            session_name: "canonical".to_owned(),
         };
         let view = RegistryInvariantView {
             labels: vec![(label.clone(), "/repo".to_owned(), "/repo/.git".to_owned())],
@@ -836,8 +856,6 @@ mod tests {
                 path: "/repo".to_owned(),
                 slot: 1,
                 range: (20_016, 20_031),
-                name_short: "old".to_owned(),
-                session_name: "old".to_owned(),
             }],
         };
         validate_registry(&view).unwrap();

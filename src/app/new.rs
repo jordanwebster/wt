@@ -230,8 +230,6 @@ fn create(
         slot: coordinates.slot,
         geometry: coordinates.geometry,
         ports: coordinates.ports,
-        name_short: coordinates.name_short,
-        session_name: coordinates.session_name,
         created_at: now,
         agent: None,
         meta,
@@ -260,6 +258,7 @@ fn create(
         context,
         &tree,
         &canonical,
+        &initial,
         &args,
         &holder,
         wt_core::new::StartAt::Git,
@@ -301,12 +300,15 @@ fn resume(
         )?;
         context.write_state(&target, &state, &holder)?;
     }
+    let initial =
+        register::initial_config(context, Path::new(canonical.path.as_str()), &tree.label)?;
     if matches!(
         wt_sys::fsx::path_kind(Path::new(tree.path.as_str()))?,
         wt_sys::fsx::PathKind::Missing
     ) {
         let notice = add_worktree(context, &canonical, &tree, &args)?;
-        let finished = finish_under_lock(context, &tree, &canonical, &args, &holder, start)?;
+        let finished =
+            finish_under_lock(context, &tree, &canonical, &initial, &args, &holder, start)?;
         drop(token);
         return ready_report(
             context,
@@ -318,7 +320,7 @@ fn resume(
             source_notices(&target, notice, finished.notices),
         );
     }
-    let finished = finish_under_lock(context, &tree, &canonical, &args, &holder, start)?;
+    let finished = finish_under_lock(context, &tree, &canonical, &initial, &args, &holder, start)?;
     drop(token);
     ready_report(
         context,
@@ -348,8 +350,47 @@ fn add_worktree(
         ),
     )?;
     let origin = git.origin_url()?;
+    // The default branch resolves through origin/HEAD and local refs, none
+    // of which a fetch changes, so one discovery serves start resolution,
+    // the fetch refspec, and the registry cache refresh below. The cache
+    // substitutes for discovery only under --no-fetch, as before.
+    let mut discovered = None;
+    let default = match context.registry.labels[&tree.label]
+        .default_branch
+        .clone()
+        .filter(|_| args.no_fetch)
+    {
+        Some(default) => default,
+        None => {
+            let value = git.default_branch()?;
+            discovered = Some(value.clone());
+            value
+        }
+    };
     if origin.is_some() && !args.no_fetch {
-        git.fetch_origin_branches()?;
+        // Fetch only the branches this creation consumes: the requested
+        // start when it can name an origin branch, and the default branch
+        // the tree will be measured against. A narrow fetch fails when a
+        // wanted name is not a branch on the remote (a tag, a raw
+        // revision, a renamed default); the wildcard fetch then restores
+        // the resolve-anything behaviour at the old cost.
+        let mut wanted = std::collections::BTreeSet::from([default.clone()]);
+        if let Some(input) = args.from_ref.as_deref() {
+            if parse_pr(&args.from_ref).is_none() {
+                wanted.insert(input.strip_prefix("origin/").unwrap_or(input).to_owned());
+            }
+        }
+        match git.fetch_origin_named(&wanted) {
+            Ok(()) => {}
+            Err(error) if error.code.0 == "TIMEOUT" => return Err(error),
+            // When the fallback fails too, report the narrow error: it
+            // names the refs this creation actually asked for.
+            Err(error) => {
+                if git.fetch_origin_branches().is_err() {
+                    return Err(error);
+                }
+            }
+        }
     }
     let resolution = if let Some(input) = args.from_ref.as_deref() {
         let empty = wt_core::from_ref::RefCandidates {
@@ -392,24 +433,20 @@ fn add_worktree(
             }
             _ => resolve_from(&git, input)?,
         }
+    } else if git.ref_exists(&format!("refs/remotes/origin/{default}"))? {
+        wt_core::from_ref::Resolution::Remote {
+            reference: format!("refs/remotes/origin/{default}"),
+        }
     } else {
-        let default = context.registry.labels[&tree.label]
-            .default_branch
-            .clone()
-            .filter(|_| args.no_fetch)
-            .unwrap_or(git.default_branch()?);
-        if git.ref_exists(&format!("refs/remotes/origin/{default}"))? {
-            wt_core::from_ref::Resolution::Remote {
-                reference: format!("refs/remotes/origin/{default}"),
-            }
-        } else {
-            wt_core::from_ref::Resolution::Local {
-                reference: format!("refs/heads/{default}"),
-                notice: None,
-            }
+        wt_core::from_ref::Resolution::Local {
+            reference: format!("refs/heads/{default}"),
+            notice: None,
         }
     };
-    let default = git.default_branch()?;
+    let default = match discovered {
+        Some(value) => value,
+        None => git.default_branch()?,
+    };
     if context.registry.labels[&tree.label]
         .default_branch
         .as_deref()
@@ -456,6 +493,10 @@ fn add_worktree(
         start.starts_with("refs/remotes/"),
     )?;
     git.worktree_add(Path::new(tree.path.as_str()), &spec)?;
+    // Wt-created worktrees get git's own exact status caches. Best-effort:
+    // a tree is never lost to a failed optimisation, and doctor reports
+    // trees whose caches are off.
+    let _ = git.accelerate_status(Path::new(tree.path.as_str()));
     Ok(notice)
 }
 
@@ -557,6 +598,7 @@ fn finish_under_lock(
     context: &mut Context,
     tree: &TreeRec,
     canonical: &TreeRec,
+    config: &wt_core::config::Config,
     args: &New,
     holder: &wt_sys::lock::Holder,
     start: wt_core::new::StartAt,
@@ -568,8 +610,6 @@ fn finish_under_lock(
         format!("{}\n", tree.tree_id).as_bytes(),
         0o600,
     )?;
-    let config =
-        register::initial_config(context, Path::new(canonical.path.as_str()), &tree.label)?;
     let mut notices = Vec::new();
     let mut copied = Vec::new();
     if start != wt_core::new::StartAt::Bootstrap {
@@ -839,10 +879,13 @@ fn fresh_incarnation(
         Ok(())
     })?;
     let source_notice = add_worktree(context, &canonical, &tree, &args)?;
+    let initial =
+        register::initial_config(context, Path::new(canonical.path.as_str()), &tree.label)?;
     let finished = finish_under_lock(
         context,
         &tree,
         &canonical,
+        &initial,
         &args,
         &holder,
         wt_core::new::StartAt::Git,

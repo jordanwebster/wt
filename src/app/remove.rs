@@ -258,8 +258,6 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
             slot: tree.slot,
             geometry: tree.geometry,
             ports: tree.ports.clone(),
-            name_short: tree.name_short.clone(),
-            session_name: tree.session_name.clone(),
             path: tree.path.clone(),
             materialized,
             removed_at: wt_sys::fsx::timestamp()?,
@@ -357,8 +355,8 @@ fn remove_build_cache(
     let path = door
         .and_then(|door| door.env.env.get("CARGO_BUILD_BUILD_DIR"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| context.tree_cache_dir(tree.label.as_str(), &tree.name_short));
-    if path.file_name().and_then(|name| name.to_str()) != Some(tree.name_short.as_str()) {
+        .unwrap_or_else(|| context.tree_cache_dir(tree.label.as_str(), &tree.name_short()));
+    if path.file_name().and_then(|name| name.to_str()) != Some(tree.name_short().as_str()) {
         return None;
     }
     let relative = path
@@ -408,7 +406,7 @@ fn consent_plan(tree: &wt_core::model::TreeRec, observed: &Obs, plan: &RemovePla
         }
     }
     if plan.session_live {
-        facts.push(("session", format!("{} will be killed", tree.session_name)));
+        facts.push(("session", format!("{} will be killed", tree.session_name())));
     }
     for holder in &plan.door_holders {
         facts.push(("in use", format!("pid {} ({})", holder.pid, holder.verb)));
@@ -551,7 +549,7 @@ pub(crate) fn tmux_has(
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(10));
     let tmux = wt_sys::tmux::Tmux::new("tmux", timeout);
-    match tmux.has_session(&tree.session_name) {
+    match tmux.has_session(&tree.session_name()) {
         Err(error) if error.code.0 == "TOOL_MISSING" => Ok(false),
         result => result,
     }

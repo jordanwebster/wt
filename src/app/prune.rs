@@ -375,7 +375,7 @@ fn apply(
         .cloned()
         .collect::<Vec<_>>();
     for tombstone in &tombstones {
-        close_tombstone_session(context, &tombstone.session_name)?;
+        close_tombstone_session(context, &tombstone.session_name())?;
     }
     if !tombstones.is_empty() {
         let holder = context.holder("prune", "prune")?;
@@ -575,15 +575,15 @@ pub(crate) fn cache_orphans(
                 .registry
                 .trees
                 .iter()
-                .map(|tree| (&tree.label, &tree.name_short))
+                .map(|tree| (tree.label.as_str(), tree.name_short()))
                 .chain(
                     context
                         .registry
                         .tombstones
                         .iter()
-                        .map(|tombstone| (&tombstone.label, &tombstone.name_short)),
+                        .map(|tombstone| (tombstone.label.as_str(), tombstone.name_short())),
                 )
-                .any(|(owner, name_short)| owner.as_str() == label && name_short == name);
+                .any(|(owner, name_short)| owner == label && name_short == name);
             if !claimed {
                 output.push(path);
             }

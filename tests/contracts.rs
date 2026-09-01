@@ -438,6 +438,13 @@ fn forget_refuses_resources_sessions_and_door_holders_with_specific_remedies() {
     let repo = resources.repo("repo", RESOURCE);
     resources.register(&repo);
     resources.json(&["new", "repo/work", "--no-sync", "--no-open"]);
+    // Declaring a resource is not creating one: the tree that has only ever
+    // been declared at is forgettable, and every tree of a repo with resources
+    // carries such records.
+    resources.json(&["new", "repo/declared", "--no-sync", "--no-open"]);
+    let declared = resources.json(&["forget", "repo/declared", "--yes"]);
+    assert_eq!(declared["data"]["forgotten"], true);
+
     resources.json(&["run", "service", "repo/work"]);
     resources
         .wt()
@@ -445,8 +452,13 @@ fn forget_refuses_resources_sessions_and_door_holders_with_specific_remedies() {
         .assert()
         .code(5)
         .stderr(predicate::str::contains("RESOURCES_EXIST"))
+        .stderr(predicate::str::contains("service"))
         .stderr(predicate::str::contains("wt destroy"))
         .stderr(predicate::str::contains("wt rm"));
+    // And once it is torn down the refusal lifts.
+    resources.json(&["destroy", "service", "repo/work", "--yes"]);
+    let destroyed = resources.json(&["forget", "repo/work", "--yes"]);
+    assert_eq!(destroyed["data"]["forgotten"], true);
 
     let sessions = Harness::new();
     let port = NEXT_ISOLATED_PORT.fetch_add(32, Ordering::Relaxed);

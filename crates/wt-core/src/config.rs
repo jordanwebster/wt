@@ -106,12 +106,18 @@ pub enum Exclusive {
     Machine,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Task {
     pub run: Option<Command>,
     pub exists: Option<Command>,
     pub destroy: Option<Command>,
+    /// Opts `run`, `exists`, and `destroy` out of templating so a recipe can
+    /// carry text owned by another `{{`-using format, such as a Go template
+    /// passed to `docker --format`. `name` and `env` stay templated: they hold
+    /// wt's own values, and they are how such a recipe receives them.
+    #[serde(default = "default_task_template", skip_serializing_if = "is_true")]
+    pub template: bool,
     #[serde(serialize_with = "serialize_needs")]
     pub needs: Option<Vec<String>>,
     pub lock: Option<String>,
@@ -128,9 +134,49 @@ pub struct Task {
     pub sys_locks: Vec<String>,
 }
 
+impl Default for Task {
+    fn default() -> Self {
+        Self {
+            run: None,
+            exists: None,
+            destroy: None,
+            template: default_task_template(),
+            needs: None,
+            lock: None,
+            name: None,
+            tied_to: None,
+            exclusive: None,
+            env: IndexMap::new(),
+            cwd: None,
+            timeout: None,
+            description: None,
+            ready_within: None,
+            snapshot_env: Vec::new(),
+            sys_locks: Vec::new(),
+        }
+    }
+}
+
+fn default_task_template() -> bool {
+    true
+}
+
 impl Task {
     pub fn is_resource(&self) -> bool {
         self.destroy.is_some()
+    }
+
+    /// Yields the command fields that wt templates, which is none of them when
+    /// the task has opted out.
+    fn templated_commands(&self) -> impl Iterator<Item = (&'static str, &Command)> {
+        [
+            ("run", self.run.as_ref()),
+            ("exists", self.exists.as_ref()),
+            ("destroy", self.destroy.as_ref()),
+        ]
+        .into_iter()
+        .filter(|_| self.template)
+        .filter_map(|(field, command)| command.map(|command| (field, command)))
     }
 }
 
@@ -500,20 +546,14 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                         .get(&format!("task:{task_id}:env:{key}")),
                 )?;
             }
-            for (field, command) in [
-                ("run", task.run.as_ref()),
-                ("exists", task.exists.as_ref()),
-                ("destroy", task.destroy.as_ref()),
-            ] {
-                if let Some(command) = command {
-                    for value in command.texts() {
-                        validate_template_value(
-                            value,
-                            &effective.vars,
-                            &ports,
-                            effective.locations.get(&format!("task:{task_id}:{field}")),
-                        )?;
-                    }
+            for (field, command) in task.templated_commands() {
+                for value in command.texts() {
+                    validate_template_value(
+                        value,
+                        &effective.vars,
+                        &ports,
+                        effective.locations.get(&format!("task:{task_id}:{field}")),
+                    )?;
                 }
             }
         }
@@ -529,6 +569,9 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                 let mut calls = BTreeSet::new();
                 let mut shell_references = BTreeSet::new();
                 let mut port_references = BTreeSet::new();
+                // An untemplated recipe still reaches a shell, so its `$WT_*`
+                // references are still evidence of tree specificity; its braces
+                // belong to whatever format owns them and are not wt's to read.
                 for command in [
                     task.run.as_ref(),
                     task.exists.as_ref(),
@@ -537,18 +580,14 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                 .into_iter()
                 .flatten()
                 {
-                    match command {
-                        Command::Shell(shell) => {
-                            shell_references.extend(template::shell_references(shell));
-                            calls.extend(template::calls(shell)?);
-                            port_references.extend(template::port_references(shell)?);
-                        }
-                        Command::Argv(argv) => {
-                            for value in argv {
-                                calls.extend(template::calls(value)?);
-                                port_references.extend(template::port_references(value)?);
-                            }
-                        }
+                    if let Command::Shell(shell) = command {
+                        shell_references.extend(template::shell_references(shell));
+                    }
+                }
+                for (_, command) in task.templated_commands() {
+                    for value in command.texts() {
+                        calls.extend(template::calls(value)?);
+                        port_references.extend(template::port_references(value)?);
                     }
                 }
                 for text in task.name.iter().chain(task.env.values()) {
@@ -842,17 +881,10 @@ fn validate_task(
         template::validate(value)
             .map_err(|error| located(error, locations.get(&format!("task:{id}:env:{key}"))))?;
     }
-    for (field, command) in [
-        ("run", task.run.as_ref()),
-        ("exists", task.exists.as_ref()),
-        ("destroy", task.destroy.as_ref()),
-    ] {
-        if let Some(command) = command {
-            for text in command.texts() {
-                template::validate(text).map_err(|error| {
-                    located(error, locations.get(&format!("task:{id}:{field}")))
-                })?;
-            }
+    for (field, command) in task.templated_commands() {
+        for text in command.texts() {
+            template::validate(text)
+                .map_err(|error| located(error, locations.get(&format!("task:{id}:{field}"))))?;
         }
     }
     Ok(())
@@ -1348,6 +1380,34 @@ mod tests {
             "repo/.wt.toml",
         )
         .is_ok());
+    }
+
+    #[test]
+    fn an_untemplated_task_carries_foreign_braces_but_still_shows_its_tree_specificity() {
+        let serve = |extra: &str, tied_to: &str| {
+            format!(
+                "[task.serve]\n{extra}tied_to='{tied_to}'\n\
+                 exists='docker inspect -f \"{{{{.State.Running}}}}\" \"$WT_ROOT\"'\n\
+                 destroy='docker rm -f x'"
+            )
+        };
+        let templated = parse(&serve("", "tree"), "repo/.wt.toml").unwrap_err();
+        assert_eq!(templated.code.0, "CONFIG_INVALID");
+
+        let source = serve("template=false\n", "tree");
+        let config = parse(&source, "repo/.wt.toml").unwrap();
+        assert!(validate_resolved(&config, 16).is_ok());
+
+        // The opt-out covers the recipes, not the values wt supplies to them.
+        let name = parse(&format!("{source}\nname='{{{{ bad }}}}'"), "repo/.wt.toml").unwrap_err();
+        assert_eq!(name.code.0, "CONFIG_INVALID");
+        assert!(name.message.contains("whitespace"));
+
+        // `$WT_ROOT` still reaches the shell, so it still betrays a repo-tied
+        // resource reaching for one tree.
+        let repo_tied = parse(&serve("template=false\n", "repo"), "repo/.wt.toml").unwrap();
+        let error = validate_resolved(&repo_tied, 16).unwrap_err();
+        assert!(error.message.contains("tree-specific"), "{}", error.message);
     }
 
     #[test]

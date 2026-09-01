@@ -144,8 +144,6 @@ pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreErro
         slot: coordinates.slot,
         geometry: coordinates.geometry,
         ports: coordinates.ports,
-        name_short: coordinates.name_short,
-        session_name: coordinates.session_name,
         created_at: now,
         agent: args.agent,
         meta,
@@ -157,6 +155,12 @@ pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreErro
         },
     };
     context.mutate_registry(&holder, |registry| {
+        // The coordinates this allocation may have inherited came from the
+        // tombstone for this address, and an address is either live or
+        // tombstoned; retiring it here is what keeps that true.
+        registry
+            .tombstones
+            .retain(|record| record.label != target.label || record.name != target.name);
         registry.trees.push(tree.clone());
         Ok(())
     })?;

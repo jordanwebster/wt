@@ -460,7 +460,6 @@ mod tests {
             },
             ports: PortMap::from([(PortName::new("http").unwrap(), 0)]),
             name_short: format!("repo_{name}_12345678"),
-            session_name: format!("wt_repo_{name}_12345678"),
         }
     }
 

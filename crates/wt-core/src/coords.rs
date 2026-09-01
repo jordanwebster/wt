@@ -14,8 +14,6 @@ pub struct Coordinates {
     pub slot: u32,
     pub geometry: Geometry,
     pub ports: PortMap,
-    pub name_short: String,
-    pub session_name: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -62,6 +60,9 @@ pub fn choose(input: ChooseInput<'_>) -> Result<ChooseResult, CoreError> {
             "declare fewer ports or increase ports.stride",
         ));
     }
+    // Both identities are functions of the address, so allocation only has to
+    // establish that this address does not derive one another address already
+    // holds; neither is recorded, because deriving them again always agrees.
     let short = name_short(input.target.label.as_str(), &input.target.name);
     let session_name = session::name(input.target.label.as_str(), &input.target.name);
     if input.taken_name_shorts.contains(&short) || input.taken_sessions.contains(&session_name) {
@@ -97,8 +98,6 @@ pub fn choose(input: ChooseInput<'_>) -> Result<ChooseResult, CoreError> {
                 slot,
                 geometry,
                 ports: input.ports,
-                name_short: short,
-                session_name,
             },
             notices,
         });
@@ -197,8 +196,6 @@ mod tests {
             slot: 3,
             geometry: PortSettings::default().geometry(3).unwrap(),
             ports,
-            name_short: "short".to_owned(),
-            session_name: "session".to_owned(),
         };
         let tombstone = TombstoneCoordinates {
             target: target.clone(),
@@ -341,8 +338,6 @@ mod tests {
                 slot: 7,
                 geometry: PortSettings::default().geometry(7).unwrap(),
                 ports: PortMap::new(),
-                name_short: "other".to_owned(),
-                session_name: "other".to_owned(),
             },
         };
         let chosen = choose(input(

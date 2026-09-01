@@ -971,11 +971,21 @@ This is the opt-out for Jinja, Helm, GitHub Actions, and other formats that own
 `{{`; literal `{{` in any non-file template remains unsupported, an accepted
 limitation.
 
-Shell recipes have no `template = false` opt-out, so literal Go-template
-output such as Docker `--format '{{.State.Status}}'` cannot appear directly in
-a shell-string recipe; use argv form or splice the braces through shell
-variables, for example `b='{{' e='}}'; docker inspect --format
-"${b}.State.Status${e}"`.
+A `task` may set the same `template = false`, which covers its `run`, `exists`,
+and `destroy` recipes in either command form. This is the opt-out for a recipe
+carrying text owned by a `{{`-using format, such as the Go template in
+`docker inspect --format '{{.State.Status}}'`. `name` and `env` stay templated
+under the opt-out, because they hold wt's own values and are how an untemplated
+recipe receives them: the resource's resolved name arrives as `$WT_SELF` and a
+declared port as any `env` entry that reads `{{ports.<name>}}`. A repo- or
+machine-tied recipe is still refused for referencing a tree-specific `$WT_*`
+name, which reaches the shell whether or not wt templated the string.
+
+(This replaces the original text of this paragraph, which claimed argv form or a
+shell-variable splice would carry literal braces. Neither does: argv elements
+are validated identically to shell strings, and no templated string can produce
+a literal `{{` at all, since the text between `{{` and the first `}}` must parse
+as an expression.)
 
 This supersedes A44's `${...}`/`$$` syntax and never-template-shell rule, and
 the untouched-shell clause in A58; A44's distinction between declared
@@ -1045,9 +1055,10 @@ remain in force.
 ## A70. Exported environment separates interface from mechanism
 
 The stable interface is `WT_TARGET`, `WT_LABEL`, `WT_NAME`, `WT_ROOT`,
-`WT_REPO`, `WT_HOME`, and `WT_BRANCH`. The mechanism tier —
-`WT_ACTIVATION`, `WT_PATH_PREFIX`, `WT_BIN`, `WT_SELF`, and `WT_TASK` — may
-change as door implementation changes. This supersedes the previous §5.5
+`WT_REPO`, `WT_HOME`, and `WT_BRANCH`, joined inside a resource task by
+`WT_SELF`, the resource's resolved name, which the untemplated recipes of A66
+depend on. The mechanism tier — `WT_ACTIVATION`, `WT_PATH_PREFIX`, `WT_BIN`,
+and `WT_TASK` — may change as door implementation changes. This supersedes the previous §5.5
 export list: `WT_SESSION`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, and `WT_SLOT` are
 deleted exports. Snapshot minimisation strips the remaining tree-specific keys,
 including `WT_BRANCH`, at repo and machine scope as appropriate.
@@ -1058,8 +1069,13 @@ after A67; a script addressing its own pane has tmux's `$TMUX_PANE`, and fleet
 lookup belongs through `wt list --json`. Shell initialisation therefore keeps
 completion and the PATH guard, removes the `wtcd` and `wtsh` helpers, and adds
 a guarded `(<target>) ` prompt prefix that is inert outside a door. The built-in
-Claude start recipe names the bare tree with
-`["claude", "--name", "{{name()}}"]`.
+Claude recipes name the bare tree in both directions —
+`["claude", "--name", "{{name()}}"]` and
+`["claude", "--resume", "{{name()}}"]` — because `--resume` resolves a session
+title, so the named start has an exact inverse. (`--continue`, which the recipe
+carried first, resumes whatever conversation in the directory is newest, which
+is a different session whenever more than one agent has run in the tree.) Codex
+keeps `codex` and `codex resume --last`: it has no launch-time naming to invert.
 
 ## A71. Editing is a door
 
@@ -1080,9 +1096,16 @@ ports, and rendered files.
 
 `wt forget <target> [--yes]` removes wt's records and owned artifacts for one
 live non-canonical tree without touching its directory, branch, or git
-worktree registration. Canonical trees use `unregister`. Resource records,
-live sessions, and door holders refuse with remedies to destroy or remove,
-close, and wait respectively. Consent is identical to `unregister`, because
+worktree registration. Canonical trees use `unregister`. Instantiated
+resources, live sessions, and door holders refuse with remedies to destroy or
+remove, close, and wait respectively; the refusal names the resources. A record
+carrying no instance is a declaration and nothing more, and a record whose
+exclusive arena is held by another live tree belongs to that tree — the test is
+the one `destroy` itself applies, so `forget` never refuses over a record that
+`destroy` would decline to clear. (This corrects the original wording, which
+refused on any resource record. Every tree of a repo declaring a resource
+carries such records from its first door, which made `forget` unreachable there
+and its remedy circular.) Consent is identical to `unregister`, because
 `.wt/` may contain application data: a terminal prompts, non-interactive use
 requires `--yes`, and a declined prompt exits successfully with
 `forgotten:false` and no mutation. Hash-owned rendered files and `.wt/` are
@@ -1105,7 +1128,62 @@ The JSON envelope keeps the canonical long command names `list` and `remove`
 regardless of which accepted spelling was typed; help spelling is a human
 interface, while the envelope is the stable machine interface.
 Finally, when a repo-scope configuration key is misplaced at settings top
-level, the error tells the user to put it below `[repos.<label>]`. Rationale:
+level, both lines of the error are wt's own: the message names the misplaced
+entry — `locks.integration`, not merely `locks` — as a repo-scope key rather
+than a settings key, and the remedy places it below `[repos.<label>]`. serde's
+own text is kept only for a mistake that really is against the settings schema,
+because its "expected one of" list names alternatives that are all wrong for a
+key belonging to another scope. Rationale:
 the terse verbs are the daily interface, adoption should preserve the same
 fleet facts as creation, and configuration errors should point across the
 scope boundary instead of merely saying that a familiar key is unknown.
+
+## A74. The registry stores what was allocated, not what is derived
+
+`name_short` and `session_name` are functions of the address, so no record
+holds either one. `TreeRec` and `Tombstone` carry `slot`, frozen `geometry`,
+and the `ports` map; both identities are computed where they are used, from
+`label` and `name`. Allocation still refuses `IDENTITY_COLLISION` when a
+candidate address derives an identity another address already holds, and the
+registry invariant that both are unique across distinct addresses is checked
+over the derived values. Tombstone inheritance therefore covers the allocated
+coordinates only: a re-created or re-adopted address keeps the ports its
+directory already refers to, and takes today's name. `adopt` deletes the
+inherited tombstone in the same registry transaction, as `new` already did.
+Older registries load unchanged and shed the two fields on their next write.
+
+This supersedes A67's "existing persisted names and tombstone inheritance are
+untouched" and the coordinate list in §7 and §3.1. Rationale: A67 made the
+session name a pure function of the target with no hash fallback, and a value
+that is derived and also stored has two sources of truth that only agree until
+the derivation changes — which A67 changed. Storing it froze every tree created
+before A67 into its old name with no way to take the new one. `name_short` is
+unaffected in value, since its formula did not change; a pre-A67 tree's tmux
+session does change name, and a session running under the old one is orphaned
+by the upgrade, so close sessions before upgrading.
+
+## A75. wt records where its own wall time went
+
+wt appends one JSON object per event to `$WT_HOME/logs/wt.jsonl`, on by
+default and disabled by `[logs] trace = false`. Each record carries a schema
+version, a UTC timestamp, the invocation's random id and sequence number, the
+pid, the command, a kind, a name, and a duration in milliseconds. Kinds are
+`child` for one subprocess, `lock` for an acquisition that actually blocked,
+`span` for a stretch of internal work, and `cmd` for the invocation itself,
+which closes with an exit code or, for the commands that exec, with the program
+it handed over to. Each record is a single append of at most 4096 bytes — the
+size POSIX makes atomic — so the parallel doors write one file without a lock
+and without interleaving a line; an over-long record is truncated. The file
+rotates to `wt.jsonl.1` past 8 MiB, checked once per invocation. Writing a
+record never fails a command.
+
+Argument text appears only for invocations wt composed itself, named by their
+leading subcommand words, so `git` and `tmux` are legible while a task recipe
+is identified by task and scope and never by content, which can hold a
+credential. This is separate from `<tree>/.wt/logs/` (A31), which keeps task
+output. Rationale: slowness is noticed after the fact, so the measurement has
+to already be there; it belongs in one file per home because the question is
+almost always which of many child processes cost the time, and answering it
+from the command's own output would mean printing a report nobody asked for.
+Measurement only — behaviour is explained by notices and error codes, and a
+second channel for that would rot.

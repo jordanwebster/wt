@@ -230,8 +230,6 @@ fn perform_with_backend(
         slot: coordinates.slot,
         geometry: coordinates.geometry,
         ports: coordinates.ports,
-        name_short: coordinates.name_short,
-        session_name: coordinates.session_name,
         created_at: now.clone(),
         agent: None,
         meta: std::collections::BTreeMap::new(),
