@@ -76,14 +76,21 @@ fn created_trees_get_git_status_caches_scoped_per_worktree() {
     let created = h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
     let tree = created["data"]["tree"]["path"].as_str().unwrap().to_owned();
     assert_eq!(
-        config_value(Path::new(&tree), &["config", "--get", "core.untrackedCache"]).as_deref(),
+        config_value(
+            Path::new(&tree),
+            &["config", "--get", "core.untrackedCache"]
+        )
+        .as_deref(),
         Some("true"),
         "a wt-created worktree keeps git's untracked cache on"
     );
     // The scoping matters as much as the cache: the canonical checkout wt
     // did not create keeps its configuration untouched.
     assert_eq!(
-        config_value(&repo, &["config", "--worktree", "--get", "core.untrackedCache"]),
+        config_value(
+            &repo,
+            &["config", "--worktree", "--get", "core.untrackedCache"]
+        ),
         None,
         "the canonical checkout is not reconfigured"
     );
@@ -97,7 +104,14 @@ fn new_fetches_a_branch_known_only_to_origin() {
     // The branch exists only on origin: no local branch, no remote-tracking
     // ref, so creation must fetch it before it can resolve.
     h.push_ref(&repo, "HEAD", "refs/heads/remoteonly");
-    let created = h.json(&["new", "repo/r", "--from", "remoteonly", "--no-sync", "--no-open"]);
+    let created = h.json(&[
+        "new",
+        "repo/r",
+        "--from",
+        "remoteonly",
+        "--no-sync",
+        "--no-open",
+    ]);
     // h.json already asserted success; a remote start is tracked, so the
     // upstream field proves resolution went through origin/remoteonly.
     assert!(created["data"]["tree"]["upstream"].is_object());

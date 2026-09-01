@@ -159,7 +159,8 @@ impl ReportEnv {
                 },
             );
         }
-        let sessions = if context.settings.session.backend == wt_core::settings::SessionBackend::None
+        let sessions = if context.settings.session.backend
+            == wt_core::settings::SessionBackend::None
         {
             SessionSnapshot::Disabled
         } else {

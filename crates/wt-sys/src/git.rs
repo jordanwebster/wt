@@ -225,7 +225,8 @@ impl Git {
             ("GIT_CONFIG_KEY_0".to_owned(), "checkout.workers".to_owned()),
             ("GIT_CONFIG_VALUE_0".to_owned(), "0".to_owned()),
         ];
-        let output = self.invoke_request(&self.repo, Class::Worktree, args.clone(), false, &extra_env)?;
+        let output =
+            self.invoke_request(&self.repo, Class::Worktree, args.clone(), false, &extra_env)?;
         ensure_success(Class::Worktree, &args, output)?;
         crate::failpoint::new_g()
     }
@@ -245,7 +246,8 @@ impl Git {
         if bare.child.code == Some(0) && text(&bare.stdout) == "true" {
             return Ok(());
         }
-        let core_worktree = self.invoke_status(Class::Query, &["config", "--get", "core.worktree"])?;
+        let core_worktree =
+            self.invoke_status(Class::Query, &["config", "--get", "core.worktree"])?;
         if core_worktree.child.code == Some(0) {
             return Ok(());
         }
@@ -319,11 +321,9 @@ impl Git {
     /// wildcard fetch to preserve the resolve-anything behaviour.
     pub fn fetch_origin_named(&self, branches: &BTreeSet<String>) -> Result<()> {
         let mut args = vec![OsString::from("fetch"), OsString::from("origin")];
-        args.extend(
-            branches
-                .iter()
-                .map(|branch| OsString::from(format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"))),
-        );
+        args.extend(branches.iter().map(|branch| {
+            OsString::from(format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"))
+        }));
         self.invoke_os(Class::Fetch, args).map(|_| ())
     }
 
@@ -689,9 +689,7 @@ impl Git {
                 .env
                 .insert("GIT_OPTIONAL_LOCKS".to_owned(), "0".to_owned());
         }
-        request
-            .env
-            .extend(extra_env.iter().cloned());
+        request.env.extend(extra_env.iter().cloned());
         proc::capture_op(
             &request,
             self.deadlines.for_class(class),

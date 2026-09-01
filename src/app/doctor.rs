@@ -146,10 +146,7 @@ fn tree_findings(
                 "BUILD_ABANDONED",
                 &subject,
                 format!("automatic build was abandoned; log: {}", build.log),
-                format!(
-                    "inspect the log and run `wt build {}` to retry",
-                    subject
-                ),
+                format!("inspect the log and run `wt build {}` to retry", subject),
             )),
             "failed" => findings.push(finding(
                 Severity::Warn,
@@ -304,7 +301,12 @@ fn tree_findings(
     let mut ports = tree
         .ports
         .iter()
-        .map(|(name, index)| (name.to_string(), tree.geometry.port_base + u16::from(*index)))
+        .map(|(name, index)| {
+            (
+                name.to_string(),
+                tree.geometry.port_base + u16::from(*index),
+            )
+        })
         .collect::<Vec<_>>();
     ports.sort_by_key(|(name, _)| {
         tree.ports[&wt_core::model::PortName::new(name).expect("stored port name is valid")]
