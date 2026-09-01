@@ -25,9 +25,20 @@ jobs:
             exit 1
           fi
 
+  create-release:
+    name: create GitHub release
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create the release with generated notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes --title "${GITHUB_REF_NAME}"
+
   build:
     name: build (${{ matrix.target }})
-    needs: check-version
+    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -50,6 +61,7 @@ jobs:
         with:
           bin: wt
           target: ${{ matrix.target }}
+          build-tool: cargo
           tar: unix
           checksum: sha256
           locked: true
