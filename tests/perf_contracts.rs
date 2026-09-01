@@ -379,7 +379,17 @@ fn session_snapshot_keeps_the_three_session_answers() {
     // false no — whether it runs and fails or cannot be spawned at all.
     common::write_executable(&h.shims.join("tmux"), "#!/bin/sh\nexit 2\n");
     assert_eq!(sessions(&h), ("unknown".into(), "unknown".into()));
-    wt_sys::fsx::remove_path(&h.shims.join("tmux")).unwrap();
+    // The unspawnable case must not delete the shim: PATH would then fall
+    // through to a system tmux where one is installed (Ubuntu CI). An
+    // executable whose interpreter does not exist fails to spawn on every
+    // platform while still shadowing any real tmux.
+    wt_sys::fsx::write_nofollow(
+        &h.shims,
+        &wt_core::model::RelPath::new("tmux").unwrap(),
+        b"#!/nonexistent-interpreter\n",
+        0o755,
+    )
+    .unwrap();
     assert_eq!(sessions(&h), ("unknown".into(), "unknown".into()));
     // Backend none answers without asking tmux at all.
     common::write(
