@@ -9,7 +9,7 @@ use wt_core::CoreError;
 
 use crate::cli::Doctor;
 
-use super::{list, remove, Context, Output};
+use super::{door, executor, list, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Doctor) -> Result<Output, CoreError> {
     let mut findings = vec![finding(
@@ -61,29 +61,49 @@ pub(crate) fn run(context: &mut Context, args: Doctor) -> Result<Output, CoreErr
         }
         git_registry_findings(context, &label, &record, &mut findings)?;
     }
-    for tree in context.registry.trees.clone() {
-        if args
-            .label
-            .as_deref()
-            .is_some_and(|label| tree.label.as_str() != label)
-        {
-            continue;
-        }
-        tree_findings(context, &tree, args.probe, &mut findings)?;
+    let trees = context
+        .registry
+        .trees
+        .clone()
+        .into_iter()
+        .filter(|tree| {
+            args.label
+                .as_deref()
+                .is_none_or(|label| tree.label.as_str() == label)
+        })
+        .collect::<Vec<_>>();
+    let env = list::ReportEnv::collect(context, &trees, list::SharedResourceRecords::default())?;
+    for tree in trees {
+        tree_findings(context, &tree, args.probe, &env, &mut findings)?;
     }
     let counts = wt_core::doctor::sort_and_count(&mut findings);
     Output::data(DoctorData { findings, counts })
 }
 
+/// Doctor observes only what its findings consume: phase, build, session,
+/// ports, and the branch-health facts. It deliberately runs no `git status`
+/// — no finding classifies dirtiness — so a fleet checkup does not pay for
+/// full working-tree scans.
 fn tree_findings(
     context: &mut Context,
     tree: &wt_core::model::TreeRec,
     probe: bool,
+    env: &list::ReportEnv,
     findings: &mut Vec<Finding>,
 ) -> Result<(), CoreError> {
     let target = super::context::target_of(tree);
+    let subject = target.to_string();
+    let dir_exists = matches!(
+        wt_sys::fsx::path_kind(Path::new(tree.path.as_str()))?,
+        wt_sys::fsx::PathKind::Directory
+    );
+    if probe && dir_exists && context.identity_ok(tree)? {
+        let mut entered = door::enter(context, Some(&subject), "probe")?;
+        executor::refresh_all_declarations(context, &entered)?;
+        executor::probe_all_resources(context, &entered)?;
+        entered.release_gate();
+    }
     let state = context.read_state(&target)?;
-    let report = list::tree_report(context, tree, true, false, probe)?;
     let phase = context.phase(tree, state.as_ref())?;
     if let Some((severity, code, remedy)) = phase_finding(phase) {
         let remedy = if phase == wt_core::lifecycle::DerivedPhase::Replaced && tree.canonical {
@@ -98,8 +118,8 @@ fn tree_findings(
         findings.push(finding(
             severity,
             code,
-            report.target.clone(),
-            format!("tree phase is {}", report.phase),
+            subject.clone(),
+            format!("tree phase is {}", list::phase_name(phase)),
             &remedy,
         ));
     }
@@ -107,41 +127,41 @@ fn tree_findings(
         findings.push(finding(
             Severity::Warn,
             "VERIFY_PENDING",
-            &report.target,
+            &subject,
             "verification is pending",
             "re-run `wt new --verify` for this tree",
         ));
     }
-    if let Some(build) = &report.build {
+    if let Some(build) = &list::build_report(tree, state.as_ref())? {
         match build.state.as_str() {
             "running" => findings.push(finding(
                 Severity::Info,
                 "BUILD_RUNNING",
-                &report.target,
+                &subject,
                 format!("automatic build is running; log: {}", build.log),
                 "wait for completion or inspect the build log",
             )),
             "abandoned" => findings.push(finding(
                 Severity::Warn,
                 "BUILD_ABANDONED",
-                &report.target,
+                &subject,
                 format!("automatic build was abandoned; log: {}", build.log),
                 format!(
                     "inspect the log and run `wt build {}` to retry",
-                    report.target
+                    subject
                 ),
             )),
             "failed" => findings.push(finding(
                 Severity::Warn,
                 "BUILD_FAILED",
-                &report.target,
+                &subject,
                 format!("automatic build failed; log: {}", build.log),
                 "inspect the log and run `wt build` to retry",
             )),
             "unknown" => findings.push(finding(
                 Severity::Warn,
                 "BUILD_STATUS_MISSING",
-                &report.target,
+                &subject,
                 format!("automatic build status is unavailable; log: {}", build.log),
                 "inspect the log and run `wt build` to establish a fresh status",
             )),
@@ -149,19 +169,19 @@ fn tree_findings(
             value => findings.push(finding(
                 Severity::Warn,
                 "BUILD_STATUS_UNKNOWN",
-                &report.target,
+                &subject,
                 format!(
                     "automatic build has unrecognised status `{value}`; log: {}",
                     build.log
                 ),
                 format!(
                     "inspect the log and run `wt build {}` to establish a fresh status",
-                    report.target
+                    subject
                 ),
             )),
         }
     }
-    if report.phase == "missing"
+    if phase == wt_core::lifecycle::DerivedPhase::Missing
         && state
             .as_ref()
             .is_some_and(|state| !state.resources.is_empty())
@@ -169,7 +189,7 @@ fn tree_findings(
         findings.push(finding(
             Severity::Warn,
             "TREE_MISSING_PENDING",
-            report.target.clone(),
+            subject.clone(),
             "missing tree still has resource records",
             "run `wt prune --records` before recreating the name",
         ));
@@ -182,7 +202,7 @@ fn tree_findings(
         findings.push(finding(
             Severity::Warn,
             "REFRESH_SKIPPED",
-            format!("{}:{skipped}", report.target),
+            format!("{}:{skipped}", subject),
             "resource declaration refresh was skipped because an environment value was undefined",
             "define the missing environment value and run `wt sync`",
         ));
@@ -192,7 +212,7 @@ fn tree_findings(
         .into_iter()
         .flat_map(|state| state.resources.values())
     {
-        let subject = format!("{}:{}", report.target, record.key.task);
+        let subject = format!("{}:{}", subject, record.key.task);
         if record.state == ResourceState::Orphaned {
             findings.push(finding(
                 Severity::Warn,
@@ -244,7 +264,7 @@ fn tree_findings(
         findings.push(finding(
             Severity::Info,
             "GEOMETRY_CHANGED",
-            &report.target,
+            &subject,
             "current settings differ from this tree's frozen port geometry",
             "remove and recreate the tree to adopt the new geometry",
         ));
@@ -253,17 +273,17 @@ fn tree_findings(
         findings.push(finding(
             Severity::Warn,
             "PORTS_EXHAUSTED",
-            &report.target,
+            &subject,
             "tree has no unallocated port index",
             "remove and recreate the tree or raise stride for future trees",
         ));
     }
+    let holders = super::remove::door_holders(context, &target)?;
     if wt_sys::lock::is_held(&context.tree_lock_path(&target))? {
-        let holders = super::remove::door_holders(context, &target)?;
         findings.push(finding(
             Severity::Info,
             "TREE_IN_USE",
-            &report.target,
+            &subject,
             if holders.is_empty() {
                 "tree lock is currently held".to_owned()
             } else {
@@ -279,36 +299,43 @@ fn tree_findings(
             "wait for the holder or stop the process",
         ));
     }
-    let running_task = super::remove::door_holders(context, &target)?
+    let running_task = holders.iter().any(|holder| holder.verb == "run");
+    let session = env.session_state(tree);
+    let mut ports = tree
+        .ports
         .iter()
-        .any(|holder| holder.verb == "run");
+        .map(|(name, index)| (name.to_string(), tree.geometry.port_base + u16::from(*index)))
+        .collect::<Vec<_>>();
+    ports.sort_by_key(|(name, _)| {
+        tree.ports[&wt_core::model::PortName::new(name).expect("stored port name is valid")]
+    });
     let mut any_bound = false;
-    for port in &report.ports {
-        if wt_sys::net::squat_probe(port.port, Duration::from_millis(50)).unwrap_or(false) {
+    for (name, port) in &ports {
+        if wt_sys::net::squat_probe(*port, Duration::from_millis(50)).unwrap_or(false) {
             any_bound = true;
-            if report.session != "yes" && !running_task {
+            if session != "yes" && !running_task {
                 findings.push(finding(
                     Severity::Warn,
                     "PORT_SQUATTED",
-                    format!("{}:{}", report.target, port.name),
-                    format!("port {} is bound without a wt session", port.port),
+                    format!("{subject}:{name}"),
+                    format!("port {port} is bound without a wt session"),
                     "stop the unrelated listener or recreate the tree in another slot",
                 ));
             }
             findings.push(finding(
                 Severity::Info,
                 "PORT_BOUND",
-                format!("{}:{}", report.target, port.name),
-                format!("port {} is bound", port.port),
+                format!("{subject}:{name}"),
+                format!("port {port} is bound"),
                 "inspect the listener if the binding is unexpected",
             ));
         }
     }
-    if any_bound && report.session != "yes" && !running_task {
+    if any_bound && session != "yes" && !running_task {
         findings.push(finding(
             Severity::Info,
             "SLOT_SQUATTED",
-            &report.target,
+            &subject,
             "one or more ports in this tree's allocated slot are occupied",
             "stop the unrelated listener or recreate the tree in another slot",
         ));
@@ -334,30 +361,47 @@ fn tree_findings(
             .get(&record.key.task)
             .and_then(|task| task.name.as_deref());
         findings.extend(wt_core::doctor::resource_name_findings(
-            &format!("{}:{}", report.target, record.key.task),
+            &format!("{}:{}", subject, record.key.task),
             template,
             record.name(),
         )?);
     }
-    if let Some(observation) = remove::observe_git(context, tree, true)? {
-        if observation.merged && !tree.canonical {
-            findings.push(finding(
-                Severity::Info,
-                "BRANCH_MERGED",
-                &report.target,
-                "branch is merged into the default branch",
-                "run `wt prune --merged` after reviewing the tree",
-            ));
-        }
-        if observation.upstream == wt_core::remove::Upstream::Gone {
-            findings.push(finding(
-                Severity::Warn,
-                "UPSTREAM_GONE",
-                &report.target,
-                "configured upstream no longer exists",
-                "push a replacement upstream or run `wt prune --gone`",
-            ));
-        }
+    // Branch health needs only ref-level facts — merged means HEAD is an
+    // ancestor of (and not equal to) the default ref, gone means the
+    // configured upstream no longer resolves. Deliberately narrower than
+    // the removal observer, which also classifies dirtiness and remote
+    // containment that no doctor finding consumes.
+    let git = context.git(root)?;
+    let branch = git.head_branch(root)?;
+    let merged = if tree.canonical {
+        false
+    } else if let Some(default_ref) = env.default_ref(&tree.label) {
+        git.is_ancestor("HEAD", default_ref)?
+            && git.resolve_commit("HEAD")? != git.resolve_commit(default_ref)?
+    } else {
+        false
+    };
+    if merged {
+        findings.push(finding(
+            Severity::Info,
+            "BRANCH_MERGED",
+            &subject,
+            "branch is merged into the default branch",
+            "run `wt prune --merged` after reviewing the tree",
+        ));
+    }
+    let upstream_gone = match branch.as_deref() {
+        Some(branch) => git.upstream_info(branch)?.gone,
+        None => false,
+    };
+    if upstream_gone {
+        findings.push(finding(
+            Severity::Warn,
+            "UPSTREAM_GONE",
+            &subject,
+            "configured upstream no longer exists",
+            "push a replacement upstream or run `wt prune --gone`",
+        ));
     }
     Ok(())
 }

@@ -327,18 +327,7 @@ fn tree_report_with_env(
         (None, None, None, None, None, Vec::new())
     };
     let session = env.session_state(tree);
-    let build = state
-        .as_ref()
-        .and_then(|state| state.build.as_ref())
-        .map(|build| {
-            let status = Path::new(tree.path.as_str()).join(".wt/build.status");
-            wt_sys::fsx::read_string(&status).map(|value| BuildTreeReport {
-                state: normalise_build_status(value.as_deref(), build.pid),
-                started: build.started.clone(),
-                log: build.log.clone(),
-            })
-        })
-        .transpose()?;
+    let build = build_report(tree, state.as_ref())?;
     let mut ports = tree
         .ports
         .iter()
@@ -435,6 +424,25 @@ fn tree_report_with_env(
     };
     timed.finish();
     Ok(report)
+}
+
+/// The build portion of a tree's report, shared with doctor so it does not
+/// need a whole tree report to classify a build.
+pub(crate) fn build_report(
+    tree: &wt_core::model::TreeRec,
+    state: Option<&wt_core::lifecycle::TreeState>,
+) -> Result<Option<BuildTreeReport>, CoreError> {
+    state
+        .and_then(|state| state.build.as_ref())
+        .map(|build| {
+            let status = Path::new(tree.path.as_str()).join(".wt/build.status");
+            wt_sys::fsx::read_string(&status).map(|value| BuildTreeReport {
+                state: normalise_build_status(value.as_deref(), build.pid),
+                started: build.started.clone(),
+                log: build.log.clone(),
+            })
+        })
+        .transpose()
 }
 
 fn normalise_build_status(value: Option<&str>, pid: u32) -> String {
