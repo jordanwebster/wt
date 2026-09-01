@@ -78,8 +78,13 @@ printf 'cargo' >> "$WT_SHIM_STATE/cargo.log"
 for arg in "$@"; do printf '\t%s' "$arg" >> "$WT_SHIM_STATE/cargo.log"; done
 printf '\n' >> "$WT_SHIM_STATE/cargo.log"
 mkdir -p target/debug
-cp fixture/orbit target/debug/orbit
-chmod +x target/debug/orbit
+# Replaced by rename, as cargo does: on Linux, copying over a binary that is
+# being executed fails with ETXTBSY, and executing one that is being written
+# fails the same way. The resource probe runs this binary while the build
+# step replaces it, so an in-place copy races with it.
+cp fixture/orbit target/debug/orbit.new
+chmod +x target/debug/orbit.new
+mv -f target/debug/orbit.new target/debug/orbit
 "#,
     );
     write_executable(

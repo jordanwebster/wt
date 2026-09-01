@@ -1,0 +1,15 @@
+# cargo-release configuration. Cutting a release is one command from a clean
+# checkout of main:
+#
+#     cargo release <patch|minor|major> --execute
+#
+# It bumps the shared workspace version, commits, tags v<version>, and pushes.
+# The tag triggers .github/workflows/release.yml, which builds the binaries
+# and attaches them to a GitHub release. Nothing is published to crates.io.
+shared-version = true
+consolidate-commits = true
+tag-name = "v{{version}}"
+pre-release-commit-message = "Release v{{version}}"
+allow-branch = ["main"]
+publish = false
+push = true

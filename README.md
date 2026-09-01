@@ -138,6 +138,20 @@ resource name arrives as `$WT_SELF`, and a port through an `env` entry reading
 
 ## Install
 
+Prebuilt binaries for macOS (Apple Silicon and Intel) and Linux (x86_64 and
+aarch64, statically linked) are attached to each
+[GitHub release](https://github.com/jordanwebster/wt/releases). Download the
+archive for your platform, verify it against the `.sha256` file alongside it,
+and put `wt` on your `PATH`:
+
+```sh
+tar -xzf wt-*.tar.gz
+install -m 755 wt ~/.local/bin/wt
+wt --version
+```
+
+Or build from source with Cargo:
+
 ```sh
 cargo install --git https://github.com/jordanwebster/wt
 wt --version
