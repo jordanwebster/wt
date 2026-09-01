@@ -359,6 +359,12 @@ fn acquire_inner(
         Mode::Shared => libc::LOCK_SH,
         Mode::Exclusive => libc::LOCK_EX,
     } | libc::LOCK_NB;
+    // Only a lock that actually blocked is worth timing; an uncontended
+    // acquisition is a syscall, and recording every one would bury the waits
+    // that explain a slow command.
+    let timed = crate::trace::span("lock", format!("{level:?}").to_ascii_lowercase())
+        .about(path.display().to_string());
+    let mut waited = false;
     let started = Instant::now();
     loop {
         // SAFETY: file owns a valid descriptor and `operation` is a supported
@@ -376,7 +382,11 @@ fn acquire_inner(
         if started.elapsed() >= wait {
             return Err(timeout_error(level, mode, path));
         }
+        waited = true;
         std::thread::sleep(Duration::from_millis(5));
+    }
+    if waited {
+        timed.finish();
     }
     // Shared tree holders use distinct door files and must not concurrently
     // truncate the common tree lock's holder record (SPEC §4, §13.1).

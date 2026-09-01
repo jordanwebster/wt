@@ -100,6 +100,12 @@ impl Output {
 }
 
 pub fn main(cli: Cli) -> i32 {
+    let exit = run(cli);
+    wt_sys::trace::command_done(exit);
+    exit
+}
+
+fn run(cli: Cli) -> i32 {
     let command = cli.command.name().to_owned();
     let human_kind = human::HumanKind::from(&cli.command);
     let json = cli.json;

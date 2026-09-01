@@ -25,7 +25,7 @@ pub(crate) fn run(context: &mut Context, args: Close) -> Result<Output, CoreErro
         };
         sessions.push(SessionReport::Closed(ClosedSessionReport {
             target: super::context::target_of(&tree).to_string(),
-            session: tree.session_name,
+            session: tree.session_name(),
             closed,
         }));
     }
@@ -52,9 +52,9 @@ pub(crate) fn close_tree(
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(10));
     let tmux = wt_sys::tmux::Tmux::new("tmux", timeout);
-    let exists = tmux.has_session(&tree.session_name)?;
+    let exists = tmux.has_session(&tree.session_name())?;
     if exists {
-        tmux.kill_session(&tree.session_name)?;
+        tmux.kill_session(&tree.session_name())?;
     }
     Ok(exists)
 }

@@ -22,7 +22,7 @@ pub(crate) fn run(context: &mut Context, args: Forget) -> Result<Output, CoreErr
         ));
     }
     context.require_identity(&tree)?;
-    refuse_resources(context, &target)?;
+    refuse_resources(context, &tree, &target)?;
     refuse_session(context, &tree)?;
     refuse_holders(context, &target)?;
     if !context.confirm(&format!("forget plan: {target}"))? {
@@ -49,7 +49,7 @@ pub(crate) fn run(context: &mut Context, args: Forget) -> Result<Output, CoreErr
         }
     })?;
     context.require_identity(&tree)?;
-    refuse_resources(context, &target)?;
+    refuse_resources(context, &tree, &target)?;
     refuse_session(context, &tree)?;
 
     let state = context.read_state(&target)?.ok_or_else(|| {
@@ -97,8 +97,6 @@ pub(crate) fn run(context: &mut Context, args: Forget) -> Result<Output, CoreErr
         slot: tree.slot,
         geometry: tree.geometry,
         ports: tree.ports.clone(),
-        name_short: tree.name_short.clone(),
-        session_name: tree.session_name.clone(),
         path: tree.path.clone(),
         materialized: Vec::new(),
         removed_at: wt_sys::fsx::timestamp()?,
@@ -120,17 +118,20 @@ pub(crate) fn run(context: &mut Context, args: Forget) -> Result<Output, CoreErr
     })
 }
 
-fn refuse_resources(context: &Context, target: &wt_core::model::Target) -> Result<(), CoreError> {
-    if context
-        .read_state(target)?
-        .is_some_and(|state| !state.resources.is_empty())
-    {
+fn refuse_resources(
+    context: &Context,
+    tree: &wt_core::model::TreeRec,
+    target: &wt_core::model::Target,
+) -> Result<(), CoreError> {
+    let live = super::executor::instantiated_resources(context, &tree.label, target)?;
+    if !live.is_empty() {
         return Err(CoreError::new(
             ExitClass::State,
             "RESOURCES_EXIST",
-            format!("{target} still has resource records"),
+            format!("{target} still has live resources: {}", live.join(", ")),
             "use `wt destroy` to tear down the resources, or `wt rm` to remove the tree",
-        ));
+        )
+        .with_details(serde_json::json!({ "resources": live })));
     }
     Ok(())
 }
@@ -140,7 +141,7 @@ fn refuse_session(context: &Context, tree: &wt_core::model::TreeRec) -> Result<(
         return Err(CoreError::new(
             ExitClass::State,
             "SESSION_LIVE",
-            format!("session {} is still live", tree.session_name),
+            format!("session {} is still live", tree.session_name()),
             "run `wt close` for the tree, then retry",
         ));
     }

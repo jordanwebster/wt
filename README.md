@@ -129,11 +129,12 @@ invalid. Set `template = false` on a `files` entry whose content or source uses
 literal `{{` syntax, such as Jinja, Helm, or GitHub Actions. `wt config
 <target>` shows every value with the layer it came from.
 
-Shell recipes have no `template = false` opt-out. Go-template output such as
-`docker inspect --format '{{.State.Status}}'` therefore cannot appear literally
-in a shell-string recipe; use argv form, or splice the braces through shell
-variables, for example `b='{{' e='}}'; docker inspect --format
-"${b}.State.Status${e}"`.
+A task takes the same `template = false`, covering its `run`, `exists`, and
+`destroy` in either form. That is the opt-out for a recipe holding Go-template
+output such as `docker inspect --format '{{.State.Status}}'`. Its `name` and
+`env` stay templated, which is how the recipe still gets wt's values: the
+resource name arrives as `$WT_SELF`, and a port through an `env` entry reading
+`{{ports.<name>}}`. See the [cookbook](docs/cookbook.md) for a worked example.
 
 ## Install
 
@@ -310,7 +311,10 @@ repairs stale records and out-of-band deletions.
 
 `wt forget` recovers a mis-adoption without touching the directory, branch, or
 Git worktree registration. It removes wt's owned artifacts and records, then
-you can adopt the existing worktree again with the correct name or policy.
+you can adopt the existing worktree again with the correct name or policy. It
+refuses while the worktree has resources that actually exist, naming them, and
+while a session or another door is live; a resource your configuration merely
+declares does not stand in the way.
 
 ## `.wt.toml` reference
 
@@ -444,8 +448,8 @@ Inside a worktree, `wt` exports two tiers:
 
 | Tier | Variables | Change policy |
 | --- | --- | --- |
-| Interface | `WT_TARGET`, `WT_LABEL`, `WT_NAME`, `WT_ROOT`, `WT_REPO`, `WT_HOME`, `WT_BRANCH` | Stable scripting interface; changes are announced deliberately. |
-| Mechanism | `WT_ACTIVATION`, `WT_PATH_PREFIX`, `WT_BIN`, `WT_SELF`, `WT_TASK` | Internal door/task plumbing; may change as the mechanism evolves. |
+| Interface | `WT_TARGET`, `WT_LABEL`, `WT_NAME`, `WT_ROOT`, `WT_REPO`, `WT_HOME`, `WT_BRANCH`, and `WT_SELF` inside a resource task | Stable scripting interface; changes are announced deliberately. |
+| Mechanism | `WT_ACTIVATION`, `WT_PATH_PREFIX`, `WT_BIN`, `WT_TASK` | Internal door/task plumbing; may change as the mechanism evolves. |
 
 Name transformations belong in template functions such as `{{name_snake()}}`
 and `{{name_short()}}`, not environment variables. `WT_SESSION`,
@@ -552,6 +556,7 @@ $WT_HOME/
   trees/<label>/<name>/       linked worktrees (unless trees_dir overrides it)
   cache/cargo-build/<label>/<name_short>/   per-tree build intermediates; die with the tree
   locks/                      bounded coordination locks and holder records
+  logs/wt.jsonl               how long wt's own operations took ([logs] trace)
 
 <tree>/.wt/
   tree_id                     ownership identity

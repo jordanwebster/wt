@@ -5,7 +5,7 @@ use std::time::Duration;
 use wt_core::address::LiveTree;
 use wt_core::config::{self, Config, Layer};
 use wt_core::lifecycle::{DerivedPhase, StateView, TreeObs, TreeState};
-use wt_core::model::{Registry, Target, TreeIdentity, TreeRec};
+use wt_core::model::{Registry, Target, Tombstone, TreeIdentity, TreeRec};
 use wt_core::report::Notice;
 use wt_core::settings::{self, Settings};
 use wt_core::task::{Node, Origin};
@@ -55,6 +55,7 @@ impl Context {
             .map(|source| settings::parse(&source))
             .transpose()?
             .unwrap_or_default();
+        wt_sys::trace::open(&home, cli.command.name(), settings.logs.trace);
         let registry = Self::read_registry_at(&home)?;
         let cwd = fsx::canonicalize(&std::env::current_dir().map_err(|error| {
             CoreError::new(
@@ -359,8 +360,7 @@ impl Context {
             slot: tree.slot,
             geometry: tree.geometry,
             ports: tree.ports.clone(),
-            name_short: tree.name_short.clone(),
-            session_name: tree.session_name.clone(),
+            name_short: tree.name_short(),
         })
     }
 
@@ -530,25 +530,15 @@ impl Context {
             .registry
             .trees
             .iter()
-            .map(|tree| tree.name_short.clone())
-            .chain(
-                self.registry
-                    .tombstones
-                    .iter()
-                    .map(|tree| tree.name_short.clone()),
-            )
+            .map(TreeRec::name_short)
+            .chain(self.registry.tombstones.iter().map(Tombstone::name_short))
             .collect::<BTreeSet<_>>();
         let taken_sessions = self
             .registry
             .trees
             .iter()
-            .map(|tree| tree.session_name.clone())
-            .chain(
-                self.registry
-                    .tombstones
-                    .iter()
-                    .map(|tree| tree.session_name.clone()),
-            )
+            .map(TreeRec::session_name)
+            .chain(self.registry.tombstones.iter().map(Tombstone::session_name))
             .collect::<BTreeSet<_>>();
         let tombstone = self
             .registry
@@ -561,8 +551,6 @@ impl Context {
                     slot: record.slot,
                     geometry: record.geometry,
                     ports: record.ports.clone(),
-                    name_short: record.name_short.clone(),
-                    session_name: record.session_name.clone(),
                 },
             });
         let initial_ports = wt_core::ports::append(

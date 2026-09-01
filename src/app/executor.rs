@@ -565,7 +565,7 @@ fn run_task(
         ));
     }
     if let Some(exists) = &node.exists {
-        let request = request(exists, &assembled, &cwd)?;
+        let request = request(exists, &assembled, &cwd, node.template)?;
         let probe = proc::probe(
             &request,
             duration(
@@ -600,7 +600,7 @@ fn run_task(
         )
     });
     let output = proc::run_with_header(
-        &request_with_args(run, &assembled, &cwd, &node.id, args)?,
+        &request_with_args(run, &assembled, &cwd, &node.id, args, node.template)?,
         log.as_deref(),
         log_header.as_deref().map(str::as_bytes),
         timeout
@@ -1122,16 +1122,17 @@ fn refresh_node_declaration(context: &Context, door: &Door, node: &Node) -> Resu
         exists: node
             .exists
             .as_ref()
-            .map(|command| expanded(command, &assembled))
+            .map(|command| expanded(command, &assembled, node.template))
             .transpose()?,
         destroy: expanded(
             node.destroy.as_ref().expect("resource has destroy"),
             &assembled,
+            node.template,
         )?,
         run: node
             .run
             .as_ref()
-            .map(|command| expanded(command, &assembled))
+            .map(|command| expanded(command, &assembled, node.template))
             .transpose()?,
         env: wt_core::snapshot::minimise_env(
             &assembled.env,
@@ -1652,7 +1653,14 @@ fn config_for_node(config: &Config, node: &Node) -> Result<EffectiveScope, CoreE
     config::effective_scope(config, node.scope.as_str())
 }
 
-fn expanded(command: &Command, assembled: &EnvOutput) -> Result<ExpandedCommand, CoreError> {
+fn expanded(
+    command: &Command,
+    assembled: &EnvOutput,
+    template: bool,
+) -> Result<ExpandedCommand, CoreError> {
+    if !template {
+        return Ok(command.clone().into());
+    }
     let context = wt_core::template::Context {
         vars: &assembled.vars,
         functions: &assembled.functions,
@@ -1673,8 +1681,13 @@ fn request(
     command: &Command,
     assembled: &EnvOutput,
     cwd: &Path,
+    template: bool,
 ) -> Result<CommandRequest, CoreError> {
-    CommandRequest::expanded(&expanded(command, assembled)?, cwd, assembled.env.clone())
+    CommandRequest::expanded(
+        &expanded(command, assembled, template)?,
+        cwd,
+        assembled.env.clone(),
+    )
 }
 
 fn request_with_args(
@@ -1683,8 +1696,9 @@ fn request_with_args(
     cwd: &Path,
     task_id: &str,
     args: &[String],
+    template: bool,
 ) -> Result<CommandRequest, CoreError> {
-    let mut request = request(command, assembled, cwd)?;
+    let mut request = request(command, assembled, cwd, template)?;
     if args.is_empty() {
         return Ok(request);
     }
@@ -1769,6 +1783,32 @@ fn resource_status(step: &wt_core::resource::StepResult) -> String {
         .as_ref()
         .map(|record| format!("{:?}", record.state).to_ascii_lowercase())
         .unwrap_or_else(|| "dropped".to_owned())
+}
+
+/// Names the tree-tied resources this target must tear down before wt can stop
+/// tracking it. A record without an instance is a declaration and nothing more:
+/// the configuration mentions the resource, but nothing was ever created, so
+/// there is nothing to orphan. A record whose exclusive arena is held by another
+/// live tree belongs to that tree, which is the same test `destroy` applies
+/// before it declines to touch one — refusing on a record `destroy` will not
+/// clear would leave no way forward.
+pub(crate) fn instantiated_resources(
+    context: &Context,
+    label: &wt_core::model::Label,
+    target: &wt_core::model::Target,
+) -> Result<Vec<String>, CoreError> {
+    let Some(state) = context.read_state(target)? else {
+        return Ok(Vec::new());
+    };
+    let arenas = arena_snapshot(context, label)?;
+    let address = target.to_string();
+    Ok(state
+        .resources
+        .values()
+        .filter(|record| record.instance.is_some())
+        .filter(|record| live_other_arena_holder(context, &arenas, record, &address).is_none())
+        .map(|record| scoped_id(&record.key))
+        .collect())
 }
 
 fn scoped_id(key: &ResourceKey) -> String {

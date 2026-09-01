@@ -88,11 +88,17 @@ impl Default for LockWaits {
 #[serde(default, deny_unknown_fields)]
 pub struct LogSettings {
     pub keep: u16,
+    /// Whether wt appends its own timing log. On, because the log's whole use
+    /// is explaining a command that was already slow.
+    pub trace: bool,
 }
 
 impl Default for LogSettings {
     fn default() -> Self {
-        Self { keep: 20 }
+        Self {
+            keep: 20,
+            trace: true,
+        }
     }
 }
 
@@ -170,7 +176,11 @@ impl Default for Settings {
                             "--name".to_owned(),
                             "{{name()}}".to_owned(),
                         ]),
-                        resume: Command::Argv(vec!["claude".to_owned(), "--continue".to_owned()]),
+                        resume: Command::Argv(vec![
+                            "claude".to_owned(),
+                            "--resume".to_owned(),
+                            "{{name()}}".to_owned(),
+                        ]),
                     },
                 ),
                 (
@@ -199,17 +209,27 @@ impl Default for Settings {
 
 pub fn parse(source: &str) -> Result<Settings, CoreError> {
     let mut settings: Settings = toml::from_str(source).map_err(|error| {
-        let mut remedy = "fix `$WT_HOME/config.toml`".to_owned();
-        if let Some(key) = misplaced_repo_key(source) {
-            remedy.push_str(&format!(
-                "; `{key}` is a repo-scope key; put it under `[repos.<label>]` in `$WT_HOME/config.toml`"
-            ));
-        }
-        CoreError::new(
-            ExitClass::State,
-            "SETTINGS_INVALID",
-            error.to_string(),
-            remedy,
+        // A misplaced repo key parses as an unknown settings field, so serde
+        // reports it against the settings schema and lists alternatives that
+        // are all wrong for it. Say what is actually the matter instead of
+        // leaving a message and a remedy that disagree.
+        misplaced_repo_key(source).map_or_else(
+            || {
+                CoreError::new(
+                    ExitClass::State,
+                    "SETTINGS_INVALID",
+                    error.to_string(),
+                    "fix `$WT_HOME/config.toml`",
+                )
+            },
+            |key| {
+                CoreError::new(
+                    ExitClass::State,
+                    "SETTINGS_INVALID",
+                    format!("`{key}` is a repo-scope key, not a settings key"),
+                    format!("put `{key}` under `[repos.<label>]` in `$WT_HOME/config.toml`"),
+                )
+            },
         )
     })?;
     let defaults = Settings::default();
@@ -271,7 +291,7 @@ pub fn validate_settings(settings: &Settings) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn misplaced_repo_key(source: &str) -> Option<&str> {
+fn misplaced_repo_key(source: &str) -> Option<String> {
     const REPO_KEYS: &[&str] = &[
         "adapters",
         "bin",
@@ -287,13 +307,13 @@ fn misplaced_repo_key(source: &str) -> Option<&str> {
     let table = source.parse::<toml::Table>().ok()?;
     REPO_KEYS
         .iter()
-        .copied()
-        .find(|key| table.contains_key(*key))
+        .find(|key| table.contains_key(**key))
+        .map(|key| (*key).to_owned())
         .or_else(|| {
             table
                 .get("ports")
                 .is_some_and(toml::Value::is_array)
-                .then_some("ports")
+                .then(|| "ports".to_owned())
         })
         .or_else(|| {
             repo_map_key(
@@ -311,19 +331,18 @@ fn misplaced_repo_key(source: &str) -> Option<&str> {
         })
 }
 
-fn repo_map_key(
-    table: &toml::Table,
-    key: &'static str,
-    settings_keys: &[&str],
-) -> Option<&'static str> {
+/// Names the misplaced entry itself — `locks.integration` rather than `locks` —
+/// because the settings table of the same name is legitimate and only the one
+/// entry belongs elsewhere.
+fn repo_map_key(table: &toml::Table, key: &str, settings_keys: &[&str]) -> Option<String> {
     let values = table.get(key)?.as_table()?;
     values
         .iter()
-        .any(|(name, value)| {
+        .find(|(name, value)| {
             !settings_keys.contains(&name.as_str())
                 && (value.is_table() || matches!(value, toml::Value::Boolean(false)))
         })
-        .then_some(key)
+        .map(|(name, _)| format!("{key}.{name}"))
 }
 
 pub fn backend_is_declared(source: &str) -> Result<bool, CoreError> {
@@ -501,6 +520,14 @@ mod tests {
                 "{{name()}}".to_owned(),
             ])
         );
+        assert_eq!(
+            settings.agents["claude"].resume,
+            Command::Argv(vec![
+                "claude".to_owned(),
+                "--resume".to_owned(),
+                "{{name()}}".to_owned(),
+            ])
+        );
         assert_eq!(settings.logs.keep, 20);
         assert_eq!(settings.git.timeouts.query.as_deref(), Some("30s"));
         assert_eq!(settings.task.probe_timeout.as_deref(), Some("10s"));
@@ -535,17 +562,32 @@ mod tests {
             assert_eq!(error.code.0, "SETTINGS_INVALID");
         }
         let error = parse("env={ FOO='bar' }").unwrap_err();
-        assert!(error.remedy.starts_with("fix `$WT_HOME/config.toml`;"));
-        assert!(error.remedy.contains("repo-scope key"));
+        assert_eq!(
+            error.message,
+            "`env` is a repo-scope key, not a settings key"
+        );
         assert!(error.remedy.contains("[repos.<label>]"));
-        for source in [
-            "ports=['http']",
-            "[locks.integration]\nslots=2",
-            "[task.test]\nrun='cargo test'",
+        assert!(error.remedy.contains("$WT_HOME/config.toml"));
+        for (source, key) in [
+            ("ports=['http']", "ports"),
+            ("[locks.integration]\nslots=2", "locks.integration"),
+            ("[task.test]\nrun='cargo test'", "task.test"),
         ] {
             let error = parse(source).unwrap_err();
-            assert!(error.remedy.contains("repo-scope key"), "{source}");
+            assert_eq!(
+                error.message,
+                format!("`{key}` is a repo-scope key, not a settings key"),
+                "{source}"
+            );
         }
+        // A settings-shaped mistake keeps serde's own account of it.
+        let error = parse("[locks]\ntree_exclusive=5").unwrap_err();
+        assert!(
+            error.message.contains("tree_exclusive"),
+            "{}",
+            error.message
+        );
+        assert_eq!(error.remedy, "fix `$WT_HOME/config.toml`");
     }
 
     #[test]

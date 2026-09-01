@@ -357,16 +357,39 @@ pub enum Tee {
 
 /// Runs one captured subprocess with a bounded deadline.
 pub fn capture(request: &CommandRequest, timeout: Duration) -> Result<ProcessOutput> {
-    trace_spawn(request)?;
+    capture_op(request, timeout, None)
+}
+
+/// Runs one captured subprocess, naming the operation for the timing log.
+/// Only a caller that composed the arguments itself may name them.
+pub fn capture_op(
+    request: &CommandRequest,
+    timeout: Duration,
+    op: Option<&str>,
+) -> Result<ProcessOutput> {
+    let traced = trace_spawn(request, op)?;
     let mut command = build_command(request, true);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = command
+    let outcome = command
         .spawn()
-        .map_err(|error| spawn_error(request, error))?;
-    wait_with_pipes(child, timeout, None, Tee::Quiet, true)
+        .map_err(|error| spawn_error(request, error))
+        .and_then(|child| wait_with_pipes(child, timeout, None, Tee::Quiet, true));
+    traced.finish(outcome_of(&outcome));
+    outcome
+}
+
+fn outcome_of(outcome: &Result<ProcessOutput>) -> crate::trace::Outcome {
+    match outcome {
+        Err(_) => crate::trace::Outcome::Failed,
+        Ok(output) if output.timed_out => crate::trace::Outcome::TimedOut,
+        Ok(output) => output
+            .child
+            .code
+            .map_or(crate::trace::Outcome::Failed, crate::trace::Outcome::Code),
+    }
 }
 
 /// Runs a child while teeing byte-exact stdout/stderr to a log and a selected sink.
@@ -382,7 +405,8 @@ pub fn run(
 /// Starts a process in a new session through an intermediate child, so the
 /// launched process is reparented and outlives the invoking CLI.
 pub fn spawn_detached(request: &CommandRequest) -> Result<u32> {
-    trace_spawn(request)?;
+    let traced = trace_spawn(request, None)?;
+    traced.finish(crate::trace::Outcome::Detached);
     let mut pipe = [0; 2];
     // SAFETY: `pipe` points to two writable integers.
     if unsafe { libc::pipe(pipe.as_mut_ptr()) } < 0 {
@@ -520,7 +544,7 @@ pub fn run_with_header(
     timeout: Option<Duration>,
     tee: Tee,
 ) -> Result<ProcessOutput> {
-    trace_spawn(request)?;
+    let traced = trace_spawn(request, None)?;
     let mut log = log.map(open_log).transpose()?;
     if let (Some(file), Some(header)) = (&mut log, log_header) {
         file.write_all(header)
@@ -532,16 +556,20 @@ pub fn run_with_header(
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = command
+    let outcome = command
         .spawn()
-        .map_err(|error| spawn_error(request, error))?;
-    wait_with_pipes(
-        child,
-        timeout.unwrap_or(Duration::MAX),
-        log,
-        tee,
-        process_group,
-    )
+        .map_err(|error| spawn_error(request, error))
+        .and_then(|child| {
+            wait_with_pipes(
+                child,
+                timeout.unwrap_or(Duration::MAX),
+                log,
+                tee,
+                process_group,
+            )
+        });
+    traced.finish(outcome_of(&outcome));
+    outcome
 }
 
 /// Runs a child with all three standard streams attached to one pseudoterminal.
@@ -556,7 +584,7 @@ pub fn pty_capture(
     input: &[u8],
     timeout: Duration,
 ) -> Result<ProcessOutput> {
-    trace_spawn(request)?;
+    let traced = trace_spawn(request, None)?;
     let mut master_fd = 0;
     let mut slave_fd = 0;
     // SAFETY: openpty initialises two owned descriptors on success. Each is
@@ -657,7 +685,7 @@ pub fn pty_capture(
             .wait()
             .map_err(io_error("wait for pseudoterminal child"))?,
     };
-    Ok(ProcessOutput {
+    let output = ProcessOutput {
         pid,
         child: ChildStatus {
             code: status.code(),
@@ -666,7 +694,16 @@ pub fn pty_capture(
         stdout: bytes,
         stderr: Vec::new(),
         timed_out,
-    })
+    };
+    traced.finish(if timed_out {
+        crate::trace::Outcome::TimedOut
+    } else {
+        output
+            .child
+            .code
+            .map_or(crate::trace::Outcome::Failed, crate::trace::Outcome::Code)
+    });
+    Ok(output)
 }
 
 fn drain_pty(master: &mut File, bytes: &mut Vec<u8>, ended: &mut bool) -> Result<()> {
@@ -739,14 +776,24 @@ pub fn execvp_inheriting(request: &CommandRequest, inherited_fds: &[RawFd]) -> R
     for inherited_fd in inherited_fds {
         clear_cloexec(*inherited_fd)?;
     }
-    trace_spawn(request)?;
+    spawn_tracer(request)?;
+    // The exec is the command's own ending, not a child of it.
+    crate::trace::command_handoff(&request.program);
     let mut command = build_command(request, false);
     let error = command.exec();
     Err(spawn_error(request, error))
 }
 
 /// Appends one machine-readable spawn observation for contract budget tests.
-fn trace_spawn(request: &CommandRequest) -> Result<()> {
+/// Records the spawn for the acceptance tracer and starts the timing of this
+/// child; every path that starts a process passes through here.
+fn trace_spawn(request: &CommandRequest, op: Option<&str>) -> Result<crate::trace::Child> {
+    let child = crate::trace::spawn(&request.program, op);
+    spawn_tracer(request)?;
+    Ok(child)
+}
+
+fn spawn_tracer(request: &CommandRequest) -> Result<()> {
     let Some(path) = std::env::var_os("WT_SPAWN_TRACE") else {
         return Ok(());
     };

@@ -11,6 +11,7 @@ pub mod net;
 pub mod proc;
 pub mod snapshot;
 pub mod tmux;
+pub mod trace;
 
 pub type Result<T> = std::result::Result<T, wt_core::CoreError>;
 

@@ -574,7 +574,12 @@ impl Git {
                 .env
                 .insert("GIT_OPTIONAL_LOCKS".to_owned(), "0".to_owned());
         }
-        proc::capture(&request, self.deadlines.for_class(class)).map_err(|error| {
+        proc::capture_op(
+            &request,
+            self.deadlines.for_class(class),
+            Some(&git_op(&request.args)),
+        )
+        .map_err(|error| {
             if error.code.0 == "SPAWN_FAILED" {
                 CoreError::new(
                     ExitClass::External,
@@ -587,6 +592,17 @@ impl Git {
             }
         })
     }
+}
+
+/// Names a git invocation by its leading subcommand words for the timing log.
+/// wt composes every one of these argument lists, so none of it is user text.
+fn git_op(args: &[OsString]) -> String {
+    args.iter()
+        .take_while(|arg| !arg.to_string_lossy().starts_with('-'))
+        .take(2)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Executes one bounded `git clone` without consulting repository state.

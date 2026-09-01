@@ -71,11 +71,64 @@ content uses `{{root()}}`, private vars, or declared ports.
 
 | Tier | Variables | Change policy |
 | --- | --- | --- |
-| Interface | `WT_TARGET`, `WT_LABEL`, `WT_NAME`, `WT_ROOT`, `WT_REPO`, `WT_HOME`, `WT_BRANCH` | Stable scripting interface; changes are announced deliberately. |
-| Mechanism | `WT_ACTIVATION`, `WT_PATH_PREFIX`, `WT_BIN`, `WT_SELF`, `WT_TASK` | Internal door/task plumbing; may change as the mechanism evolves. |
+| Interface | `WT_TARGET`, `WT_LABEL`, `WT_NAME`, `WT_ROOT`, `WT_REPO`, `WT_HOME`, `WT_BRANCH`, and `WT_SELF` inside a resource task | Stable scripting interface; changes are announced deliberately. |
+| Mechanism | `WT_ACTIVATION`, `WT_PATH_PREFIX`, `WT_BIN`, `WT_TASK` | Internal door/task plumbing; may change as the mechanism evolves. |
 
 Name transformations belong in template functions such as `{{name_snake()}}`;
 `WT_SESSION`, `WT_NAME_SNAKE`, `WT_NAME_SHORT`, and `WT_SLOT` are not
 exported. See [Environment rules](../README.md#environment-rules) for the
 full rules, including why ports are configuration inputs rather than
 environment.
+
+## Recipes that contain `{{ }}`
+
+`{{` always begins a wt template expression, so a Go template written straight
+into a recipe — the kind `docker`, `kubectl`, and `gh` take after `--format` —
+is a configuration error. Set `template = false` on the task to hand the whole
+recipe to the shell verbatim:
+
+```toml
+[task.serve]
+tied_to = "tree"
+template = false
+run = 'docker run -d --name "$WT_SELF" myapp'
+exists = 'docker inspect -f "{{.State.Running}}" "$WT_SELF" 2>/dev/null | grep -q true'
+destroy = 'docker rm -f "$WT_SELF"'
+```
+
+The opt-out covers `run`, `exists`, and `destroy`, in string or argv form. It
+does not cover the task's `name` or `env`, which is how an untemplated recipe
+still receives wt's values: `$WT_SELF` is the resolved resource name, and a
+declared port reaches the recipe through an `env` entry.
+
+```toml
+[task.serve.env]
+APP_PORT = "{{ports.http}}"
+```
+
+A recipe that needs no braces of its own needs none of this — keep templating
+on and write `{{ports.http}}` directly.
+
+## Find out where the time went
+
+wt appends a line per event to `$WT_HOME/logs/wt.jsonl`: one for each child
+process it runs, one for each lock that made it wait, and one closing each
+command with its total. Everything carries a duration in `ms` and the `run` id
+of the invocation that produced it, so a slow command can be taken apart after
+the fact — no flag to remember beforehand.
+
+```sh
+# where the last `wt ls` spent its time
+run=$(jq -r 'select(.kind=="cmd" and .name=="list").run' ~/.wt/logs/wt.jsonl | tail -1)
+jq -r --arg run "$run" \
+  'select(.run==$run and .kind=="child")|"\(.ms)\t\(.name) \(.op // "")"' \
+  ~/.wt/logs/wt.jsonl | sort -rn | head
+```
+
+Recipe text never appears in the log; a task is named by its id. Turn the log
+off with `trace = false`:
+
+```toml
+[logs]
+trace = false
+```

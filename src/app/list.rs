@@ -107,6 +107,7 @@ fn tree_report_with_shared(
     shared: Option<&SharedResourceRecords>,
 ) -> Result<TreeReport, CoreError> {
     let target = target_of(tree);
+    let timed = wt_sys::trace::span("span", "tree_report").about(target.to_string());
     let exists = matches!(
         wt_sys::fsx::path_kind(Path::new(tree.path.as_str()))?,
         wt_sys::fsx::PathKind::Directory
@@ -258,7 +259,7 @@ fn tree_report_with_shared(
         Vec::new()
     };
     let verify = state.as_ref().and_then(|state| state.verify.as_ref());
-    Ok(TreeReport {
+    let report = TreeReport {
         target: target.to_string(),
         label: tree.label.to_string(),
         name: tree.name.clone(),
@@ -297,7 +298,7 @@ fn tree_report_with_shared(
         }),
         build,
         session,
-        session_name: tree.session_name.clone(),
+        session_name: tree.session_name(),
         agent: tree.agent.clone(),
         meta: tree.meta.clone(),
         resources,
@@ -307,7 +308,7 @@ fn tree_report_with_shared(
             .transpose()?,
         cache_kb: disk
             .then(|| {
-                let cache = context.tree_cache_dir(tree.label.as_str(), &tree.name_short);
+                let cache = context.tree_cache_dir(tree.label.as_str(), &tree.name_short());
                 match wt_sys::fsx::path_kind(&cache)? {
                     wt_sys::fsx::PathKind::Missing => Ok(None),
                     _ => wt_sys::fsx::disk_kb(&cache).map(Some),
@@ -315,7 +316,9 @@ fn tree_report_with_shared(
             })
             .transpose()?
             .flatten(),
-    })
+    };
+    timed.finish();
+    Ok(report)
 }
 
 fn normalise_build_status(value: Option<&str>, pid: u32) -> String {
@@ -540,7 +543,7 @@ fn session_state(context: &Context, tree: &wt_core::model::TreeRec) -> String {
     let timeout = wt_core::model::duration_millis(&context.settings.session.tmux_timeout)
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(10));
-    match wt_sys::tmux::Tmux::new("tmux", timeout).has_session(&tree.session_name) {
+    match wt_sys::tmux::Tmux::new("tmux", timeout).has_session(&tree.session_name()) {
         Ok(true) => "yes",
         Ok(false) => "no",
         Err(error) if error.code.0 == "TOOL_MISSING" => "unknown",

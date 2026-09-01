@@ -255,7 +255,7 @@ fn open_trees(
                 }
                 sessions.push(SessionReport::Failed(FailedSessionReport {
                     target: target.to_string(),
-                    name: tree.session_name,
+                    name: tree.session_name(),
                     failed: true,
                     code: error.code.0,
                     message: error.message,
@@ -290,7 +290,7 @@ fn open_tree(
     let target = super::context::target_of(&tree);
     let mut gate = door::enter(context, Some(&target.to_string()), "open")?;
     let notices = gate.notices.clone();
-    let mut existing = tmux.has_session(&tree.session_name)?;
+    let mut existing = tmux.has_session(&tree.session_name())?;
     let mut created = false;
     let mut reported_agent = tree.agent.clone();
     if !existing {
@@ -315,17 +315,17 @@ fn open_tree(
         wt_sys::fsx::create_private_dir(&capture_dir)?;
         let capture = capture_dir.join(format!(
             "session-{}-{}.log",
-            tree.session_name.replace('/', "_"),
+            tree.session_name().replace('/', "_"),
             std::process::id()
         ));
         if let Err(error) = tmux.new_session(
-            &tree.session_name,
+            &tree.session_name(),
             Path::new(tree.path.as_str()),
             &context.home,
             &capture,
             &inner,
         ) {
-            if !tmux.has_session(&tree.session_name)? {
+            if !tmux.has_session(&tree.session_name())? {
                 return Err(error);
             }
             existing = true;
@@ -353,7 +353,7 @@ fn open_tree(
     Ok((
         OpenSessionReport {
             target: target.to_string(),
-            name: tree.session_name,
+            name: tree.session_name(),
             created,
             existing,
             agent: reported_agent,
