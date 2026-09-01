@@ -78,13 +78,16 @@ printf 'cargo' >> "$WT_SHIM_STATE/cargo.log"
 for arg in "$@"; do printf '\t%s' "$arg" >> "$WT_SHIM_STATE/cargo.log"; done
 printf '\n' >> "$WT_SHIM_STATE/cargo.log"
 mkdir -p target/debug
-# Replaced by rename, as cargo does: on Linux, copying over a binary that is
-# being executed fails with ETXTBSY, and executing one that is being written
-# fails the same way. The resource probe runs this binary while the build
-# step replaces it, so an in-place copy races with it.
-cp fixture/orbit target/debug/orbit.new
-chmod +x target/debug/orbit.new
-mv -f target/debug/orbit.new target/debug/orbit
+# Two of these run at once in a fresh tree: the background build `wt new`
+# starts, and the build step of the `wt run` that follows it. Real cargo
+# serialises them with its own lock and replaces outputs by rename; this
+# one must at least never leave a half-written binary for the resource probe
+# to execute — on Linux that is ETXTBSY, seen as a probe failure or as a
+# copy failing over a binary being run — nor collide with its twin on a
+# shared temporary name.
+cp fixture/orbit "target/debug/orbit.$$"
+chmod +x "target/debug/orbit.$$"
+mv -f "target/debug/orbit.$$" target/debug/orbit
 "#,
     );
     write_executable(
