@@ -389,9 +389,9 @@ fn tree_findings(
     let branch = git.head_branch(root)?;
     let merged = if tree.canonical {
         false
-    } else if let Some(default_ref) = env.default_ref(&tree.label) {
-        git.is_ancestor("HEAD", default_ref)?
-            && git.resolve_commit("HEAD")? != git.resolve_commit(default_ref)?
+    } else if let Some(default_ref) = env.tree_default_ref(&git, tree, branch.as_deref())? {
+        git.is_ancestor("HEAD", &default_ref)?
+            && git.resolve_commit("HEAD")? != git.resolve_commit(&default_ref)?
     } else {
         false
     };

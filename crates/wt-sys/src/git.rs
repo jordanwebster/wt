@@ -239,22 +239,35 @@ impl Git {
     /// caches keep `git status` output exact — git invalidates them
     /// itself — they only shrink the working-tree scan.
     pub fn accelerate_status(&self, tree: &Path) -> Result<()> {
-        // A repository carrying `core.bare` or `core.worktree` in shared
-        // config would need those keys relocated before enabling
-        // `extensions.worktreeConfig` is safe; leave such a checkout alone.
-        let bare = self.invoke_status(Class::Query, &["config", "--get", "core.bare"])?;
-        if bare.child.code == Some(0) && text(&bare.stdout) == "true" {
-            return Ok(());
-        }
-        let core_worktree =
-            self.invoke_status(Class::Query, &["config", "--get", "core.worktree"])?;
-        if core_worktree.child.code == Some(0) {
-            return Ok(());
-        }
-        self.invoke(
-            Class::Worktree,
-            &["config", "extensions.worktreeConfig", "true"],
+        let extension = self.invoke_status(
+            Class::Query,
+            &[
+                "config",
+                "--type=bool",
+                "--get",
+                "extensions.worktreeConfig",
+            ],
         )?;
+        if !(extension.child.code == Some(0) && text(&extension.stdout) == "true") {
+            // Only when wt itself must enable the extension: a repository
+            // carrying `core.bare = true` or `core.worktree` would need
+            // those keys relocated first, so leave such a checkout alone.
+            // With the extension already on, any such keys are already
+            // where git prescribes and no migration question arises.
+            let bare = self.invoke_status(Class::Query, &["config", "--get", "core.bare"])?;
+            if bare.child.code == Some(0) && text(&bare.stdout) == "true" {
+                return Ok(());
+            }
+            let core_worktree =
+                self.invoke_status(Class::Query, &["config", "--get", "core.worktree"])?;
+            if core_worktree.child.code == Some(0) {
+                return Ok(());
+            }
+            self.invoke(
+                Class::Worktree,
+                &["config", "extensions.worktreeConfig", "true"],
+            )?;
+        }
         let set = |key: &str, value: &str| -> Result<()> {
             let args = proc::os_args(&["config", "--worktree", key, value]);
             let output = self.invoke_request(tree, Class::Worktree, args.clone(), false, &[])?;
@@ -593,21 +606,32 @@ impl Git {
         Ok(lines(&output.stdout))
     }
 
-    /// Implements the origin/HEAD → main/master/trunk → HEAD default-branch chain.
-    pub fn default_branch(&self) -> Result<String> {
+    /// The repository-wide part of the default-branch chain: origin/HEAD →
+    /// main/master/trunk. `None` means the caller must apply the final,
+    /// per-worktree HEAD fallback — that step depends on which checkout is
+    /// asking and must not be shared between trees.
+    pub fn default_branch_shared(&self) -> Result<Option<String>> {
         let origin = self.invoke_status(
             Class::Query,
             &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
         )?;
         if origin.child.code == Some(0) {
             if let Some(branch) = text(&origin.stdout).strip_prefix("origin/") {
-                return Ok(branch.to_owned());
+                return Ok(Some(branch.to_owned()));
             }
         }
         for branch in ["main", "master", "trunk"] {
             if self.ref_exists(&format!("refs/heads/{branch}"))? {
-                return Ok(branch.to_owned());
+                return Ok(Some(branch.to_owned()));
             }
+        }
+        Ok(None)
+    }
+
+    /// Implements the origin/HEAD → main/master/trunk → HEAD default-branch chain.
+    pub fn default_branch(&self) -> Result<String> {
+        if let Some(branch) = self.default_branch_shared()? {
+            return Ok(branch);
         }
         Ok(self
             .head_branch(&self.repo)?

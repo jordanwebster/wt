@@ -383,7 +383,13 @@ fn add_worktree(
         match git.fetch_origin_named(&wanted) {
             Ok(()) => {}
             Err(error) if error.code.0 == "TIMEOUT" => return Err(error),
-            Err(_) => git.fetch_origin_branches()?,
+            // When the fallback fails too, report the narrow error: it
+            // names the refs this creation actually asked for.
+            Err(error) => {
+                if git.fetch_origin_branches().is_err() {
+                    return Err(error);
+                }
+            }
         }
     }
     let resolution = if let Some(input) = args.from_ref.as_deref() {

@@ -579,7 +579,7 @@ TreeState := { schema: 1, tree_id, label, name, phase: initialising|bootstrappin
 wt new <label>/<name> [--branch B] [--from REF] [--detach] [--meta k=v]… [--no-sync] [--verify] [--no-fetch] [--no-open] [--no-attach] [--no-build]
 REF := <local branch> | <remote>/<branch> | pr:N | <PR URL> | <rev>
 ```
-`--from` bare `X`: `refs/heads/X` → `refs/remotes/origin/X` → rev; both present and different → local wins with `FROM_LOCAL_SHADOWS_REMOTE`; `origin/X` forces remote. Default start `origin/<default>` after a bounded fetch (`--no-fetch` skips; unpushed local default-branch commits need `--from main`). A fetch covers only the branches the creation consumes — the requested start when it can name an origin branch, plus the default branch — and falls back to the full `refs/heads/*` fetch when a wanted name is not a branch on the remote (a tag, a raw revision, a renamed default), so anything resolvable before stays resolvable; a fetch timeout propagates instead of doubling the wait. Default branch: `origin/HEAD` → `main`/`master`/`trunk` → HEAD, cached, refreshed on fetch. PR refspec by origin host: github `refs/pull/N/head`; gitlab `refs/merge-requests/N/head`; bitbucket `refs/pull-requests/N/from`; unknown: pull then merge-requests; fetched as `refs/wt/pr/N`, local branch `pr/N`, default name `pr-N`. A PR URL selects the label whose normalised origin (https or scp-style ssh, `.git` stripped) matches host and `owner/repo`; zero/many → error with remedy. `B` defaults to `<name>`; `--branch feature/x` without a name → `feature-x`. `AddSpec`: existing branch · `-b B <start>` with `--no-track` unless start is `refs/remotes/*` · `--detach`.
+`--from` bare `X`: `refs/heads/X` → `refs/remotes/origin/X` → rev; both present and different → local wins with `FROM_LOCAL_SHADOWS_REMOTE`; `origin/X` forces remote. Default start `origin/<default>` after a bounded fetch (`--no-fetch` skips; unpushed local default-branch commits need `--from main`). A fetch covers only the branches the creation consumes — the requested start when it can name an origin branch, plus the default branch. Any narrow-fetch failure other than a timeout falls back once to the full `refs/heads/*` fetch (a wanted name may be a tag, a raw revision, or a renamed default), so anything resolvable before stays resolvable; when the fallback also fails, the narrow fetch's error is reported because it names the refs the creation asked for, and a timeout propagates without a second attempt. Default branch: `origin/HEAD` → `main`/`master`/`trunk` → HEAD, cached, refreshed on fetch. PR refspec by origin host: github `refs/pull/N/head`; gitlab `refs/merge-requests/N/head`; bitbucket `refs/pull-requests/N/from`; unknown: pull then merge-requests; fetched as `refs/wt/pr/N`, local branch `pr/N`, default name `pr-N`. A PR URL selects the label whose normalised origin (https or scp-style ssh, `.git` stripped) matches host and `owner/repo`; zero/many → error with remedy. `B` defaults to `<name>`; `--branch feature/x` without a name → `feature-x`. `AddSpec`: existing branch · `-b B <start>` with `--no-track` unless start is `refs/remotes/*` · `--detach`.
 
 Each repeatable `--meta k=v` initializes one §4.1 metadata entry. Repeated keys
 take their last value. The option affects a newly allocated or fresh
@@ -676,9 +676,12 @@ Run exactly once per incarnation at `new` S3 (never for canonical or adopted tre
 Truth is always freshly observed — wt never presents a cached fact as
 current. The scan behind the exact dirty counts is kept cheap through git's
 own self-invalidating caches instead: creation enables the untracked cache
-(and the built-in filesystem monitor where git supports it) scoped per
-worktree on each tree wt creates, leaving every other checkout's
-configuration untouched, and `doctor` reports existing trees without them as
+(and the built-in filesystem monitor where git supports it) as per-worktree
+configuration on each tree wt creates, so no other checkout's effective
+status behaviour changes (the shared `extensions.worktreeConfig` switch is
+enabled once, and never when `core.bare`/`core.worktree` would need
+relocating first). `doctor` reports an existing tree without the untracked
+cache — that key alone, since the monitor is platform-gated — as
 `STATUS_CACHE_OFF`. Tree observations are independent read-only scans, so a
 fleet `ls` may take them concurrently; output order and error selection are
 those of the sequential read.

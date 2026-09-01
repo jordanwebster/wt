@@ -112,13 +112,16 @@ pub(crate) fn tree_report(
 /// are read-only and can run concurrently.
 pub(crate) struct ReportEnv {
     shared: SharedResourceRecords,
-    labels: BTreeMap<Label, LabelGitFacts>,
+    labels: BTreeMap<Label, Result<LabelGitFacts, CoreError>>,
     sessions: SessionSnapshot,
 }
 
 struct LabelGitFacts {
-    default_ref: String,
-    default_ref_exists: bool,
+    /// The default ref and whether it exists, when the repository-wide part
+    /// of the default-branch chain (origin/HEAD → main/master/trunk)
+    /// resolved. `None` means every tree applies its own HEAD fallback —
+    /// that final step is per-worktree and must not be shared.
+    shared_default_ref: Option<(String, bool)>,
 }
 
 enum SessionSnapshot {
@@ -138,26 +141,34 @@ impl ReportEnv {
             if labels.contains_key(&tree.label) {
                 continue;
             }
-            let exists = matches!(
-                wt_sys::fsx::path_kind(Path::new(tree.path.as_str()))?,
-                wt_sys::fsx::PathKind::Directory
-            );
-            if !exists || !context.identity_ok(tree)? {
+            // Path and identity troubles are skipped rather than surfaced:
+            // the tree's own report performs the same observations at the
+            // position the sequential read reaches them, which keeps error
+            // selection identical to that read.
+            let healthy = matches!(
+                wt_sys::fsx::path_kind(Path::new(tree.path.as_str())),
+                Ok(wt_sys::fsx::PathKind::Directory)
+            ) && matches!(context.identity_ok(tree), Ok(true));
+            if !healthy {
                 continue;
             }
-            // The refs below are shared repository state, so any healthy
-            // tree of the label observes the same answer.
-            let git = context.git(Path::new(tree.path.as_str()))?;
-            let default = git.default_branch()?;
-            let default_ref = format!("refs/remotes/origin/{default}");
-            let default_ref_exists = git.ref_exists(&default_ref)?;
-            labels.insert(
-                tree.label.clone(),
-                LabelGitFacts {
-                    default_ref,
-                    default_ref_exists,
-                },
-            );
+            // These queries read refs shared by every tree of the label, and
+            // they run against the label's first healthy tree — exactly the
+            // report in which the sequential read would first issue them, so
+            // a stored error surfaces from the same place it always did.
+            let facts = (|| {
+                let git = context.git(Path::new(tree.path.as_str()))?;
+                let shared_default_ref = match git.default_branch_shared()? {
+                    Some(default) => {
+                        let default_ref = format!("refs/remotes/origin/{default}");
+                        let exists = git.ref_exists(&default_ref)?;
+                        Some((default_ref, exists))
+                    }
+                    None => None,
+                };
+                Ok(LabelGitFacts { shared_default_ref })
+            })();
+            labels.insert(tree.label.clone(), facts);
         }
         let sessions = if context.settings.session.backend
             == wt_core::settings::SessionBackend::None
@@ -194,13 +205,42 @@ impl ReportEnv {
         .to_owned()
     }
 
-    /// The default-branch ref for one label when it is known to exist.
-    pub(crate) fn default_ref(&self, label: &Label) -> Option<&str> {
-        self.labels
-            .get(label)
-            .filter(|facts| facts.default_ref_exists)
-            .map(|facts| facts.default_ref.as_str())
+    /// The tree's existing default-branch ref, or `None` when it does not
+    /// exist. Shared facts answer for the repository-wide part of the
+    /// chain; the final HEAD fallback is the asking tree's own `branch`.
+    pub(crate) fn tree_default_ref(
+        &self,
+        git: &wt_sys::git::Git,
+        tree: &TreeRec,
+        branch: Option<&str>,
+    ) -> Result<Option<String>, CoreError> {
+        match self.labels.get(&tree.label) {
+            Some(Err(error)) => Err(error.clone()),
+            Some(Ok(facts)) => match &facts.shared_default_ref {
+                Some((default_ref, exists)) => Ok(exists.then(|| default_ref.clone())),
+                None => head_fallback_default_ref(git, branch),
+            },
+            // The tree became healthy after collection: apply the whole
+            // chain here, as the sequential read would have.
+            None => match git.default_branch_shared()? {
+                Some(default) => {
+                    let default_ref = format!("refs/remotes/origin/{default}");
+                    Ok(git.ref_exists(&default_ref)?.then_some(default_ref))
+                }
+                None => head_fallback_default_ref(git, branch),
+            },
+        }
     }
+}
+
+/// The final step of the default-branch chain: the worktree's own HEAD
+/// branch, `main` when detached.
+fn head_fallback_default_ref(
+    git: &wt_sys::git::Git,
+    branch: Option<&str>,
+) -> Result<Option<String>, CoreError> {
+    let default_ref = format!("refs/remotes/origin/{}", branch.unwrap_or("main"));
+    Ok(git.ref_exists(&default_ref)?.then_some(default_ref))
 }
 
 /// Builds every report through a small worker pool: each report is an
@@ -285,12 +325,13 @@ fn tree_report_with_env(
         } else {
             None
         };
-        let default_ref = env.default_ref(&tree.label);
+        let default_ref = env.tree_default_ref(&git, tree, branch.as_deref())?;
         let behind_default = default_ref
+            .as_deref()
             .map(|default_ref| git.ahead_behind("HEAD", default_ref))
             .transpose()?
             .map(|counts| to_u32(counts.behind));
-        let drift = match default_ref.filter(|_| !fast) {
+        let drift = match default_ref.as_deref().filter(|_| !fast) {
             None => Vec::new(),
             Some(default_ref) => {
                 let inputs = state
