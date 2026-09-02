@@ -161,6 +161,35 @@ impl Harness {
         self.json(&["register", repo.to_str().unwrap()])
     }
 
+    /// Installs a `gh` that answers every `pr view` with `body` on stdout
+    /// and exits with `code`, recording where and how it was asked.
+    pub fn install_gh(&self, body: &str, code: i32) {
+        assert!(!body.contains('\''), "gh shim bodies are single-quoted");
+        write_executable(
+            &self.shims.join("gh"),
+            &format!(
+                r#"#!/bin/sh
+s="$WT_SHIM_STATE/gh"; mkdir -p "$s"
+pwd > "$s/cwd"; printf '%s\n' "$@" > "$s/argv"
+if [ {code} -ne 0 ]; then printf '%s\n' '{body}' >&2; exit {code}; fi
+printf '%s\n' '{body}'
+"#
+            ),
+        );
+    }
+
+    /// The argv of the last `gh` call, one argument per line, if any.
+    pub fn gh_calls(&self) -> Option<(String, String)> {
+        let state = self.shim_state.join("gh");
+        let cwd = std::fs::read_to_string(state.join("cwd")).ok()?;
+        let argv = std::fs::read_to_string(state.join("argv")).ok()?;
+        Some((cwd.trim().to_owned(), argv.trim().replace('\n', " ")))
+    }
+
+    pub fn forget_gh_calls(&self) {
+        let _ = wt_sys::fsx::remove_path(&self.shim_state.join("gh"));
+    }
+
     fn install_tmux(&self) {
         write_executable(
             &self.shims.join("tmux"),
@@ -255,6 +284,19 @@ pub fn git(path: &Path, args: &[&str]) {
         "git stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+pub fn git_stdout(path: &Path, args: &[&str]) -> String {
+    let mut request = CommandRequest::new("git");
+    request.cwd = Some(path.to_path_buf());
+    request.args = proc::os_args(args);
+    let output = proc::capture(&request, Duration::from_secs(10)).unwrap();
+    assert!(
+        output.success(),
+        "git stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 pub fn branches(repo: &Path) -> Vec<String> {

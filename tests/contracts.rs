@@ -1191,22 +1191,300 @@ fn forge_pr_urls_use_the_matching_origin_and_refspec() {
         common::git(&repo, &["remote", "set-url", "origin", url]);
         h.push_ref(&repo, "HEAD", reference);
         h.register(&repo);
+        // GitHub is asked for the head; a fork answer keeps the mirror path
+        // this contract exercises. The other forges are not asked at all.
+        h.install_gh(
+            r#"{"headRefName":"topic","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"}}"#,
+            0,
+        );
         let pr_url = match forge {
             "github" => "https://github.com/o/repo/pull/8",
             "gitlab" => "https://gitlab.com/o/repo/-/merge_requests/8",
             _ => "https://bitbucket.org/o/repo/pull-requests/8",
         };
-        assert_eq!(
-            h.json(&[
-                "new",
-                &format!("repo/{forge}"),
-                "--from",
-                pr_url,
-                "--no-sync",
-            ])["data"]["tree"]["branch"],
-            "pr/8"
-        );
+        let report = h.json(&[
+            "new",
+            &format!("repo/{forge}"),
+            "--from",
+            pr_url,
+            "--no-sync",
+        ]);
+        assert_eq!(report["data"]["tree"]["branch"], "pr/8");
+        let notice = &report["notices"][0];
+        assert_eq!(notice["code"], "PR_BRANCH_UNTRACKED", "{report}");
+        let message = notice["message"].as_str().unwrap();
+        if forge == "github" {
+            assert!(message.contains("alice's fork"), "{message}");
+            assert!(h.gh_calls().is_some());
+        } else {
+            assert!(message.contains("--from origin/<branch>"), "{message}");
+            assert!(h.gh_calls().is_none());
+        }
     }
+}
+
+#[test]
+fn github_pull_requests_check_out_their_own_branch_and_track_it() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    let origin = repo.parent().unwrap().join("repo-origin.git");
+    let url = "https://github.com/o/repo.git";
+    common::git(
+        &repo,
+        &[
+            "config",
+            &format!("url.{}.insteadOf", origin.display()),
+            url,
+        ],
+    );
+    common::git(&repo, &["remote", "set-url", "origin", url]);
+    common::write(&repo.join("README.md"), "feature\n");
+    common::git(&repo, &["add", "README.md"]);
+    common::git(&repo, &["commit", "-qm", "feature"]);
+    common::git(
+        &repo,
+        &["push", "-q", "origin", "HEAD:refs/heads/feature/x"],
+    );
+    h.push_pull_ref(&repo, 8, "HEAD");
+    common::git(&repo, &["reset", "-q", "--hard", "HEAD^"]);
+    h.register(&repo);
+
+    // gh names the branch, so the worktree is that branch and tracks it:
+    // a plain `git push` from inside updates the pull request.
+    h.install_gh(
+        r#"{"headRefName":"feature/x","isCrossRepository":false,"headRepositoryOwner":{"login":"o"}}"#,
+        0,
+    );
+    let report = h.json(&[
+        "new",
+        "repo/pr-8",
+        "--from",
+        "https://github.com/o/repo/pull/8",
+        "--no-sync",
+    ]);
+    assert_eq!(report["data"]["tree"]["branch"], "feature/x");
+    assert_eq!(
+        report["notices"][0]["code"], "PR_BRANCH_TRACKED",
+        "{report}"
+    );
+    let path = PathBuf::from(report["data"]["tree"]["path"].as_str().unwrap());
+    assert_eq!(
+        common::git_stdout(&path, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+        "origin/feature/x"
+    );
+    assert_eq!(
+        common::git_stdout(&path, &["rev-parse", "HEAD"]),
+        common::git_stdout(&repo, &["rev-parse", "refs/remotes/origin/feature/x"])
+    );
+    let (cwd, argv) = h.gh_calls().unwrap();
+    assert_eq!(
+        argv,
+        "pr view 8 --json headRefName,isCrossRepository,headRepositoryOwner"
+    );
+    assert_eq!(
+        std::fs::canonicalize(cwd).unwrap(),
+        std::fs::canonicalize(&repo).unwrap()
+    );
+    // The bare `pr:N` spelling asks the same question of origin's forge,
+    // and lands on the same branch: one pull request, one worktree.
+    h.wt()
+        .args(["new", "repo/pr-8-again", "--from", "pr:8", "--no-sync"])
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("feature/x"));
+
+    // A detached checkout of the same pull request tracks nothing and is
+    // told where a push has to go.
+    let detached = h.json(&[
+        "new",
+        "repo/pr-8-detached",
+        "--from",
+        "pr:8",
+        "--detach",
+        "--no-sync",
+    ]);
+    assert!(detached["data"]["tree"]["branch"].is_null(), "{detached}");
+    assert_eq!(detached["notices"][0]["code"], "PR_BRANCH_UNTRACKED");
+    let message = detached["notices"][0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("this detached worktree mirrors"),
+        "{message}"
+    );
+    assert!(
+        message.contains("git push origin HEAD:feature/x"),
+        "{message}"
+    );
+
+    // A local branch already named like the head is checked out as it is,
+    // and the creation says both that it is behind and that it tracks
+    // nothing, rather than promising a push it cannot deliver.
+    common::git(
+        &repo,
+        &[
+            "push",
+            "-q",
+            "origin",
+            "refs/remotes/origin/feature/x:refs/heads/feature/z",
+        ],
+    );
+    h.push_pull_ref(&repo, 6, "refs/remotes/origin/feature/x");
+    common::git(&repo, &["branch", "feature/z", "HEAD"]);
+    h.install_gh(
+        r#"{"headRefName":"feature/z","isCrossRepository":false,"headRepositoryOwner":{"login":"o"}}"#,
+        0,
+    );
+    let stale = h.json(&["new", "repo/pr-6", "--from", "pr:6", "--no-sync"]);
+    assert_eq!(stale["data"]["tree"]["branch"], "feature/z");
+    let notices = stale["notices"].as_array().unwrap();
+    let codes: BTreeSet<_> = notices
+        .iter()
+        .map(|notice| notice["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        codes,
+        BTreeSet::from(["FROM_LOCAL_SHADOWS_REMOTE", "PR_BRANCH_UNTRACKED"]),
+        "{stale}"
+    );
+    assert!(notices.iter().any(|notice| notice["message"]
+        .as_str()
+        .unwrap()
+        .contains("git push origin HEAD:feature/z")));
+
+    // `--branch` naming an unrelated branch that tracks its own origin
+    // twin is not the pull request's branch, however well it tracks.
+    common::git(&repo, &["branch", "other", "HEAD"]);
+    common::git(&repo, &["push", "-q", "-u", "origin", "other"]);
+    h.install_gh(
+        r#"{"headRefName":"feature/x","isCrossRepository":false,"headRepositoryOwner":{"login":"o"}}"#,
+        0,
+    );
+    let other = h.json(&[
+        "new",
+        "repo/pr-8-other",
+        "--from",
+        "pr:8",
+        "--branch",
+        "other",
+        "--no-sync",
+    ]);
+    assert_eq!(other["data"]["tree"]["branch"], "other");
+    let notices = other["notices"].as_array().unwrap();
+    assert!(
+        notices
+            .iter()
+            .all(|notice| notice["code"] != "PR_BRANCH_TRACKED"),
+        "{other}"
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice["code"] == "PR_BRANCH_UNTRACKED"
+                && notice["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("branch other tracks origin/other, which is not")
+                && notice["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("git push origin HEAD:feature/x")),
+        "{other}"
+    );
+
+    // A re-run for an address that records the pull request never asks
+    // gh, so a broken gh cannot fail it.
+    h.install_gh("gh: command failed", 1);
+    h.forget_gh_calls();
+    let rerun = h.json(&[
+        "new",
+        "repo/pr-8",
+        "--from",
+        "https://github.com/o/repo/pull/8",
+        "--no-sync",
+    ]);
+    assert_eq!(rerun["data"]["tree"]["branch"], "feature/x");
+    assert!(h.gh_calls().is_none());
+
+    // An offline re-run keeps the recorded branch without asking gh.
+    h.forget_gh_calls();
+    let again = h.json(&[
+        "new",
+        "repo/pr-8",
+        "--from",
+        "https://github.com/o/repo/pull/8",
+        "--no-fetch",
+        "--no-sync",
+    ]);
+    assert_eq!(again["data"]["tree"]["branch"], "feature/x");
+    assert!(h.gh_calls().is_none());
+
+    // A fork's branch is not on origin, so the PR ref is mirrored and the
+    // creation says where a push would have to go instead.
+    h.push_pull_ref(&repo, 7, "HEAD");
+    h.install_gh(
+        r#"{"headRefName":"feature/y","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"}}"#,
+        0,
+    );
+    let fork = h.json(&["new", "repo/pr-7", "--from", "pr:7", "--no-sync"]);
+    assert_eq!(fork["data"]["tree"]["branch"], "pr/7");
+    assert_eq!(fork["notices"][0]["code"], "PR_BRANCH_UNTRACKED", "{fork}");
+    let message = fork["notices"][0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("branch pr/7 mirrors pull request 7"),
+        "{message}"
+    );
+    assert!(
+        message.contains("push to that fork's `feature/y` branch"),
+        "{message}"
+    );
+
+    // --no-fetch on a new address mirrors the already-fetched PR ref
+    // without asking gh, and names the flag that would track it.
+    h.forget_gh_calls();
+    let offline = h.json(&[
+        "new",
+        "repo/pr-7-offline",
+        "--from",
+        "pr:7",
+        "--branch",
+        "offline-7",
+        "--no-fetch",
+        "--no-sync",
+    ]);
+    assert_eq!(offline["data"]["tree"]["branch"], "offline-7");
+    assert_eq!(offline["notices"][0]["code"], "PR_BRANCH_UNTRACKED");
+    let message = offline["notices"][0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("branch offline-7 mirrors pull request 7"),
+        "{message}"
+    );
+    assert!(message.contains("retry without --no-fetch"), "{message}");
+    assert!(h.gh_calls().is_none());
+
+    // gh refusing is the creation refusing, with gh's reason and a way in.
+    h.install_gh(
+        "To get started with GitHub CLI, please run:  gh auth login",
+        4,
+    );
+    h.wt()
+        .args(["new", "repo/pr-9", "--from", "pr:9", "--no-sync"])
+        .assert()
+        .code(7)
+        .stderr(predicate::str::contains(
+            "gh could not look up pull request 9",
+        ))
+        .stderr(predicate::str::contains("run `gh auth login`"));
+    h.install_gh("GraphQL: Could not resolve to a PullRequest", 1);
+    h.wt()
+        .args(["new", "repo/pr-9", "--from", "pr:9", "--no-sync"])
+        .assert()
+        .code(7)
+        .stderr(predicate::str::contains("Could not resolve"))
+        .stderr(predicate::str::contains("gh auth status"));
+    assert!(h.json(&["ls"])["data"]["trees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|tree| tree["name"] != "pr-9"));
 }
 
 #[test]

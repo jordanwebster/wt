@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use wt_core::from_ref::{pr_origin_branch, PullRequestHead};
 use wt_core::lifecycle::{Materialized, MaterializedKind, StatePhase, SyncState, VerifyState};
 use wt_core::model::{AbsPath, SourceKind, Target, TreeRec, TreeSource};
 use wt_core::report::{NewData, NewVerifyReport};
@@ -123,14 +124,28 @@ fn create_tree(
     // re-derived: a resume keeps its recorded metadata too, so a convention
     // whose inputs changed since — a `wt meta` edit, an edited template —
     // must not turn a bare re-run into a different source. Only `--branch`
-    // and a pull request state a branch for an address that already exists.
+    // and a different pull request state a branch for an address that
+    // already exists; the same pull request keeps its recorded branch, so
+    // an offline re-run does not have to ask the forge again.
+    let requested_pr = parse_pr(&args.from_ref);
+    let same_pr = existing
+        .as_ref()
+        .is_some_and(|existing| requested_pr.is_some() && existing.source.pr == requested_pr);
+    // The forge is asked only when its answer decides something: an
+    // address that already records this pull request keeps its branch,
+    // and a re-run must not fail on a missing or logged-out `gh`.
+    let head = if same_pr {
+        Head::Deferred
+    } else {
+        Head::Known(pull_request_head(context, &canonical, &args)?)
+    };
     let requested_branch = match &existing {
-        Some(existing) if args.branch.is_none() && parse_pr(&args.from_ref).is_none() => existing
+        Some(existing) if args.branch.is_none() && (requested_pr.is_none() || same_pr) => existing
             .source
             .branch
             .clone()
             .unwrap_or_else(|| target.name.clone()),
-        _ => creation_branch(context, &canonical, &target, &args, &meta)?,
+        _ => creation_branch(context, &canonical, &target, &args, &meta, head.known())?,
     };
     let requested_start = args.from_ref.clone();
     if let Some(existing) = existing {
@@ -161,10 +176,10 @@ fn create_tree(
                 return verify_ready(context, existing, args, resumed)
             }
             wt_core::new::Decision::FreshIncarnation { .. } => {
-                return fresh_incarnation(context, existing, canonical, args, meta)
+                return fresh_incarnation(context, existing, canonical, args, meta, head)
             }
             wt_core::new::Decision::Resume { start } => {
-                return resume(context, existing, canonical, args, start)
+                return resume(context, existing, canonical, args, start, head)
             }
             wt_core::new::Decision::Refuse { code, remedy } => {
                 return Err(CoreError::new(
@@ -206,9 +221,11 @@ fn create_tree(
         args,
         meta,
         requested_branch,
+        head,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create(
     context: &mut Context,
     target: Target,
@@ -217,6 +234,7 @@ fn create(
     args: New,
     meta: BTreeMap<String, String>,
     branch: String,
+    head: Head,
 ) -> Result<Output, CoreError> {
     let holder = context.holder(target.to_string(), "new")?;
     let token = lock::tree(
@@ -265,7 +283,7 @@ fn create(
         registry.trees.push(tree.clone());
         Ok(())
     })?;
-    let notice = add_worktree(context, &canonical, &tree, &args)?;
+    let notice = add_worktree(context, &canonical, &tree, &args, head)?;
     let finished = finish_under_lock(
         context,
         &tree,
@@ -283,7 +301,7 @@ fn create(
         false,
         finished.sync,
         finished.verify,
-        source_notices(&target, notice, finished.notices),
+        source_notices(notice, finished.notices),
     )
 }
 
@@ -293,6 +311,7 @@ fn resume(
     canonical: TreeRec,
     args: New,
     start: wt_core::new::StartAt,
+    head: Head,
 ) -> Result<Output, CoreError> {
     let target = super::context::target_of(&tree);
     let holder = context.holder(target.to_string(), "new")?;
@@ -318,7 +337,7 @@ fn resume(
         wt_sys::fsx::path_kind(Path::new(tree.path.as_str()))?,
         wt_sys::fsx::PathKind::Missing
     ) {
-        let notice = add_worktree(context, &canonical, &tree, &args)?;
+        let notice = add_worktree(context, &canonical, &tree, &args, head)?;
         let finished =
             finish_under_lock(context, &tree, &canonical, &initial, &args, &holder, start)?;
         drop(token);
@@ -329,7 +348,7 @@ fn resume(
             true,
             finished.sync,
             finished.verify,
-            source_notices(&target, notice, finished.notices),
+            source_notices(notice, finished.notices),
         );
     }
     let finished = finish_under_lock(context, &tree, &canonical, &initial, &args, &holder, start)?;
@@ -350,9 +369,11 @@ fn add_worktree(
     canonical: &TreeRec,
     tree: &TreeRec,
     args: &New,
-) -> Result<Option<&'static str>, CoreError> {
+    head: Head,
+) -> Result<Vec<Notice>, CoreError> {
     let git = context.git(Path::new(canonical.path.as_str()))?;
-    let holder = context.holder(super::context::target_of(tree).to_string(), "new")?;
+    let target = super::context::target_of(tree);
+    let holder = context.holder(target.to_string(), "new")?;
     let _git_lock = lock::git(
         &context.git_lock_path(&context.registry.labels[&tree.label].gitdir_id),
         &holder,
@@ -362,6 +383,38 @@ fn add_worktree(
         ),
     )?;
     let origin = git.origin_url()?;
+    let pr = requested_pull_request(context, canonical, args)?;
+    // The branch this incarnation was created with, recorded when it was
+    // allocated and unchanged by a later configuration edit. Only a detached
+    // tree records none, and its name feeds the porcelain check alone.
+    let branch = match tree.source.branch.clone() {
+        Some(branch) => branch,
+        None => creation_branch(context, canonical, &target, args, &tree.meta, head.known())?,
+    };
+    if let Some(path) = git.branch_holder(&branch)? {
+        return Err(CoreError::new(
+            ExitClass::Conflict,
+            "BRANCH_IN_USE",
+            format!("branch `{branch}` is checked out at {}", path.display()),
+            "choose another branch or remove the worktree that holds it",
+        ));
+    }
+    let branch_exists = git.ref_exists(&format!("refs/heads/{branch}"))?;
+    // A branch that already exists locally is checked out as it is, so it
+    // needs no start; a pull request whose recorded branch survived needs
+    // no forge question either.
+    let reuse_local = branch_exists && !args.detach;
+    let (head, asked) = match head {
+        Head::Known(head) => (head, true),
+        Head::Deferred if reuse_local => (None, false),
+        Head::Deferred => (pull_request_head(context, canonical, args)?, true),
+    };
+    // A pull request whose head is a branch of origin is checked out as
+    // that branch, tracking it, so a push updates the pull request. The
+    // forge answers for the branch name; git's own PR refs carry only the
+    // commits. Anything else — a fork, another forge, `--no-fetch` — falls
+    // back to mirroring the PR ref as `pr/N`, and says so.
+    let tracked_branch = pr_origin_branch(head.as_ref()).map(str::to_owned);
     // The default branch resolves through origin/HEAD and local refs, none
     // of which a fetch changes, so one discovery serves start resolution,
     // the fetch refspec, and the registry cache refresh below. The cache
@@ -387,8 +440,10 @@ fn add_worktree(
         // revision, a renamed default); the wildcard fetch then restores
         // the resolve-anything behaviour at the old cost.
         let mut wanted = std::collections::BTreeSet::from([default.clone()]);
-        if let Some(input) = args.from_ref.as_deref() {
-            if parse_pr(&args.from_ref).is_none() {
+        if let Some(branch) = &tracked_branch {
+            wanted.insert(branch.clone());
+        } else if let Some(input) = args.from_ref.as_deref() {
+            if pr.is_none() {
                 wanted.insert(input.strip_prefix("origin/").unwrap_or(input).to_owned());
             }
         }
@@ -404,56 +459,54 @@ fn add_worktree(
             }
         }
     }
-    let resolution = if let Some(input) = args.from_ref.as_deref() {
-        let empty = wt_core::from_ref::RefCandidates {
-            local: None,
-            local_oid: None,
-            origin: None,
-            origin_oid: None,
-            revision: None,
-        };
-        match wt_core::from_ref::decide(input, &empty) {
-            Ok(wt_core::from_ref::Resolution::PullRequest { number }) => {
-                let host = origin
-                    .as_deref()
-                    .and_then(wt_core::from_ref::normalize_url)
-                    .map(|value| value.0)
-                    .unwrap_or_else(|| "unknown".to_owned());
-                if !args.no_fetch {
-                    git.fetch_pull_request(&host, number)?;
-                }
-                ensure_pr_ref(&git, number)?;
-                wt_core::from_ref::Resolution::PullRequest { number }
+    let mut notices = Vec::new();
+    let start = if let Some(pr) = &pr {
+        if reuse_local {
+            format!("refs/heads/{branch}")
+        } else if let Some(head_branch) = &tracked_branch {
+            let reference = format!("refs/remotes/origin/{head_branch}");
+            if !git.ref_exists(&reference)? {
+                return Err(CoreError::new(
+                    ExitClass::NotFound,
+                    "NOT_FOUND",
+                    format!(
+                        "pull request {} is branch `{head_branch}`, which origin does not have",
+                        pr.number
+                    ),
+                    "verify the pull request is still open and its branch was not deleted",
+                ));
             }
-            Ok(wt_core::from_ref::Resolution::PullRequestUrl {
-                host,
-                owner,
-                repo,
-                number,
-            }) => {
-                ensure_pr_url_matches(context, tree, &host, &owner, &repo)?;
-                if !args.no_fetch {
-                    git.fetch_pull_request(&host, number)?;
-                }
-                ensure_pr_ref(&git, number)?;
-                wt_core::from_ref::Resolution::PullRequestUrl {
-                    host,
-                    owner,
-                    repo,
-                    number,
-                }
+            reference
+        } else {
+            if !args.no_fetch {
+                git.fetch_pull_request(&pr.host, pr.number)?;
             }
-            _ => resolve_from(&git, input)?,
+            ensure_pr_ref(&git, pr.number)?;
+            format!("refs/wt/pr/{}", pr.number)
+        }
+    } else if let Some(input) = args.from_ref.as_deref() {
+        match resolve_from(&git, input)? {
+            wt_core::from_ref::Resolution::Local { reference, notice } => {
+                notices.extend(notice.map(|code| Notice {
+                    level: NoticeLevel::Warn,
+                    code: code.to_owned(),
+                    subject: Some(target.to_string()),
+                    message:
+                        "local branch takes precedence over a different origin branch".to_owned(),
+                }));
+                reference
+            }
+            wt_core::from_ref::Resolution::Remote { reference }
+            | wt_core::from_ref::Resolution::Revision { reference } => reference,
+            wt_core::from_ref::Resolution::PullRequest { .. }
+            | wt_core::from_ref::Resolution::PullRequestUrl { .. } => {
+                unreachable!("pull requests resolve before plain references")
+            }
         }
     } else if git.ref_exists(&format!("refs/remotes/origin/{default}"))? {
-        wt_core::from_ref::Resolution::Remote {
-            reference: format!("refs/remotes/origin/{default}"),
-        }
+        format!("refs/remotes/origin/{default}")
     } else {
-        wt_core::from_ref::Resolution::Local {
-            reference: format!("refs/heads/{default}"),
-            notice: None,
-        }
+        format!("refs/heads/{default}")
     };
     let default = match discovered {
         Some(value) => value,
@@ -473,37 +526,6 @@ fn add_worktree(
             Ok(())
         })?;
     }
-    let (start, notice) = match resolution {
-        wt_core::from_ref::Resolution::Local { reference, notice } => (reference, notice),
-        wt_core::from_ref::Resolution::Remote { reference }
-        | wt_core::from_ref::Resolution::Revision { reference } => (reference, None),
-        wt_core::from_ref::Resolution::PullRequest { number }
-        | wt_core::from_ref::Resolution::PullRequestUrl { number, .. } => {
-            (format!("refs/wt/pr/{number}"), None)
-        }
-    };
-    // The branch this incarnation was created with, recorded when it was
-    // allocated and unchanged by a later configuration edit. Only a detached
-    // tree records none, and its name feeds the porcelain check alone.
-    let branch = match tree.source.branch.clone() {
-        Some(branch) => branch,
-        None => creation_branch(
-            context,
-            canonical,
-            &super::context::target_of(tree),
-            args,
-            &tree.meta,
-        )?,
-    };
-    if let Some(path) = git.branch_holder(&branch)? {
-        return Err(CoreError::new(
-            ExitClass::Conflict,
-            "BRANCH_IN_USE",
-            format!("branch `{branch}` is checked out at {}", path.display()),
-            "choose another branch or remove the worktree that holds it",
-        ));
-    }
-    let branch_exists = git.ref_exists(&format!("refs/heads/{branch}"))?;
     let spec = wt_core::from_ref::add_spec(
         &branch,
         &start,
@@ -517,7 +539,57 @@ fn add_worktree(
     // a tree is never lost to a failed optimisation, and doctor reports
     // trees whose caches are off.
     let _ = git.accelerate_status(Path::new(tree.path.as_str()));
-    Ok(notice)
+    if let Some(pr) = &pr {
+        // The affirmative notice needs both halves: the forge named this
+        // very branch as the pull request's, and git confirms the worktree
+        // tracks it. A branch that already existed locally, `--branch`
+        // naming an unrelated branch that tracks its own origin twin, or
+        // `--detach` may satisfy neither or only one, and the notice must
+        // not promise a push it cannot deliver. A recorded branch re-added
+        // without asking the forge is neither praised nor warned about
+        // while it tracks its origin twin.
+        let upstream = if args.detach {
+            None
+        } else {
+            git.upstream(&branch)?
+        };
+        let self_tracking = upstream.as_deref() == Some(&format!("origin/{branch}"));
+        if self_tracking && tracked_branch.as_deref() == Some(branch.as_str()) {
+            notices.push(Notice {
+                level: NoticeLevel::Info,
+                code: "PR_BRANCH_TRACKED".to_owned(),
+                subject: Some(target.to_string()),
+                message: format!(
+                    "branch `{branch}` tracks origin/{branch}, so `git push` updates pull request {}",
+                    pr.number
+                ),
+            });
+        } else if asked || !self_tracking {
+            notices.push(untracked_pr_notice(
+                &target,
+                &branch,
+                upstream.as_deref(),
+                pr,
+                head.as_ref(),
+                args,
+            ));
+        }
+        if reuse_local && tracked_branch.as_deref() == Some(branch.as_str()) {
+            let local = git.resolve_commit(&format!("refs/heads/{branch}"))?;
+            let remote = git.resolve_commit(&format!("refs/remotes/origin/{branch}"))?;
+            if remote.is_some() && local != remote {
+                notices.push(Notice {
+                    level: NoticeLevel::Warn,
+                    code: "FROM_LOCAL_SHADOWS_REMOTE".to_owned(),
+                    subject: Some(target.to_string()),
+                    message: format!(
+                        "local branch `{branch}` is not at origin/{branch}, and the worktree starts from the local branch"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(notices)
 }
 
 fn resolve_from(
@@ -599,25 +671,29 @@ fn ensure_pr_url_matches(
 }
 
 /// The branch a creation targets when it is not resumed from a record:
-/// `--branch`, then the pull request's own name, then the label's declared
-/// convention, then the tree's name (A77).
+/// `--branch`, then the pull request's own branch (or its `pr/N` mirror),
+/// then the label's declared convention, then the tree's name (A77).
 fn creation_branch(
     context: &Context,
     canonical: &TreeRec,
     target: &Target,
     args: &New,
     meta: &BTreeMap<String, String>,
+    head: Option<&PullRequestHead>,
 ) -> Result<String, CoreError> {
     if let Some(branch) = args.branch.clone() {
         return Ok(branch);
     }
-    if let Some(number) = parse_pr(&args.from_ref) {
-        return Ok(format!("pr/{number}"));
-    }
     if args.detach {
-        // No branch is created, so the convention has nothing to name here;
-        // the value only feeds step G's branch-held-elsewhere check.
+        // No branch is created, so neither the pull request's branch nor
+        // the convention has anything to name here; the value only feeds
+        // step G's branch-held-elsewhere check, and a detached checkout
+        // of a pull request must not be refused because another worktree
+        // holds the pull request's branch.
         return Ok(target.name.clone());
+    }
+    if let Some(number) = parse_pr(&args.from_ref) {
+        return Ok(pr_origin_branch(head).map_or_else(|| format!("pr/{number}"), str::to_owned));
     }
     let declared =
         register::declared_branch(context, Path::new(canonical.path.as_str()), &target.label)?;
@@ -632,14 +708,7 @@ fn creation_branch(
 
 fn parse_pr(input: &Option<String>) -> Option<u64> {
     let input = input.as_deref()?;
-    let empty = wt_core::from_ref::RefCandidates {
-        local: None,
-        local_oid: None,
-        origin: None,
-        origin_oid: None,
-        revision: None,
-    };
-    match wt_core::from_ref::decide(input, &empty).ok()? {
+    match wt_core::from_ref::decide(input, &empty_candidates()).ok()? {
         wt_core::from_ref::Resolution::PullRequest { number }
         | wt_core::from_ref::Resolution::PullRequestUrl { number, .. } => Some(number),
         _ => None,
@@ -905,6 +974,7 @@ fn fresh_incarnation(
     canonical: TreeRec,
     args: New,
     meta: BTreeMap<String, String>,
+    head: Head,
 ) -> Result<Output, CoreError> {
     let target = target_of(&tree);
     let holder = context.holder(target.to_string(), "new")?;
@@ -930,7 +1000,7 @@ fn fresh_incarnation(
         *record = tree.clone();
         Ok(())
     })?;
-    let source_notice = add_worktree(context, &canonical, &tree, &args)?;
+    let source_notice = add_worktree(context, &canonical, &tree, &args, head)?;
     let initial =
         register::initial_config(context, Path::new(canonical.path.as_str()), &tree.label)?;
     let finished = finish_under_lock(
@@ -950,24 +1020,161 @@ fn fresh_incarnation(
         false,
         finished.sync,
         finished.verify,
-        source_notices(&target, source_notice, finished.notices),
+        source_notices(source_notice, finished.notices),
     )
 }
 
-fn source_notices(
-    target: &Target,
-    source: Option<&'static str>,
-    mut notices: Vec<Notice>,
-) -> Vec<Notice> {
-    if let Some(code) = source {
-        notices.push(Notice {
-            level: NoticeLevel::Warn,
-            code: code.to_owned(),
-            subject: Some(target.to_string()),
-            message: "local branch takes precedence over a different origin branch".to_owned(),
-        });
-    }
+fn source_notices(source: Vec<Notice>, mut notices: Vec<Notice>) -> Vec<Notice> {
+    notices.extend(source);
     notices
+}
+
+/// Whether the forge has been asked about the requested pull request.
+enum Head {
+    /// Not asked: the address already records this pull request, and the
+    /// worktree add asks only if it needs a start the record cannot give.
+    Deferred,
+    /// Asked, or not applicable; `None` when the creation is not a
+    /// GitHub pull request or runs under `--no-fetch`.
+    Known(Option<PullRequestHead>),
+}
+
+impl Head {
+    fn known(&self) -> Option<&PullRequestHead> {
+        match self {
+            Self::Deferred => None,
+            Self::Known(head) => head.as_ref(),
+        }
+    }
+}
+
+/// A requested pull request and the forge host it lives on.
+struct PullRequest {
+    number: u64,
+    host: String,
+}
+
+/// The pull request `--from` names, if any. A pull request URL is matched
+/// against the registered origins first, so the question goes to the
+/// repository the URL names rather than to whichever checkout the address
+/// happens to live in.
+fn requested_pull_request(
+    context: &Context,
+    canonical: &TreeRec,
+    args: &New,
+) -> Result<Option<PullRequest>, CoreError> {
+    let Some(number) = parse_pr(&args.from_ref) else {
+        return Ok(None);
+    };
+    let host = match wt_core::from_ref::decide(
+        args.from_ref.as_deref().unwrap_or_default(),
+        &empty_candidates(),
+    ) {
+        Ok(wt_core::from_ref::Resolution::PullRequestUrl {
+            host, owner, repo, ..
+        }) => {
+            ensure_pr_url_matches(context, canonical, &host, &owner, &repo)?;
+            host
+        }
+        _ => context
+            .git(Path::new(canonical.path.as_str()))?
+            .origin_url()?
+            .as_deref()
+            .and_then(wt_core::from_ref::normalize_url)
+            .map(|value| value.0)
+            .unwrap_or_else(|| "unknown".to_owned()),
+    };
+    Ok(Some(PullRequest { number, host }))
+}
+
+/// Asks the forge which branch a requested pull request was opened from.
+/// Only GitHub is asked today; `--no-fetch` keeps the creation offline.
+/// A pull request URL is first matched against the registered origins, so
+/// the question goes to the repository the URL names rather than to
+/// whichever checkout the address happens to live in.
+fn pull_request_head(
+    context: &Context,
+    canonical: &TreeRec,
+    args: &New,
+) -> Result<Option<PullRequestHead>, CoreError> {
+    let Some(pr) = requested_pull_request(context, canonical, args)? else {
+        return Ok(None);
+    };
+    if args.no_fetch || wt_core::from_ref::forge_of(&pr.host) != wt_core::from_ref::Forge::GitHub {
+        return Ok(None);
+    }
+    let timeout = wt_sys::git::Deadlines::from_settings(&context.settings.git.timeouts)?.fetch;
+    wt_sys::forge::github_pull_request_head(Path::new(canonical.path.as_str()), pr.number, timeout)
+        .map(Some)
+}
+
+/// Why a pull request creation mirrors `pr/N` instead of tracking the
+/// pull request's own branch, and what would get the tracked branch.
+fn untracked_pr_notice(
+    target: &Target,
+    branch: &str,
+    upstream: Option<&str>,
+    pr: &PullRequest,
+    head: Option<&PullRequestHead>,
+    args: &New,
+) -> Notice {
+    let number = pr.number;
+    let mirror = if args.detach {
+        "this detached worktree".to_owned()
+    } else {
+        format!("branch {branch}")
+    };
+    let consequence = match upstream {
+        Some(upstream) => format!(
+            "{mirror} tracks {upstream}, which is not pull request {number}'s branch, so a plain `git push` updates {upstream} instead of the pull request"
+        ),
+        None => format!(
+            "{mirror} mirrors pull request {number} but tracks nothing, so a plain `git push` creates a new branch on origin instead of updating the pull request"
+        ),
+    };
+    let action = match head {
+        Some(head) if head.cross_repository => match &head.owner {
+            Some(owner) => format!(
+                "the pull request was opened from {owner}'s fork; to update it, push to that fork's `{}` branch",
+                head.branch
+            ),
+            None => format!(
+                "the pull request was opened from a fork; to update it, push to the fork's `{}` branch",
+                head.branch
+            ),
+        },
+        Some(head) => format!(
+            "the pull request is branch `{}`; to update it, push there: `git push origin HEAD:{}`",
+            head.branch, head.branch
+        ),
+        None if args.no_fetch => {
+            "retry without --no-fetch to check out the pull request's own branch".to_owned()
+        }
+        None if wt_core::from_ref::forge_of(&pr.host) == wt_core::from_ref::Forge::GitHub => {
+            "set the branch's upstream to the pull request's branch on origin to push to it"
+                .to_owned()
+        }
+        None => format!(
+            "wt asks only GitHub for a pull request's branch, not {}; pass `--from origin/<branch>` to work on the pull request's own branch",
+            pr.host
+        ),
+    };
+    Notice {
+        level: NoticeLevel::Warn,
+        code: "PR_BRANCH_UNTRACKED".to_owned(),
+        subject: Some(target.to_string()),
+        message: format!("{consequence}; {action}"),
+    }
+}
+
+fn empty_candidates() -> wt_core::from_ref::RefCandidates {
+    wt_core::from_ref::RefCandidates {
+        local: None,
+        local_oid: None,
+        origin: None,
+        origin_oid: None,
+        revision: None,
+    }
 }
 
 fn ready_report(

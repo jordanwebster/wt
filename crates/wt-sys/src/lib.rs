@@ -4,6 +4,7 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 pub mod failpoint;
+pub mod forge;
 pub mod fsx;
 pub mod git;
 pub mod lock;

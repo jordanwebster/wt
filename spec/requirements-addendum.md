@@ -1335,3 +1335,54 @@ space or `..` is refused — naming the candidate, what it rendered to, and
 recorded `source.branch` remains what a re-run compares against, so editing a
 `branch` template makes a re-run of an existing address a different source,
 exactly as editing `--branch` does.
+
+## A78. A pull request creation lands on the pull request's branch
+
+`--from pr:N` exists so that someone can work on a pull request: review it,
+fix it, push the fix. The mirror `pr/N` served the first of those and
+sabotaged the last. `refs/pull/N/head` is a read-only ref that carries the
+pull request's commits and nothing else — not the name of the branch they
+came from — so the local branch wt made from it tracked nothing, and git's
+default for a branch that tracks nothing is to push it under its own name.
+An agent asked to fix a pull request from such a worktree pushed `pr/N` to
+origin: a new branch, a stray one, and the pull request untouched.
+
+The forge knows the branch. For a GitHub origin, wt asks `gh` for the pull
+request's head before it decides anything, and a head that is a branch of
+origin makes the creation the same as `--from origin/<head>`: the worktree is
+that branch, tracking it, and a plain `git push` updates the pull request.
+Asking first is the point — a creation that cannot learn the branch refuses
+rather than quietly producing the mirror, because the mirror is exactly the
+worktree that misled the agent. The refusal carries gh's own reason and a
+way in: `gh auth login` when gh says it is not logged in, `gh auth status`
+otherwise, and `--from origin/<branch>` for someone who knows the branch and
+does not want gh involved.
+
+A forge CLI is an acceptable dependency here. Checking out a pull request
+already presumes a forge, and the forge's client is how that forge is
+addressed; only GitHub is asked today, and other forges keep the mirror
+until they get the same treatment. The mirror also remains for the cases
+that genuinely cannot track: a pull request from a fork, whose branch is not
+on origin, and `--no-fetch`, which keeps the creation offline. Neither is
+silent any more. The creation warns that `pr/N` tracks nothing and where a
+push would go, and names the fork owner and branch, or the flag to drop, so
+the worktree's limit is on the page when it is made rather than discovered
+at push time.
+
+An address that already records the same pull request keeps its recorded
+branch and asks nothing unless its worktree has to be re-added from a start
+the record cannot supply: the branch was decided when the tree was made, and
+a re-run must stay idempotent — and must not fail on a missing or logged-out
+`gh` — as A77 settled for every other source. Two addresses for one pull
+request are `BRANCH_IN_USE`, as two addresses for one branch always were.
+
+What the creation says the worktree tracks needs two witnesses: the forge
+must have named this very branch as the pull request's, and git, read back
+once the worktree exists, must confirm the upstream. A branch that already
+existed locally under the head's name is checked out as it is and may track
+nothing or sit behind origin; `--branch` may name a branch that tracks its
+own origin twin and has nothing to do with the pull request; `--detach`
+tracks nothing by construction. Each gets the warning with the push that
+would reach the pull request, and the affirmative notice appears only when
+both witnesses agree — a push that lands somewhere else, however well it
+tracks, is the failure this addendum exists to end.

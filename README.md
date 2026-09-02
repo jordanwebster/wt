@@ -233,6 +233,14 @@ wt ls
 wt status orbit/fix-scrolling
 ```
 
+`--from pr:42`, or the pull request's URL, checks out the branch the pull
+request was opened from and tracks it, so a plain `git push` from inside the
+worktree updates the pull request. On GitHub, wt asks the `gh` CLI for that
+branch, so `gh` must be installed and logged in; `wt new` refuses, and says
+what to do, when it is not. A pull request from a fork, or on a forge wt does
+not ask yet, is mirrored as a `pr/42` branch that tracks nothing, and the
+creation warns you where a push would go instead.
+
 Metadata is a small string map on the tree record. `wt status` shows it,
 `wt meta orbit/ticket-42` prints it, and `wt meta orbit/ticket-42 owner=alice
 ticket=` sets `owner` and removes `ticket`. Keys match `[a-z_][a-z0-9_]*` and
@@ -262,7 +270,7 @@ in `.wt.toml` for the whole team, or under `[repos.<label>]` in your own
 `config.toml` for yourself. A branch is chosen before the worktree exists, so a
 branch template reads only `{{meta.<key>}}`, `{{name()}}`, `{{name_snake()}}`,
 `{{name_short()}}` and `{{label()}}` — and `{{meta.<key>}}` is legal nowhere
-else. `--branch` still wins outright, and `--from pr:42` still gets `pr/42`.
+else. `--branch` still wins outright, and `--from pr:42` gets the pull request's own branch.
 
 Worktrees live under `$WT_HOME/trees/<label>/<name>` by default. `wt path`
 prints the exact root.
