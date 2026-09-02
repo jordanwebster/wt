@@ -653,6 +653,30 @@ pub(crate) fn new_state(
     })
 }
 
+/// Reads just the `branch` declaration (§5.1 layers 1 and 2). A creation
+/// consults it before the worktree exists, so no adapter can contribute one
+/// and there is no tree overlay to read; the single file read also keeps a
+/// creation's idempotency check off the adapter-detection path.
+pub(crate) fn declared_branch(
+    context: &Context,
+    path: &Path,
+    label: &Label,
+) -> Result<Option<config::BranchTemplates>, CoreError> {
+    let user = context
+        .settings
+        .repos
+        .get(label)
+        .and_then(|repo| repo.branch.clone());
+    if user.is_some() {
+        return Ok(user);
+    }
+    let repo_path = path.join(".wt.toml");
+    Ok(wt_sys::fsx::read_string(&repo_path)?
+        .map(|source| config::parse(&source, &repo_path.to_string_lossy()))
+        .transpose()?
+        .and_then(|repo| repo.branch))
+}
+
 pub(crate) fn initial_config(
     context: &Context,
     path: &Path,

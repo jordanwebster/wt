@@ -692,6 +692,107 @@ fn ports_is_a_reserved_var_key() {
 }
 
 #[test]
+fn section_11_2_branch_convention_names_the_branch_a_creation_does_not() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo(
+        "repo",
+        "branch = [\"{{meta.ticket}}_{{name()}}\", \"wip/{{name()}}\"]\n",
+    );
+    h.register(&repo);
+
+    let ticketed = h.json(&[
+        "new",
+        "repo/fix-scroll",
+        "--no-sync",
+        "--no-open",
+        "--meta",
+        "ticket=ABC-42",
+    ]);
+    assert_eq!(ticketed["data"]["tree"]["branch"], "ABC-42_fix-scroll");
+    assert_eq!(ticketed["data"]["tree"]["name"], "fix-scroll");
+
+    // No ticket: the next candidate decides, and nothing refuses.
+    let adhoc = h.json(&["new", "repo/poke", "--no-sync", "--no-open"]);
+    assert_eq!(adhoc["data"]["tree"]["branch"], "wip/poke");
+
+    // Naming the branch outright still wins, and re-running an address is
+    // idempotent against the recorded branch rather than the convention.
+    let named = h.json(&[
+        "new",
+        "repo/audit",
+        "--no-sync",
+        "--no-open",
+        "--branch",
+        "audit-only",
+        "--meta",
+        "ticket=ABC-43",
+    ]);
+    assert_eq!(named["data"]["tree"]["branch"], "audit-only");
+    let again = h.json(&[
+        "new",
+        "repo/fix-scroll",
+        "--no-sync",
+        "--no-open",
+        "--meta",
+        "ticket=ABC-42",
+    ]);
+    assert_eq!(again["data"]["created"], false);
+    // The branch was decided once, so a re-run that restates nothing is the
+    // same source — even after the metadata it was derived from changes.
+    let bare = h.json(&["new", "repo/fix-scroll", "--no-sync", "--no-open"]);
+    assert_eq!(bare["data"]["created"], false);
+    assert_eq!(bare["data"]["tree"]["branch"], "ABC-42_fix-scroll");
+    h.json(&["meta", "repo/fix-scroll", "ticket=ABC-99"]);
+    let edited = h.json(&["new", "repo/fix-scroll", "--no-sync", "--no-open"]);
+    assert_eq!(edited["data"]["created"], false);
+    assert_eq!(edited["data"]["tree"]["branch"], "ABC-42_fix-scroll");
+
+    // A metadata value git cannot spell as a branch is refused before the
+    // worktree is touched.
+    let output = h
+        .wt()
+        .args([
+            "new",
+            "repo/spacey",
+            "--no-sync",
+            "--no-open",
+            "--meta",
+            "ticket=ABC 44",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let refusal: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refusal["error"]["code"], "BRANCH_INVALID");
+    assert!(refusal["error"]["remedy"]
+        .as_str()
+        .unwrap()
+        .contains("--branch"));
+    assert_eq!(
+        h.json(&["list"])["data"]["trees"].as_array().unwrap().len(),
+        4
+    );
+}
+
+#[test]
+fn section_5_1_user_layer_branch_convention_overrides_the_repository() {
+    let h = Harness::new();
+    let port = 21600;
+    common::write(
+        &h.home.join("config.toml"),
+        &format!(
+            "[ports]\nbase={port}\nstride=1\n[session]\nbackend='none'\n\n[repos.repo]\nbranch = \"mine/{{{{name()}}}}\"\n"
+        ),
+    );
+    let repo = h.repo("repo", "branch = \"theirs/{{name()}}\"\n");
+    h.register(&repo);
+    let created = h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
+    assert_eq!(created["data"]["tree"]["branch"], "mine/work");
+}
+
+#[test]
 fn new_run_and_remove_form_an_idempotent_lifecycle() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);

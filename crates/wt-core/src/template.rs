@@ -14,6 +14,12 @@ pub const FUNCTIONS: &[&str] = &[
     "target",
 ];
 
+/// The functions a `branch` template may call. A branch is chosen before the
+/// worktree exists, so nothing that describes a materialised tree — its root,
+/// its ports, its `vars` — has a value yet, and `branch()` is the value being
+/// computed.
+pub const BRANCH_FUNCTIONS: &[&str] = &["label", "name", "name_snake", "name_short"];
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Call {
     Simple(String),
@@ -37,6 +43,7 @@ impl Call {
 enum Expression {
     Var(String),
     Port(String),
+    Meta(String),
     Call(Call),
 }
 
@@ -50,6 +57,8 @@ enum Part {
 pub struct FunctionValues {
     pub simple: BTreeMap<String, String>,
     pub ports: BTreeMap<String, String>,
+    /// Creation metadata, populated only where `meta.<key>` is legal.
+    pub meta: BTreeMap<String, String>,
 }
 
 pub struct Context<'a> {
@@ -99,6 +108,12 @@ fn parse_expression(input: &str) -> Result<Expression, CoreError> {
         }
         return Err(invalid("invalid port reference in `{{...}}`"));
     }
+    if let Some(key) = input.strip_prefix("meta.") {
+        if valid_meta_key(key) {
+            return Ok(Expression::Meta(key.to_owned()));
+        }
+        return Err(invalid("invalid metadata reference in `{{...}}`"));
+    }
     if valid_identifier(input) {
         return Ok(Expression::Var(input.to_owned()));
     }
@@ -138,7 +153,66 @@ fn vars_unknown(message: impl Into<String>) -> CoreError {
 }
 
 pub fn validate(input: &str) -> Result<(), CoreError> {
-    parse_parts(input).map(|_| ())
+    if let Some(key) = meta_references(input)?.into_iter().next() {
+        return Err(meta_out_of_place(&key));
+    }
+    Ok(())
+}
+
+pub fn meta_references(input: &str) -> Result<BTreeSet<String>, CoreError> {
+    Ok(parse_parts(input)?
+        .into_iter()
+        .filter_map(|part| match part {
+            Part::Expression(Expression::Meta(key)) => Some(key),
+            Part::Literal(_)
+            | Part::Expression(Expression::Var(_))
+            | Part::Expression(Expression::Port(_))
+            | Part::Expression(Expression::Call(_)) => None,
+        })
+        .collect())
+}
+
+/// Checks a `branch` template against the references a branch may make.
+pub fn validate_branch(input: &str) -> Result<(), CoreError> {
+    for part in parse_parts(input)? {
+        match part {
+            Part::Literal(_) | Part::Expression(Expression::Meta(_)) => {}
+            Part::Expression(Expression::Var(name)) => {
+                return Err(branch_out_of_reach(&format!("vars name `{name}`")))
+            }
+            Part::Expression(Expression::Port(name)) => {
+                return Err(branch_out_of_reach(&format!("port `ports.{name}`")))
+            }
+            Part::Expression(Expression::Call(call)) => {
+                if !BRANCH_FUNCTIONS.contains(&call.name()) {
+                    return Err(if FUNCTIONS.contains(&call.name()) {
+                        branch_out_of_reach(&format!("function `{}`", call.display()))
+                    } else {
+                        invalid(&format!("unknown template function `{}`", call.display()))
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn meta_out_of_place(key: &str) -> CoreError {
+    CoreError::new(
+        ExitClass::State,
+        "CONFIG_INVALID",
+        format!("`meta.{key}` is available only in a `branch` template"),
+        "reference metadata from `branch`, or declare the value in `vars`",
+    )
+}
+
+fn branch_out_of_reach(reference: &str) -> CoreError {
+    CoreError::new(
+        ExitClass::State,
+        "CONFIG_INVALID",
+        format!("a `branch` template cannot reference the {reference}: the branch is chosen before the worktree exists"),
+        "use `meta.<key>`, `name()`, `name_snake()`, `name_short()`, or `label()`",
+    )
 }
 
 pub fn references(input: &str) -> Result<BTreeSet<String>, CoreError> {
@@ -148,6 +222,7 @@ pub fn references(input: &str) -> Result<BTreeSet<String>, CoreError> {
             Part::Expression(Expression::Var(name)) => Some(name),
             Part::Literal(_)
             | Part::Expression(Expression::Port(_))
+            | Part::Expression(Expression::Meta(_))
             | Part::Expression(Expression::Call(_)) => None,
         })
         .collect())
@@ -160,6 +235,7 @@ pub fn calls(input: &str) -> Result<BTreeSet<Call>, CoreError> {
             Part::Expression(Expression::Call(call)) => Some(call),
             Part::Literal(_)
             | Part::Expression(Expression::Var(_))
+            | Part::Expression(Expression::Meta(_))
             | Part::Expression(Expression::Port(_)) => None,
         })
         .collect())
@@ -172,6 +248,7 @@ pub fn port_references(input: &str) -> Result<BTreeSet<String>, CoreError> {
             Part::Expression(Expression::Port(name)) => Some(name),
             Part::Literal(_)
             | Part::Expression(Expression::Var(_))
+            | Part::Expression(Expression::Meta(_))
             | Part::Expression(Expression::Call(_)) => None,
         })
         .collect())
@@ -216,6 +293,10 @@ pub fn expand(input: &str, context: &Context<'_>) -> Result<String, CoreError> {
                     ))
                 })?)
             }
+            Part::Expression(Expression::Meta(key)) => match context.functions.meta.get(&key) {
+                Some(value) => output.push_str(value),
+                None => return Err(meta_out_of_place(&key)),
+            },
             Part::Expression(Expression::Call(call)) => {
                 output.push_str(&function_value(&call, context.functions)?)
             }
@@ -352,6 +433,14 @@ fn valid_identifier(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+fn valid_meta_key(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
 fn valid_port_name(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -375,6 +464,7 @@ mod tests {
                 ("name".to_owned(), "feature".to_owned()),
             ]),
             ports: BTreeMap::from([("http".to_owned(), "20016".to_owned())]),
+            meta: BTreeMap::new(),
         }
     }
 
@@ -390,6 +480,64 @@ mod tests {
             expand("{{prefix}}/{{root()}}/{{ports.http}}/$$/$-", &context).unwrap(),
             "one//tree/20016/$$/$-"
         );
+    }
+
+    #[test]
+    fn metadata_reads_only_inside_a_branch_template() {
+        let error = validate("{{meta.ticket}}_{{name()}}").unwrap_err();
+        assert_eq!(error.code.0, "CONFIG_INVALID");
+        assert!(error.message.contains("`meta.ticket`"), "{}", error.message);
+        validate_branch("{{meta.ticket}}_{{name()}}").unwrap();
+        assert_eq!(
+            meta_references("{{meta.ticket}}/{{meta.owner}}/{{name()}}").unwrap(),
+            BTreeSet::from(["owner".to_owned(), "ticket".to_owned()])
+        );
+
+        let vars = BTreeMap::new();
+        let functions = FunctionValues {
+            simple: BTreeMap::from([("name".to_owned(), "fix-scroll".to_owned())]),
+            ports: BTreeMap::new(),
+            meta: BTreeMap::from([("ticket".to_owned(), "ABC-42".to_owned())]),
+        };
+        assert_eq!(
+            expand(
+                "{{meta.ticket}}_{{name()}}",
+                &Context {
+                    vars: &vars,
+                    functions: &functions,
+                },
+            )
+            .unwrap(),
+            "ABC-42_fix-scroll"
+        );
+    }
+
+    #[test]
+    fn a_branch_template_reaches_only_what_exists_before_the_tree_does() {
+        for (input, expected) in [
+            ("{{prefix}}-{{name()}}", "vars name `prefix`"),
+            ("{{ports.http}}", "port `ports.http`"),
+            ("{{root()}}/x", "function `root()`"),
+            ("{{branch()}}", "function `branch()`"),
+        ] {
+            let error = validate_branch(input).unwrap_err();
+            assert_eq!(error.code.0, "CONFIG_INVALID");
+            assert!(error.message.contains(expected), "{}", error.message);
+        }
+        let error = validate_branch("{{ticket()}}").unwrap_err();
+        assert!(
+            error.message.contains("unknown template function"),
+            "{}",
+            error.message
+        );
+        for allowed in [
+            "{{label()}}",
+            "{{name()}}",
+            "{{name_snake()}}",
+            "{{name_short()}}",
+        ] {
+            validate_branch(allowed).unwrap();
+        }
     }
 
     #[test]

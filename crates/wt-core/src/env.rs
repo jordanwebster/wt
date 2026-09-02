@@ -310,6 +310,9 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
             ("target".to_owned(), target.clone()),
         ]),
         ports: port_values,
+        // A door renders no `meta.<key>`: it is legal only in a `branch`
+        // template, which is evaluated before the tree exists (A77).
+        meta: BTreeMap::new(),
     };
     let vars = template::resolve_vars(&input.cfg.vars, &functions)?;
     let template_context = template::Context {

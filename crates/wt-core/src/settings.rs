@@ -276,6 +276,24 @@ pub fn validate_settings(settings: &Settings) -> Result<(), CoreError> {
             return Err(settings_error("session.agent is not declared"));
         }
     }
+    for (label, repo) in &settings.repos {
+        let Some(branch) = &repo.branch else {
+            continue;
+        };
+        if branch.candidates().is_empty() {
+            return Err(settings_error(&format!(
+                "[repos.{label}] branch must declare at least one template"
+            )));
+        }
+        for candidate in branch.candidates() {
+            if let Err(error) = crate::template::validate_branch(candidate) {
+                return Err(settings_error(&format!(
+                    "[repos.{label}] branch template is invalid: {}",
+                    error.message
+                )));
+            }
+        }
+    }
     if let Some(editor) = &settings.editor {
         if editor.texts().is_empty() || editor.texts().iter().any(String::is_empty) {
             return Err(settings_error("editor command must not be empty"));
@@ -296,6 +314,7 @@ fn misplaced_repo_key(source: &str) -> Option<String> {
     const REPO_KEYS: &[&str] = &[
         "adapters",
         "bin",
+        "branch",
         "commands",
         "copy",
         "detect",

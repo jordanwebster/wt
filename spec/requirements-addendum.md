@@ -1267,3 +1267,71 @@ differences at the moment they can be acted on. For the same reason
 door's own tree — outside one the prefix is *expected* to be absent, another
 label's prefix is expected to be absent even inside one, and firing per
 registered label taught the reader to skip the whole section.
+
+## A77. The branch a tree gets is the repository's convention, not its address
+
+A worktree's name is an address: it is typed at every command and it shows up
+in the tree path, the session name, and the prompt. A branch name is a shared
+artifact of the repository: teams spell it `<ticket>_<short description>`,
+prefix it with an owner, or namespace throwaways. Deriving one from the other,
+as `B` defaults to `<name>` does today, forces the convention into the address
+— every command then carries a ticket id — or gives up the convention.
+
+A repository, or a user for one label, declares how the branch is spelled:
+
+```toml
+branch = ["{{meta.ticket}}_{{name()}}", "{{name()}}"]
+```
+
+`branch` is one template or an ordered list of them, declared at the root of
+`.wt.toml` or of `$WT_HOME/config.toml [repos.<label>]`, and it decides the
+branch of a creation that does not name one. The first candidate whose
+metadata references are all satisfied decides. When none is — the list is
+exhausted, or no `branch` is declared at all — the branch is `<name>`, the
+rule that holds today. A bare template is the one-element list, so
+`branch = "{{meta.ticket}}_{{name()}}"` reverts to `<name>` for a creation
+carrying no ticket, and a list is how a repository spells out what the
+unticketed case gets instead (`"wip/{{name()}}"`). Requiring a ticket is
+deliberately not expressible: ad-hoc trees for a short investigation are
+ordinary use, and a creation that refuses until the user invents a ticket
+teaches them to pass `--branch` every time, which is the convention lost by a
+longer route.
+
+The conditional lives in the list rather than in the template language. What
+an ad-hoc creation needs is not a substitute value but the disappearance of a
+whole segment — `{{meta.ticket}}_{{name()}}` without a ticket must not yield
+`_fix-scroll` — and expressing that inside one string takes an optional-group
+delimiter, which A66 would then extend to every templated string. An ordered
+list says the same thing in the configuration's own shape, and says it
+visibly: both outcomes are on the page, so a mistyped metadata key surfaces as
+the wrong candidate in the `branch` line `new` already prints, rather than as a
+rule the reader has to know to look for.
+
+A branch template is evaluated before the tree exists, so it may reference only
+`meta.<key>`, `name()`, `name_snake()`, `name_short()` and `label()`. There is
+no root, repository path, port or `vars` value yet, and `branch()` is the value
+being computed; every other reference is `CONFIG_INVALID` at its source
+location. For the same reason only layers 1 and 2 (§5.1) carry a `branch`: no
+adapter contributes one, and the tree overlay does not exist when a creation
+chooses a branch.
+
+`meta.<key>` reads that creation's `--meta` values. A reference is satisfied
+only by a key present with a non-empty value, and it is legal only in a branch
+template: the same reference in `env` or `files` would make a door refuse for
+every tree that lacks the key, and metadata is editable afterwards, so an edit
+documented as opaque bookkeeping would silently re-render a tree's files. The
+branch is decided once, from the values that creation carried, and recorded.
+An address that already exists is compared against its recorded branch rather
+than a freshly rendered one, so a `wt meta` edit or an edited convention cannot
+turn a bare re-run into a different source; `wt new` stays idempotent for a
+tree whose ticket lives in the record rather than on the command line.
+
+`--branch` still wins outright, `--detach` still produces no branch, and a
+creation from a pull request still gets `pr/N`: that branch mirrors someone
+else's work and is not this repository's naming convention. The rendered value
+must be a valid branch name. Metadata is free-form text, so a value carrying a
+space or `..` is refused — naming the candidate, what it rendered to, and
+`--branch` — rather than sanitised into a name the user did not choose. The
+recorded `source.branch` remains what a re-run compares against, so editing a
+`branch` template makes a re-run of an existing address a different source,
+exactly as editing `--branch` does.

@@ -102,6 +102,7 @@ with parentheses is a function `wt` provides.
 | `{{root()}}` | the worktree's absolute path |
 | `{{repo()}}` | the registered checkout's absolute path |
 | `{{ports.http}}` | the port you named `http` |
+| `{{meta.ticket}}` | a creation's metadata value, in a `branch` template only |
 
 Ports are a lookup, not an allocation: `{{ports.db}}` is the port you named
 `db` in the `ports` list, it returns the same number every time, and a name
@@ -234,10 +235,34 @@ wt status orbit/fix-scrolling
 
 Metadata is a small string map on the tree record. `wt status` shows it,
 `wt meta orbit/ticket-42` prints it, and `wt meta orbit/ticket-42 owner=alice
-ticket=` sets `owner` and removes `ticket`. Keys are opaque to `wt`: templates
-cannot read them, and no behaviour depends on them. Keys match
-`[a-z_][a-z0-9_]*` and values stay under 1 KiB — `ticket=PRO-123` fits, while
-a key spelled `JIRA-ID` is refused for the capitals and the dash.
+ticket=` sets `owner` and removes `ticket`. Keys match `[a-z_][a-z0-9_]*` and
+values stay under 1 KiB — `ticket=PRO-123` fits, while a key spelled `JIRA-ID`
+is refused for the capitals and the dash. No behaviour depends on a key, and
+only one thing reads one: the branch convention below.
+
+Without `--branch`, a new worktree's branch is its name. `branch` spells your
+repository's convention instead:
+
+```toml
+branch = ["{{meta.ticket}}_{{name()}}", "wip/{{name()}}"]
+```
+
+```console
+$ wt new orbit/fix-scrolling --meta ticket=ABC-42
+  branch  ABC-42_fix-scrolling
+$ wt new orbit/poke-at-timeouts
+  branch  wip/poke-at-timeouts
+```
+
+Candidates are tried in order and the first whose metadata is all set decides,
+so the worktree name — which you type at every command and see in every path —
+stays short while the branch carries the ticket. With no candidate left the
+branch is the name, so an ad-hoc worktree never has to invent a ticket. Put it
+in `.wt.toml` for the whole team, or under `[repos.<label>]` in your own
+`config.toml` for yourself. A branch is chosen before the worktree exists, so a
+branch template reads only `{{meta.<key>}}`, `{{name()}}`, `{{name_snake()}}`,
+`{{name_short()}}` and `{{label()}}` — and `{{meta.<key>}}` is legal nowhere
+else. `--branch` still wins outright, and `--from pr:42` still gets `pr/42`.
 
 Worktrees live under `$WT_HOME/trees/<label>/<name>` by default. `wt path`
 prints the exact root.
@@ -361,6 +386,9 @@ Top-level keys:
 - `bin`: relative directories prepended to `PATH`. Where the binaries are;
   `commands` is which names they provide.
 - `ports`: named ports, reachable as `{{ports.<name>}}`.
+- `branch`: how a creation that does not pass `--branch` spells its branch —
+  one template, or candidates tried in order until one has all the metadata it
+  names. The worktree's name when none does.
 - `vars`: private values, composed from functions and from each other. Never
   exported. Evaluated as a dependency graph, so order in the file does not
   matter; a cycle or an unknown name is an error naming the keys involved.

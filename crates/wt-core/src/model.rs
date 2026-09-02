@@ -324,6 +324,39 @@ pub fn name_snake(value: &str) -> String {
     }
 }
 
+/// Whether git would accept `value` as a branch name (`check-ref-format
+/// --branch`), checked here rather than by a subprocess so a rendered `branch`
+/// template can be refused before any git call.
+pub fn valid_branch_name(value: &str) -> bool {
+    if value.is_empty()
+        // `git check-ref-format --branch` accepts a lone `@` and rejects the
+        // reserved `HEAD`, so this does too.
+        || value == "HEAD"
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value.starts_with('-')
+        || value.ends_with('.')
+        || value.ends_with(".lock")
+        || value.contains("..")
+        || value.contains("//")
+        || value.contains("@{")
+    {
+        return false;
+    }
+    if value.chars().any(|ch| {
+        ch.is_ascii_control()
+            || matches!(
+                ch,
+                ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\' | '\u{7f}'
+            )
+    }) {
+        return false;
+    }
+    value
+        .split('/')
+        .all(|component| !component.starts_with('.') && !component.ends_with(".lock"))
+}
+
 pub fn name_short(label: &str, name: &str) -> String {
     let full = format!("{}_{}", name_snake(label), name_snake(name));
     // Hash the untruncated identity so equal display prefixes remain distinct.
@@ -818,6 +851,37 @@ mod tests {
             .meta
             .insert("Bad".to_owned(), "value".to_owned());
         assert_eq!(invalid.validate().unwrap_err().code.0, "REGISTRY_CORRUPT");
+    }
+
+    #[test]
+    fn branch_names_follow_git_ref_format() {
+        for good in [
+            "ABC-42_fix-scroll",
+            "feature/x",
+            "wip/poke-at-timeouts",
+            "v1.2",
+        ] {
+            assert!(valid_branch_name(good), "{good}");
+        }
+        assert!(valid_branch_name("@"));
+        for bad in [
+            "",
+            "HEAD",
+            "ABC 42_fix",
+            "fix..scroll",
+            "fix~1",
+            "-fix",
+            "/fix",
+            "fix/",
+            "fix//scroll",
+            "fix.lock",
+            ".hidden/fix",
+            "fix@{1}",
+            "fix.",
+            "fix\u{1}",
+        ] {
+            assert!(!valid_branch_name(bad), "{bad}");
+        }
     }
 
     #[test]

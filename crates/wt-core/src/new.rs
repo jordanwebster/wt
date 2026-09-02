@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::lifecycle::DerivedPhase;
+use crate::{model, template, CoreError, ExitClass};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EntryView {
@@ -44,6 +47,55 @@ pub enum Decision {
         code: &'static str,
         remedy: &'static str,
     },
+}
+
+/// Spells the branch of a creation that did not name one: the first candidate
+/// whose `meta.<key>` references are all set, or `None` when none is and the
+/// caller falls back to the tree's name (A77).
+pub fn branch_from_templates(
+    candidates: &[String],
+    label: &str,
+    name: &str,
+    meta: &BTreeMap<String, String>,
+) -> Result<Option<String>, CoreError> {
+    for candidate in candidates {
+        let satisfied = template::meta_references(candidate)?
+            .iter()
+            .all(|key| meta.get(key).is_some_and(|value| !value.is_empty()));
+        if !satisfied {
+            continue;
+        }
+        let functions = template::FunctionValues {
+            simple: BTreeMap::from([
+                ("label".to_owned(), label.to_owned()),
+                ("name".to_owned(), name.to_owned()),
+                ("name_snake".to_owned(), model::name_snake(name)),
+                ("name_short".to_owned(), model::name_short(label, name)),
+            ]),
+            ports: BTreeMap::new(),
+            meta: meta.clone(),
+        };
+        let vars = BTreeMap::new();
+        let rendered = template::expand(
+            candidate,
+            &template::Context {
+                vars: &vars,
+                functions: &functions,
+            },
+        )?;
+        if !model::valid_branch_name(&rendered) {
+            return Err(CoreError::new(
+                ExitClass::Usage,
+                "BRANCH_INVALID",
+                format!(
+                    "branch template `{candidate}` rendered `{rendered}`, which git will not accept as a branch name"
+                ),
+                "correct the metadata value, or name the branch with --branch",
+            ));
+        }
+        return Ok(Some(rendered));
+    }
+    Ok(None)
 }
 
 pub fn decide(entry: Option<&EntryView>, request: &Request) -> Decision {
@@ -129,6 +181,43 @@ pub fn decide(entry: Option<&EntryView>, request: &Request) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_branch_convention_takes_the_first_candidate_whose_metadata_is_set() {
+        let candidates = [
+            "{{meta.ticket}}_{{name()}}".to_owned(),
+            "wip/{{name()}}".to_owned(),
+        ];
+        let ticketed = BTreeMap::from([("ticket".to_owned(), "ABC-42".to_owned())]);
+        assert_eq!(
+            branch_from_templates(&candidates, "apollo", "fix-scroll", &ticketed).unwrap(),
+            Some("ABC-42_fix-scroll".to_owned())
+        );
+        assert_eq!(
+            branch_from_templates(&candidates, "apollo", "poke", &BTreeMap::new()).unwrap(),
+            Some("wip/poke".to_owned())
+        );
+        // An unset key and a key set to nothing are the same absence.
+        let blank = BTreeMap::from([("ticket".to_owned(), String::new())]);
+        assert_eq!(
+            branch_from_templates(&candidates[..1], "apollo", "poke", &blank).unwrap(),
+            None
+        );
+        assert_eq!(
+            branch_from_templates(&[], "apollo", "poke", &ticketed).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_rendered_branch_git_would_reject_is_refused_before_any_git_call() {
+        let candidates = ["{{meta.ticket}}_{{name()}}".to_owned()];
+        let meta = BTreeMap::from([("ticket".to_owned(), "ABC 42".to_owned())]);
+        let error = branch_from_templates(&candidates, "apollo", "fix", &meta).unwrap_err();
+        assert_eq!(error.code.0, "BRANCH_INVALID");
+        assert!(error.message.contains("ABC 42_fix"), "{}", error.message);
+        assert!(error.remedy.contains("--branch"), "{}", error.remedy);
+    }
 
     fn request() -> Request {
         Request {

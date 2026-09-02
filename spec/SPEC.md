@@ -134,14 +134,15 @@ First operation of every command, before any read of its own files and before an
 |---|---|---|
 | 0 | adapter tables (§6) | built in |
 | 1 | repo `.wt.toml` of the tree being operated on (root + `[dirs."sub"]`) | tree |
-| 2 | user `$WT_HOME/config.toml` `[repos.<label>]` (root + `dirs`) | home |
+| 2 | user `$WT_HOME/config.toml` `[repos.<label>]` (root + `dirs` + `branch`) | home |
 | 3 | tree overlay `<tree>/.wt/config.toml` | tree |
 
-Teardown reads no layer (§10.3).
+Teardown reads no layer (§10.3). `branch` (§5.2) is read from layers 1 and 2 only: no adapter contributes one, and the tree overlay does not exist when a creation chooses a branch (A77).
 
 ### 5.2 `.wt.toml` grammar (A15; ★ new keys)
 ```
-Config  := Scope & { ports?: [PortName], locks?: Map<LockName, LockCfg> ★, dirs?: Map<RelDir, Scope>, sync_inputs?: [RelPath] ★, detect?: Detect ★ }
+Config  := Scope & { ports?: [PortName], locks?: Map<LockName, LockCfg> ★, dirs?: Map<RelDir, Scope>, sync_inputs?: [RelPath] ★, detect?: Detect ★,
+             branch?: Template | [Template] ★ }
 Scope   := { bin?: [RelPath], commands?: [CommandName] | Map<CommandName,bool> ★, vars?: Map<VarKey, Template|false> ★,
              env?: Map<EnvKey, Template|false>, copy?: [RelPath], files?: Map<RelPath, File|false>,
              task?: Map<TaskId, Task|false>, adapters?: Map<AdapterId, { tool?: ToolId, disabled?: bool }> }
@@ -152,7 +153,7 @@ Task    := { run?: Cmd, exists?: Cmd, destroy?: Cmd, template?: bool (true), nee
              tied_to?: "tree"|"repo"|"machine", exclusive?: "repo"|"machine", env?: Map<EnvKey, Template>, cwd?: RelPath, timeout?: Duration, description?: String,
              ready_within?: Duration ★, snapshot_env?: [EnvKey] ★ }
 Cmd     := String | [String]          // shell: whole string templated, then `sh -c`; argv: each element templated; neither when the task sets template = false
-Template:= String                      // {{name}} reads a var, {{ports.n}} a declared port, {{fn()}} calls; no interior whitespace
+Template:= String                      // {{name}} reads a var, {{ports.n}} a declared port, {{meta.k}} a creation metadata value (branch templates only), {{fn()}} calls; no interior whitespace
 ```
 Every task declares at least one of `run`, `destroy`, or `needs`. A task with
 `needs` and neither `run` nor `destroy` is an aggregate and accepts only
@@ -177,7 +178,18 @@ resolved wt home. A declared port is a
 dotted constant, `ports.<name>` — a lookup, not an allocation: the value is
 fixed when the name is first declared and repeats identically. `ports` is a
 reserved `VarKey`. Any other call, or `ports.<name>` for a name absent from
-`ports`, is `CONFIG_INVALID` naming the offending reference. `vars` resolve as a DAG within a scope — file order is not
+`ports`, is `CONFIG_INVALID` naming the offending reference. `meta.<key>` is a second dotted constant, reading the
+creation's `--meta` values and satisfied only by a key present with a non-empty
+value; `meta` is likewise a reserved `VarKey`. It is legal only in a `branch`
+template (§11.2) and `CONFIG_INVALID` naming the reference anywhere else
+(`SETTINGS_INVALID` when the offending template is in `$WT_HOME/config.toml`,
+as every invalid settings value is),
+because a door would otherwise refuse for every tree lacking the key, and a
+later `wt meta` edit would re-render that tree's files (A77). A `branch`
+template may reference only `meta.<key>`, `name()`, `name_snake()`,
+`name_short()` and `label()`: it is evaluated before the tree exists, so a
+`vars` key, a `ports.<name>` lookup, and every other function — `branch()`
+being the value it computes — is `CONFIG_INVALID` at its source location. `vars` resolve as a DAG within a scope — file order is not
 significant — and a cycle or unknown name is `CONFIG_INVALID` naming every key
 on the cycle. `{{` always begins a template expression. The expression must
 close with `}}`, contain no whitespace, and name a declared `vars` key, a
@@ -579,11 +591,16 @@ TreeState := { schema: 1, tree_id, label, name, phase: initialising|bootstrappin
 wt new <label>/<name> [--branch B] [--from REF] [--detach] [--meta k=v]… [--no-sync] [--verify] [--no-fetch] [--no-open] [--no-attach] [--no-build]
 REF := <local branch> | <remote>/<branch> | pr:N | <PR URL> | <rev>
 ```
-`--from` bare `X`: `refs/heads/X` → `refs/remotes/origin/X` → rev; both present and different → local wins with `FROM_LOCAL_SHADOWS_REMOTE`; `origin/X` forces remote. Default start `origin/<default>` after a bounded fetch (`--no-fetch` skips; unpushed local default-branch commits need `--from main`). A fetch covers only the branches the creation consumes — the requested start when it can name an origin branch, plus the default branch. Any narrow-fetch failure other than a timeout falls back once to the full `refs/heads/*` fetch (a wanted name may be a tag, a raw revision, or a renamed default), so anything resolvable before stays resolvable; when the fallback also fails, the narrow fetch's error is reported because it names the refs the creation asked for, and a timeout propagates without a second attempt. Default branch: `origin/HEAD` → `main`/`master`/`trunk` → HEAD, cached, refreshed on fetch. PR refspec by origin host: github `refs/pull/N/head`; gitlab `refs/merge-requests/N/head`; bitbucket `refs/pull-requests/N/from`; unknown: pull then merge-requests; fetched as `refs/wt/pr/N`, local branch `pr/N`, default name `pr-N`. A PR URL selects the label whose normalised origin (https or scp-style ssh, `.git` stripped) matches host and `owner/repo`; zero/many → error with remedy. `B` defaults to `<name>`; `--branch feature/x` without a name → `feature-x`. `AddSpec`: existing branch · `-b B <start>` with `--no-track` unless start is `refs/remotes/*` · `--detach`.
+`--from` bare `X`: `refs/heads/X` → `refs/remotes/origin/X` → rev; both present and different → local wins with `FROM_LOCAL_SHADOWS_REMOTE`; `origin/X` forces remote. Default start `origin/<default>` after a bounded fetch (`--no-fetch` skips; unpushed local default-branch commits need `--from main`). A fetch covers only the branches the creation consumes — the requested start when it can name an origin branch, plus the default branch. Any narrow-fetch failure other than a timeout falls back once to the full `refs/heads/*` fetch (a wanted name may be a tag, a raw revision, or a renamed default), so anything resolvable before stays resolvable; when the fallback also fails, the narrow fetch's error is reported because it names the refs the creation asked for, and a timeout propagates without a second attempt. Default branch: `origin/HEAD` → `main`/`master`/`trunk` → HEAD, cached, refreshed on fetch. PR refspec by origin host: github `refs/pull/N/head`; gitlab `refs/merge-requests/N/head`; bitbucket `refs/pull-requests/N/from`; unknown: pull then merge-requests; fetched as `refs/wt/pr/N`, local branch `pr/N`, default name `pr-N`. A PR URL selects the label whose normalised origin (https or scp-style ssh, `.git` stripped) matches host and `owner/repo`; zero/many → error with remedy. `B` defaults to the label's effective `branch` (§5.2, A77): the first declared candidate whose `meta.<key>` references are all satisfied, else `<name>` when the list is exhausted or none is declared. A candidate rendering to something git will not accept as a branch name is `BRANCH_INVALID` (2), naming the candidate, the rendered value and `--branch`. `--detach` produces no branch and a PR creation's default stays `pr/N`, neither consulting `branch`. `--branch feature/x` without a name → `feature-x`. `AddSpec`: existing branch · `-b B <start>` with `--no-track` unless start is `refs/remotes/*` · `--detach`.
 
 Each repeatable `--meta k=v` initializes one §4.1 metadata entry. Repeated keys
 take their last value. The option affects a newly allocated or fresh
-incarnation; resuming an existing incarnation retains its recorded map.
+incarnation; resuming an existing incarnation retains its recorded map. A
+`branch` template is therefore evaluated for a new address only. An address
+that already exists is compared against its recorded `source.branch`, which
+neither a `wt meta` edit nor an edited template rewrites, so a bare re-run
+stays idempotent; `--branch` and a PR creation still state a branch, and one
+that differs from the record is `NAME_TAKEN` as before (A77).
 
 Decision (inside the registry transaction, under the exclusive tree lock):
 
@@ -802,7 +819,7 @@ Control-plane deadlines per §13.3; user children run as long as they run. Idemp
 |---|---|---|
 | 0 | ok | incl. idempotent no-ops |
 | 1 | internal | bug |
-| 2 | usage | `CONFIRM_REQUIRED`, `JSON_UNSUPPORTED`, `USE_UNREGISTER`, `NO_GATE_REFUSED` |
+| 2 | usage | `CONFIRM_REQUIRED`, `JSON_UNSUPPORTED`, `USE_UNREGISTER`, `NO_GATE_REFUSED`, `BRANCH_INVALID` |
 | 3 | not found | `NOT_FOUND` |
 | 4 | conflict | `NAME_TAKEN`, `BRANCH_IN_USE`, `LOCK_HELD`, `TREE_BUSY`, `TREE_IN_USE`, `SLOTS_EXHAUSTED`, `NAME_SHADOWS_LABEL`, `PATH_REGISTERED`, `GITDIR_REGISTERED`, `GEOMETRY_CONFLICT`, `PORTS_EXHAUSTED`, `IDENTITY_COLLISION`, `TREE_MISSING_PENDING` |
 | 5 | state | `TREE_DIRTY`, `CONFIG_INVALID` (+ subcodes), `SETTINGS_INVALID`, `OPEN_ALL_REQUIRES_TMUX`, `ENV_UNDEFINED`, `TOOL_MISSING`, `COPY_TRACKED`, `RENDER_ONTO_*`, `PATH_OCCUPIED`, `HOME_OLD_FORMAT`, `*_CORRUPT`, `NOT_A_WORKTREE`, `VERIFY_PENDING`, `ROOT_IS_SYMLINK`, `TREE_REPLACED`, `TREES_EXIST`, `CWD_MISSING`, `FILE_SOURCE_MISSING` |
@@ -939,6 +956,7 @@ Levels **U** (wt-core), **I** (wt-sys/app on temp repos with shims: tmux, docker
 | §10.1 | `lock_plan` order asserted by a lock-order tracer (out-of-order acquisition panics in test builds); task env not contributed; present resource env contributed; log retention keeps 20 per task | I |
 | §10.1, §14.1, §14.4 (A58) | argv arguments append after templating and shell arguments appear at `"$@"`, only on the resolved target; an adapter-composed root forwards to the single adapter recipe; a two-scope composite refuses and names the public scoped tasks; a user aggregate refuses regardless of fan-out; no-parameter shell and resource refusals have their specified usage codes and remedies; absent arguments preserve behaviour; aliases accept `--`; log header, dry-run, and JSON carry the exact argument vector and resolved `args_target` (`null` without arguments); arguments without `--` name the delimiter | C |
 | §4.1, §11.2, §14.1, §14.4–14.5 (A63) | `new --meta` and prompt-free `meta` set, list and idempotently unset metadata through a registry round trip; invalid keys, oversized values and missing `=` refuse before a write; status text shows the map and Tree/meta JSON carry it with sorted keys | U, C |
+| §5.2, §11.2 (A77) | a declared `branch` list picks the first candidate whose metadata is set and falls back to `<name>` when none is; a bare template behaves as the one-element list; `--branch`, `--detach` and a `pr:N` creation never consult it; a candidate rendering to a name git rejects → `BRANCH_INVALID` naming the candidate and its rendered value; `meta.<key>` outside a branch template, and a `vars` key, `ports.<name>` or `branch()` inside one, are `CONFIG_INVALID` at their source location; the recorded `source.branch` decides an identical-source re-run | U, C |
 | §3.1 (A67) | `phase_3_identity_and_environment_surface_are_exact` asserts linked target derivation, `.` sanitisation, and an `IDENTITY_COLLISION` between display names that sanitise alike; `open_reports_canonical_and_linked_sessions_that_die_during_startup` exercises a `/`-bearing linked session through the capture path | U, I, C |
 | §9.4 (A68) | `backend_none_never_invokes_tmux_for_truth_or_teardown` covers none-backend shell entry, `--no-attach`, `--agent`, `--all`, and no tmux effects; `agents_start_only_for_new_sessions_and_open_all_resumes_recorded_agents` proves the canonical anchor is excluded from `open --all` | I, C |
 | §11.2 (A69) | `new_starts_detached_build_and_shims_report_progress_and_failure` gates the detached build after the CLI returns and observes live-progress then failure; `dead_build_supervisor_is_abandoned_for_status_doctor_and_shims` fakes a dead pid and proves list/status normalisation, `BUILD_ABANDONED`, and the ordinary shim remedy | I, C |

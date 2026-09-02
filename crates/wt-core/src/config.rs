@@ -65,6 +65,24 @@ impl Command {
     }
 }
 
+/// How a creation that does not name a branch spells one: a single template,
+/// or candidates tried in order until one has all its metadata (A77).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BranchTemplates {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl BranchTemplates {
+    pub fn candidates(&self) -> &[String] {
+        match self {
+            Self::One(template) => std::slice::from_ref(template),
+            Self::Many(templates) => templates,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileDef {
@@ -298,6 +316,8 @@ pub struct Config {
     pub dirs: IndexMap<String, Scope>,
     pub sync_inputs: Vec<RelPath>,
     pub detect: Detect,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<BranchTemplates>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -364,6 +384,7 @@ fn record_locations(config: &mut Config, source: &str, path: &str) {
                 (&mut config.root, section.as_slice())
             };
         let logical = match table {
+            [] if key == "branch" => Some("branch".to_owned()),
             [kind] if kind == "vars" => Some(format!("var:{key}")),
             [kind] if kind == "env" => Some(format!("env:{key}")),
             [kind, file] if kind == "files" && key == "content" => Some(format!("file:{file}")),
@@ -469,6 +490,15 @@ pub fn validate(config: &Config) -> Result<(), CoreError> {
             )));
         }
     }
+    if let Some(branch) = &config.branch {
+        if branch.candidates().is_empty() {
+            return Err(invalid("branch must declare at least one template"));
+        }
+        for candidate in branch.candidates() {
+            template::validate_branch(candidate)
+                .map_err(|error| located(error, config.root.locations.get("branch")))?;
+        }
+    }
     for (dir, scope) in std::iter::once((".", &config.root))
         .chain(config.dirs.iter().map(|(dir, scope)| (dir.as_str(), scope)))
     {
@@ -502,6 +532,7 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
             .iter()
             .map(|name| (name.clone(), String::new()))
             .collect(),
+        meta: BTreeMap::new(),
     };
     for dir in std::iter::once(".").chain(config.dirs.keys().map(String::as_str)) {
         let effective = effective_scope(config, dir)?;
@@ -752,7 +783,7 @@ fn validate_scope(scope: &Scope) -> Result<(), CoreError> {
                 "vars key `{key}` must match [a-z_][a-z0-9_]*"
             )));
         }
-        if key == "ports" || template::FUNCTIONS.contains(&key.as_str()) {
+        if matches!(key.as_str(), "ports" | "meta") || template::FUNCTIONS.contains(&key.as_str()) {
             return Err(invalid(format!(
                 "vars key `{key}` is reserved by the template language"
             )));
@@ -932,6 +963,9 @@ pub fn merge(layers: &[(Layer, Config)]) -> Config {
             output.locks.insert(name.clone(), lock.clone());
         }
         append_unique(&mut output.sync_inputs, &layer.sync_inputs);
+        if layer.branch.is_some() {
+            output.branch.clone_from(&layer.branch);
+        }
         if layer.detect.depth.is_some() {
             output.detect.depth = layer.detect.depth;
         }
@@ -1066,6 +1100,40 @@ fn apply_values<T: Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_branch_convention_layers_and_is_validated_where_it_is_written() {
+        let repo = parse("branch = \"{{meta.ticket}}_{{name()}}\"\n", ".wt.toml").unwrap();
+        assert_eq!(
+            repo.branch.as_ref().unwrap().candidates(),
+            ["{{meta.ticket}}_{{name()}}".to_owned()]
+        );
+        let user = parse(
+            "branch = [\"{{meta.ticket}}/{{name()}}\", \"wip/{{name()}}\"]\n",
+            "config.toml",
+        )
+        .unwrap();
+        let merged = merge(&[(Layer::Repo, repo), (Layer::User, user)]);
+        assert_eq!(
+            merged.branch.unwrap().candidates(),
+            [
+                "{{meta.ticket}}/{{name()}}".to_owned(),
+                "wip/{{name()}}".to_owned()
+            ]
+        );
+
+        let error = parse("branch = \"{{ports.http}}\"\n", ".wt.toml").unwrap_err();
+        assert_eq!(error.code.0, "CONFIG_INVALID");
+        assert!(
+            error.message.starts_with(".wt.toml:1:1:"),
+            "{}",
+            error.message
+        );
+        let error = parse("[vars]\nname_for = \"{{meta.ticket}}\"\n", ".wt.toml").unwrap_err();
+        assert!(error.message.contains("`meta.ticket`"), "{}", error.message);
+        assert!(parse("[vars]\nmeta = \"x\"\n", ".wt.toml").is_err());
+        assert!(parse("branch = []\n", ".wt.toml").is_err());
+    }
 
     #[test]
     fn parses_all_acceptance_files_unchanged() {

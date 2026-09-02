@@ -113,20 +113,27 @@ fn create_tree(
         .find(|tree| tree.label == target.label && tree.canonical)
         .cloned()
         .ok_or_else(|| super::context::not_found(&Target::canonical(target.label.clone())))?;
-    let requested_pr = parse_pr(&args.from_ref);
-    let requested_branch = args.branch.clone().unwrap_or_else(|| {
-        requested_pr
-            .map(|number| format!("pr/{number}"))
-            .unwrap_or_else(|| target.name.clone())
-    });
-    let requested_start = args.from_ref.clone();
-    if let Some(existing) = context
+    let existing = context
         .registry
         .trees
         .iter()
         .find(|tree| tree.label == target.label && tree.name == target.name)
-        .cloned()
-    {
+        .cloned();
+    // An existing entry's branch was decided when it was created and is not
+    // re-derived: a resume keeps its recorded metadata too, so a convention
+    // whose inputs changed since — a `wt meta` edit, an edited template —
+    // must not turn a bare re-run into a different source. Only `--branch`
+    // and a pull request state a branch for an address that already exists.
+    let requested_branch = match &existing {
+        Some(existing) if args.branch.is_none() && parse_pr(&args.from_ref).is_none() => existing
+            .source
+            .branch
+            .clone()
+            .unwrap_or_else(|| target.name.clone()),
+        _ => creation_branch(context, &canonical, &target, &args, &meta)?,
+    };
+    let requested_start = args.from_ref.clone();
+    if let Some(existing) = existing {
         let state = context.read_state(&target)?;
         let phase = context.phase(&existing, state.as_ref())?;
         let view = wt_core::new::EntryView {
@@ -191,7 +198,15 @@ fn create_tree(
             remedy,
         ));
     }
-    create(context, target, path, canonical, args, meta)
+    create(
+        context,
+        target,
+        path,
+        canonical,
+        args,
+        meta,
+        requested_branch,
+    )
 }
 
 fn create(
@@ -201,6 +216,7 @@ fn create(
     canonical: TreeRec,
     args: New,
     meta: BTreeMap<String, String>,
+    branch: String,
 ) -> Result<Output, CoreError> {
     let holder = context.holder(target.to_string(), "new")?;
     let token = lock::tree(
@@ -217,10 +233,6 @@ fn create(
     let state = register::new_state(&target, &tree_id, StatePhase::Bootstrapping, "new", &now)?;
     context.write_state(&target, &state, &holder)?;
     let pr = parse_pr(&args.from_ref);
-    let branch = args.branch.clone().unwrap_or_else(|| {
-        pr.map(|number| format!("pr/{number}"))
-            .unwrap_or_else(|| target.name.clone())
-    });
     let tree = TreeRec {
         tree_id: tree_id.clone(),
         label: target.label.clone(),
@@ -470,11 +482,19 @@ fn add_worktree(
             (format!("refs/wt/pr/{number}"), None)
         }
     };
-    let branch = args.branch.clone().unwrap_or_else(|| {
-        parse_pr(&args.from_ref)
-            .map(|number| format!("pr/{number}"))
-            .unwrap_or_else(|| tree.name.clone())
-    });
+    // The branch this incarnation was created with, recorded when it was
+    // allocated and unchanged by a later configuration edit. Only a detached
+    // tree records none, and its name feeds the porcelain check alone.
+    let branch = match tree.source.branch.clone() {
+        Some(branch) => branch,
+        None => creation_branch(
+            context,
+            canonical,
+            &super::context::target_of(tree),
+            args,
+            &tree.meta,
+        )?,
+    };
     if let Some(path) = git.branch_holder(&branch)? {
         return Err(CoreError::new(
             ExitClass::Conflict,
@@ -576,6 +596,38 @@ fn ensure_pr_url_matches(
             "register exactly one checkout whose origin matches the pull request URL",
         ))
     }
+}
+
+/// The branch a creation targets when it is not resumed from a record:
+/// `--branch`, then the pull request's own name, then the label's declared
+/// convention, then the tree's name (A77).
+fn creation_branch(
+    context: &Context,
+    canonical: &TreeRec,
+    target: &Target,
+    args: &New,
+    meta: &BTreeMap<String, String>,
+) -> Result<String, CoreError> {
+    if let Some(branch) = args.branch.clone() {
+        return Ok(branch);
+    }
+    if let Some(number) = parse_pr(&args.from_ref) {
+        return Ok(format!("pr/{number}"));
+    }
+    if args.detach {
+        // No branch is created, so the convention has nothing to name here;
+        // the value only feeds step G's branch-held-elsewhere check.
+        return Ok(target.name.clone());
+    }
+    let declared =
+        register::declared_branch(context, Path::new(canonical.path.as_str()), &target.label)?;
+    let candidates = declared
+        .as_ref()
+        .map_or(&[][..], |declared| declared.candidates());
+    Ok(
+        wt_core::new::branch_from_templates(candidates, target.label.as_str(), &target.name, meta)?
+            .unwrap_or_else(|| target.name.clone()),
+    )
 }
 
 fn parse_pr(input: &Option<String>) -> Option<u64> {
