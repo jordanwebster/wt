@@ -197,7 +197,7 @@ later is how you add more repositories. `--dry-run` asks nothing and needs no
 terminal, so it is also what a script or an agent runs to see what setup would
 do.
 
-Register an existing checkout, or clone and register in one operation:
+Register an existing checkout, or let wt clone one it will own:
 
 ```sh
 wt register ~/source/orbit
@@ -208,6 +208,14 @@ Registration is consent for the repository's declared tasks and resource
 recipes to run. The registered checkout becomes the `canonical` worktree,
 addressable by its label alone, and it is a full participant — its own ports,
 its own rendered files, its own claimed commands.
+
+`wt clone` makes a bare hub under `~/.wt/repos/<label>/` and a canonical
+checkout of its own, detached at the default branch. In that model nobody
+works on `main`: it is a ref wt keeps at origin's tip, every `wt new`
+branches from it after bringing it up to date, and `wt new service/main` is
+refused. A registered checkout keeps its `main` checked out and wt
+fast-forwards it in place before branching, when it is clean; when it is
+not, the tree starts from `origin/main` and says so.
 
 Create a linked worktree:
 

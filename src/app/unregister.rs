@@ -206,7 +206,20 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
     });
     wt_sys::fsx::remove_path(&context.state_path(&target))?;
     wt_sys::fsx::remove_path(&repo_path)?;
-    let common = context.registry.labels[&label].common_gitdir.clone();
+    let record = context.registry.labels[&label].clone();
+    let common = record.common_gitdir.clone();
+    if record.owner == wt_core::model::Owner::Wt {
+        // The hub and its canonical are wt's, but they hold every branch
+        // the label ever kept; they are reported, never deleted.
+        artifacts.push(ArtifactReport {
+            path: common.as_str().to_owned(),
+            action: "kept".to_owned(),
+        });
+        artifacts.push(ArtifactReport {
+            path: record.path.as_str().to_owned(),
+            action: "kept".to_owned(),
+        });
+    }
     context.mutate_registry(&holder, |registry| {
         registry.trees.retain(|record| record.label != label);
         registry.tombstones.retain(|record| record.label != label);

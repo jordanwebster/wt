@@ -148,6 +148,7 @@ fn normalize(mut value: serde_json::Value, root: &Path) -> serde_json::Value {
                             | "duration_ms"
                             | "log"
                             | "head"
+                            | "detached_sha"
                             | "pid"
                             | "tree_id"
                             | "disk_kb"

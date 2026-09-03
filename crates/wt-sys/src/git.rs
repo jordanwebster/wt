@@ -458,6 +458,25 @@ impl Git {
         }
     }
 
+    /// Moves a branch that no worktree holds to `commit`, guarded by the
+    /// value it is expected to hold now.
+    pub fn update_ref(&self, reference: &str, commit: &str, expected: &str) -> Result<()> {
+        self.invoke(Class::Query, &["update-ref", reference, commit, expected])
+            .map(|_| ())
+    }
+
+    /// Detaches the checkout at `tree` onto `revision`, updating its files.
+    /// `Ok(false)` when git refuses because local changes would be lost.
+    pub fn checkout_detach(&self, tree: &Path, revision: &str) -> Result<bool> {
+        let args = proc::os_args(&["checkout", "--quiet", "--detach", revision, "--"]);
+        let output = self.invoke_status_in(tree, Class::Worktree, args.clone())?;
+        match output.child.code {
+            Some(0) => Ok(true),
+            Some(1) if !output.timed_out => Ok(false),
+            _ => Err(command_failed(Class::Worktree, &args, &output)),
+        }
+    }
+
     /// The commit `tree`'s HEAD names.
     pub fn head_oid_in(&self, tree: &Path) -> Result<String> {
         let args = proc::os_args(&["rev-parse", "--verify", "HEAD"]);
@@ -811,6 +830,114 @@ pub fn clone(
     request.remove_env = git_environment_to_clear();
     let output = proc::capture(&request, deadline)?;
     ensure_success(Class::Clone, &request.args, output).map(|_| ())
+}
+
+/// Creates a bare hub at `hub` for `url` (§11.6): an ordinary remote with
+/// the standard fetch refspec, every origin branch under
+/// `refs/remotes/origin/`, and one local branch — the default, which HEAD
+/// names — so the hub looks like a clone that has checked nothing out.
+/// Returns the default branch's name.
+pub fn clone_hub(
+    program: impl Into<OsString>,
+    url: &str,
+    hub: &Path,
+    deadline: Duration,
+) -> Result<String> {
+    let program = program.into();
+    let run = |args: &[&str], class: Class, timeout: Duration| -> Result<ProcessOutput> {
+        let mut request = CommandRequest::new(program.clone());
+        request.args = proc::os_args(args);
+        request.env = [
+            ("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned()),
+            ("LC_ALL".to_owned(), "C".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        request.remove_env = git_environment_to_clear();
+        let output = proc::capture_op(&request, timeout, Some(&git_op(&request.args)))?;
+        ensure_success(class, &request.args, output)
+    };
+    let hub_arg = hub.to_string_lossy().into_owned();
+    let query = Duration::from_secs(30);
+    run(
+        &["init", "--quiet", "--bare", "--", &hub_arg],
+        Class::Query,
+        query,
+    )?;
+    // From here a failure — a remote that cannot be reached, a fetch past
+    // its deadline — must not leave a half-made hub that a retry would
+    // take for a finished one.
+    let populate = || -> Result<String> {
+        run(
+            &["-C", &hub_arg, "remote", "add", "origin", "--", url],
+            Class::Query,
+            query,
+        )?;
+        run(
+            &["-C", &hub_arg, "fetch", "--quiet", "origin"],
+            Class::Clone,
+            deadline,
+        )?;
+        run(
+            &["-C", &hub_arg, "remote", "set-head", "origin", "--auto"],
+            Class::Fetch,
+            deadline,
+        )?;
+        let head = run(
+            &[
+                "-C",
+                &hub_arg,
+                "symbolic-ref",
+                "--short",
+                "refs/remotes/origin/HEAD",
+            ],
+            Class::Query,
+            query,
+        )?;
+        let default = text(&head.stdout)
+            .strip_prefix("origin/")
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                CoreError::new(
+                    ExitClass::External,
+                    "GIT_FAILED",
+                    format!("origin at {url} names no default branch"),
+                    "make sure the remote has a HEAD branch",
+                )
+            })?;
+        run(
+            &[
+                "-C",
+                &hub_arg,
+                "branch",
+                "--quiet",
+                "--",
+                &default,
+                &format!("origin/{default}"),
+            ],
+            Class::Query,
+            query,
+        )?;
+        run(
+            &[
+                "-C",
+                &hub_arg,
+                "symbolic-ref",
+                "HEAD",
+                &format!("refs/heads/{default}"),
+            ],
+            Class::Query,
+            query,
+        )?;
+        Ok(default)
+    };
+    match populate() {
+        Ok(default) => Ok(default),
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(hub);
+            Err(error)
+        }
+    }
 }
 
 /// Parses the forward-compatible `worktree list --porcelain` format.

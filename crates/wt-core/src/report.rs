@@ -313,6 +313,8 @@ pub struct RegisterData {
 pub struct CloneData {
     pub url: String,
     pub cloned: bool,
+    /// The bare repository every worktree of the label shares (§11.6).
+    pub hub: String,
     #[serde(flatten)]
     pub register: RegisterData,
 }
@@ -955,6 +957,7 @@ mod tests {
             CloneData {
                 url: "https://example.test/repo".into(),
                 cloned: true,
+                hub: "/wt/repos/repo/hub.git".into(),
                 register,
             },
         );

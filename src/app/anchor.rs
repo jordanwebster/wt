@@ -143,12 +143,15 @@ pub(crate) fn run(context: &mut Context, args: Anchor) -> Result<Output, CoreErr
     .with_notices(notices))
 }
 
-/// Fast-forwards a user-owned canonical to `origin/<default>` when that is
-/// safe: the default branch is checked out, no tracked file is modified,
-/// and origin is strictly ahead. Anything else leaves it where it is and
-/// says why.
+/// Moves the canonical to `origin/<default>` when that is safe. A wt-owned
+/// canonical (§11.6 `clone`) is detached: the default branch is moved as a
+/// ref, fast-forward only, and the checkout re-detached onto it unless a
+/// tracked file is modified. A user-owned canonical fast-forwards only
+/// while the default branch is checked out in it, no tracked file is
+/// modified, and origin is strictly ahead. Anything else leaves it where
+/// it is and says why.
 fn move_canonical(
-    _context: &Context,
+    context: &Context,
     git: &wt_sys::git::Git,
     tree: &TreeRec,
     default: &str,
@@ -168,6 +171,53 @@ fn move_canonical(
             message,
         });
     };
+    if context.registry.labels[&tree.label].owner == wt_core::model::Owner::Wt {
+        let local = format!("refs/heads/{default}");
+        let Some(to) = git.resolve_commit(&remote)? else {
+            return Ok(None);
+        };
+        if let Some(local_commit) = git.resolve_commit(&local)? {
+            if local_commit != to {
+                if !git.is_ancestor(&local_commit, &to)? {
+                    stay(
+                        "ANCHOR_DIVERGED",
+                        format!("local {default} has commits origin/{default} does not; it was not moved"),
+                    );
+                    return Ok(None);
+                }
+                if git.branch_holder(default)?.is_some() {
+                    stay(
+                        "ANCHOR_OFF_DEFAULT",
+                        format!("{default} is checked out in a worktree, so the ref was not moved"),
+                    );
+                    return Ok(None);
+                }
+                git.update_ref(&local, &to, &local_commit)?;
+            }
+        }
+        let from = git.head_oid_in(path)?;
+        if from == to {
+            return Ok(None);
+        }
+        if git.tracked_modified(path)? {
+            stay(
+                "ANCHOR_DIRTY",
+                "the canonical has modified tracked files; it was not moved".to_owned(),
+            );
+            return Ok(None);
+        }
+        return if git.checkout_detach(path, &to)? {
+            Ok(Some(MovedReport { from, to }))
+        } else {
+            notices.push(Notice {
+                level: NoticeLevel::Warn,
+                code: "ANCHOR_NOT_MOVED".to_owned(),
+                subject,
+                message: format!("git refused to move the canonical to origin/{default}"),
+            });
+            Ok(None)
+        };
+    }
     let checked_out = git.head_branch(path)?;
     if checked_out.as_deref() != Some(default) {
         stay(

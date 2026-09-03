@@ -389,6 +389,18 @@ pub struct LabelRec {
     pub registered_at: String,
     pub trees_dir: Option<AbsPath>,
     pub default_branch: Option<String>,
+    /// Whose checkout the canonical is (§11.6): the user's own, registered
+    /// as it stands, or one wt made from a bare hub by `clone` and may move.
+    #[serde(default)]
+    pub owner: Owner,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Owner {
+    #[default]
+    User,
+    Wt,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -800,6 +812,7 @@ mod tests {
                     registered_at: "TIME".to_owned(),
                     trees_dir: Some(AbsPath::new("/trees/repo").unwrap()),
                     default_branch: Some("main".to_owned()),
+                    owner: Owner::User,
                 },
             )]),
             trees: vec![TreeRec {

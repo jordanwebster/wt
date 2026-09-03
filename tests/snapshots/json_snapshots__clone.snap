@@ -17,18 +17,19 @@ expression: "normalize(value, &h.root)"
       "tasks": []
     },
     "gitdir_id": "<gitdir_id>",
+    "hub": "$ROOT/clone/hub.git",
     "label": "clone",
-    "path": "$ROOT/clone",
+    "path": "$ROOT/clone/canonical",
     "registered": true,
     "resumed": false,
     "tree": {
       "agent": null,
       "behind_default": 0,
-      "branch": "main",
+      "branch": null,
       "build": null,
       "build_kb": null,
       "canonical": true,
-      "detached_sha": null,
+      "detached_sha": "<detached_sha>",
       "dirty": {
         "modified": 0,
         "untracked": 0
@@ -42,7 +43,7 @@ expression: "normalize(value, &h.root)"
       "label": "clone",
       "meta": {},
       "name": "canonical",
-      "path": "$ROOT/clone",
+      "path": "$ROOT/clone/canonical",
       "phase": "ready",
       "ports": [],
       "resources": [],
@@ -57,10 +58,7 @@ expression: "normalize(value, &h.root)"
       },
       "target": "clone",
       "tree_id": "<tree_id>",
-      "upstream": {
-        "ahead": 0,
-        "behind": 0
-      },
+      "upstream": null,
       "verify": null
     },
     "url": "$ROOT/repos/source"

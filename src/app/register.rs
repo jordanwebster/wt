@@ -22,7 +22,7 @@ pub(crate) fn run(context: &mut Context, args: Register) -> Result<Output, CoreE
         args.label,
         args.move_to,
         args.repair,
-        false,
+        wt_core::model::Owner::User,
     )
 }
 
@@ -32,10 +32,10 @@ pub(crate) fn perform(
     label_arg: Option<String>,
     move_to: Option<PathBuf>,
     repair: bool,
-    cloned: bool,
+    owner: wt_core::model::Owner,
 ) -> Result<Output, CoreError> {
     let backend_notice = resolve_session_backend(context)?;
-    let output = perform_with_backend(context, path, label_arg, move_to, repair, cloned)?;
+    let output = perform_with_backend(context, path, label_arg, move_to, repair, owner)?;
     Ok(if let Some(notice) = backend_notice {
         output.with_notices([notice])
     } else {
@@ -49,8 +49,9 @@ fn perform_with_backend(
     label_arg: Option<String>,
     move_to: Option<PathBuf>,
     repair: bool,
-    cloned: bool,
+    owner: wt_core::model::Owner,
 ) -> Result<Output, CoreError> {
+    let cloned = owner == wt_core::model::Owner::Wt;
     if repair && move_to.is_some() {
         return Err(CoreError::new(
             ExitClass::Usage,
@@ -250,6 +251,7 @@ fn perform_with_backend(
                 registered_at: now.clone(),
                 trees_dir: None,
                 default_branch: None,
+                owner,
             },
         );
         registry.trees.push(tree.clone());

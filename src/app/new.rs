@@ -147,6 +147,25 @@ fn create_tree(
             .unwrap_or_else(|| target.name.clone()),
         _ => creation_branch(context, &canonical, &target, &args, &meta, head.known())?,
     };
+    // The default branch is a ref wt keeps at origin's tip; no tree checks
+    // it out (§11.2, A81). Decided before anything is allocated, so the
+    // refusal leaves no claimed entry behind.
+    if !args.detach && existing.is_none() {
+        let default = match label.default_branch.clone() {
+            Some(default) => default,
+            None => context
+                .git(Path::new(canonical.path.as_str()))?
+                .default_branch()?,
+        };
+        if requested_branch == default {
+            return Err(CoreError::new(
+                ExitClass::Usage,
+                "DEFAULT_BRANCH_RESERVED",
+                format!("`{default}` is the default branch, which wt keeps in step with origin and never checks out"),
+                "work on a branch of your own: `--branch <name>`, or a tree name that is not the default branch",
+            ));
+        }
+    }
     let requested_start = args.from_ref.clone();
     if let Some(existing) = existing {
         let state = context.read_state(&target)?;
@@ -503,11 +522,13 @@ fn add_worktree(
                 unreachable!("pull requests resolve before plain references")
             }
         }
-    } else if git.ref_exists(&format!("refs/remotes/origin/{default}"))? {
-        format!("refs/remotes/origin/{default}")
     } else {
-        format!("refs/heads/{default}")
+        default_start(&git, canonical, &default, args.no_fetch, &mut notices)?
     };
+    // A branch from the default branch tracks it, as one from
+    // `origin/<default>` did: `ls` then reads ahead/behind against the one
+    // ref that means "default" (§11.2, A81).
+    let track = start.starts_with("refs/remotes/") || start == format!("refs/heads/{default}");
     let default = match discovered {
         Some(value) => value,
         None => git.default_branch()?,
@@ -526,14 +547,8 @@ fn add_worktree(
             Ok(())
         })?;
     }
-    let spec = wt_core::from_ref::add_spec(
-        &branch,
-        &start,
-        args.detach,
-        branch_exists,
-        false,
-        start.starts_with("refs/remotes/"),
-    )?;
+    let spec =
+        wt_core::from_ref::add_spec(&branch, &start, args.detach, branch_exists, false, track)?;
     git.worktree_add(Path::new(tree.path.as_str()), &spec)?;
     // Wt-created worktrees get git's own exact status caches. Best-effort:
     // a tree is never lost to a failed optimisation, and doctor reports
@@ -1227,6 +1242,78 @@ fn tree_path(context: &Context, label: &wt_core::model::LabelRec, target: &Targe
 /// effort by design: a canonical that was never built, a filesystem that
 /// cannot clone, and a directory already present all leave the tree cold and
 /// say so in a notice, because a cold tree is merely slower.
+/// The start of a creation that names none: the local default branch,
+/// brought to origin's tip first (§11.2). Fast-forward only — by moving the
+/// ref when no worktree holds the branch, by `merge --ff-only` when the
+/// canonical holds it and has no modified tracked file. When neither is
+/// possible the start is `origin/<default>` and says so; when local has
+/// commits origin lacks, they are part of the start and that is said too.
+fn default_start(
+    git: &wt_sys::git::Git,
+    canonical: &TreeRec,
+    default: &str,
+    no_fetch: bool,
+    notices: &mut Vec<Notice>,
+) -> Result<String, CoreError> {
+    let local = format!("refs/heads/{default}");
+    let remote = format!("refs/remotes/origin/{default}");
+    let local_exists = git.ref_exists(&local)?;
+    if !git.ref_exists(&remote)? {
+        return Ok(if local_exists { local } else { remote });
+    }
+    if !local_exists || no_fetch {
+        return Ok(if local_exists { local } else { remote });
+    }
+    let (Some(local_commit), Some(remote_commit)) =
+        (git.resolve_commit(&local)?, git.resolve_commit(&remote)?)
+    else {
+        return Ok(remote);
+    };
+    if local_commit == remote_commit {
+        return Ok(local);
+    }
+    let mut say = |code: &str, message: String| {
+        notices.push(Notice {
+            level: NoticeLevel::Info,
+            code: code.to_owned(),
+            subject: Some(canonical.label.to_string()),
+            message,
+        });
+    };
+    if !git.is_ancestor(&local_commit, &remote_commit)? {
+        say(
+            "DEFAULT_DIVERGED",
+            format!("local {default} has commits origin/{default} does not; the tree starts from local {default}"),
+        );
+        return Ok(local);
+    }
+    match git.branch_holder(default)? {
+        None => {
+            git.update_ref(&local, &remote_commit, &local_commit)?;
+            Ok(local)
+        }
+        Some(holder) if holder == Path::new(canonical.path.as_str()) => {
+            let path = Path::new(canonical.path.as_str());
+            if !git.tracked_modified(path)? && git.merge_ff_only(path, &remote)? {
+                Ok(local)
+            } else {
+                say(
+                    "DEFAULT_NOT_UPDATED",
+                    format!("the canonical has {default} checked out with local changes, so it was not fast-forwarded; the tree starts from origin/{default}"),
+                );
+                Ok(remote)
+            }
+        }
+        Some(holder) => {
+            say(
+                "DEFAULT_NOT_UPDATED",
+                format!("{default} is checked out at {}, so it was not fast-forwarded; the tree starts from origin/{default}", holder.display()),
+            );
+            Ok(remote)
+        }
+    }
+}
+
 fn seed_from_canonical(
     canonical: &Path,
     root: &Path,

@@ -175,6 +175,7 @@ fn render_clone(data: CloneData, notices: &[Notice]) -> String {
         headline,
         vec![
             ("url", data.url),
+            ("hub", data.hub),
             ("path", data.register.path),
             ("phase", data.register.tree.phase),
         ],

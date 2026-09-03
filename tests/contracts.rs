@@ -5695,23 +5695,25 @@ fn lifecycle_verbs_refresh_the_anchor_only_for_labels_that_seed() {
         .unwrap()
         .unwrap()
     };
-    // `new` fetched already, so its refresh skips the fetch and
-    // fast-forwards to the tip `new` brought in.
+    // `new` brought the canonical to the tip it fetched before branching
+    // (§11.2); its refresh then skips the fetch, finds nothing to move, and
+    // builds the canonical at that commit.
+    assert_eq!(
+        common::git_stdout(&repo, &["rev-parse", "HEAD"]).trim(),
+        tip
+    );
     let deadline = Instant::now() + Duration::from_secs(20);
     while read_state().build.and_then(|build| build.head).as_deref() != Some(tip.as_str()) {
         assert!(
             Instant::now() < deadline,
-            "new's refresh never moved the canonical"
+            "new's refresh never built the canonical"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
     wait_for_text(&canonical_status, "ok\n");
     // The refresh writes its own report as it exits, after the build's
     // status; wait for it rather than reading a half-written log.
-    let log = wait_for_contains(
-        &anchor_log,
-        "Refreshed repo at the default branch's new tip",
-    );
+    let log = wait_for_contains(&anchor_log, "repo is at the default branch's tip");
     assert!(!log.contains("fetch"), "{log}");
 
     // `rm` refreshes with a fetch: the canonical catches up with a commit
@@ -5742,4 +5744,298 @@ fn lifecycle_verbs_refresh_the_anchor_only_for_labels_that_seed() {
     assert!(!plain.join(".wt/logs/wt-anchor.log").exists());
     assert!(!plain.join(".wt/build.status").exists());
     let _ = plain_target;
+}
+
+#[test]
+fn clone_makes_a_hub_and_a_detached_canonical_that_new_branches_from() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let source = h.repo("source", "");
+    let origin = h.repos.join("source-origin.git");
+    let base = h.root.join("hub");
+    let cloned = h.json(&[
+        "clone",
+        origin.to_str().unwrap(),
+        "--label",
+        "hub",
+        "--path",
+        base.to_str().unwrap(),
+    ]);
+    assert_eq!(cloned["data"]["cloned"], true);
+    let hub = base.join("hub.git");
+    let canonical = base.join("canonical");
+    assert_eq!(
+        cloned["data"]["hub"].as_str().unwrap(),
+        wt_sys::fsx::canonicalize(&hub).unwrap().to_string_lossy()
+    );
+    assert_eq!(
+        cloned["data"]["path"].as_str().unwrap(),
+        wt_sys::fsx::canonicalize(&canonical)
+            .unwrap()
+            .to_string_lossy()
+    );
+    assert_eq!(
+        common::git_stdout(&hub, &["rev-parse", "--is-bare-repository"]).trim(),
+        "true"
+    );
+    // The canonical is detached at the default branch; the branch is a ref
+    // nothing holds, kept at origin's tip.
+    assert_eq!(cloned["data"]["tree"]["branch"], serde_json::Value::Null);
+    let tip = common::git_stdout(&source, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    assert_eq!(
+        common::git_stdout(&canonical, &["rev-parse", "HEAD"]).trim(),
+        tip
+    );
+    assert_eq!(
+        common::git_stdout(&hub, &["rev-parse", "refs/heads/main"]).trim(),
+        tip
+    );
+    assert_eq!(
+        common::git_stdout(&hub, &["symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/main"
+    );
+    assert_eq!(
+        common::git_stdout(&hub, &["branch", "--list"])
+            .trim()
+            .trim_start_matches('*')
+            .trim(),
+        "main"
+    );
+    let registry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(h.home.join("registry.json")).unwrap())
+            .unwrap();
+    assert_eq!(registry["labels"]["hub"]["owner"], "wt");
+    // A second clone is idempotent.
+    let again = h.json(&[
+        "clone",
+        origin.to_str().unwrap(),
+        "--label",
+        "hub",
+        "--path",
+        base.to_str().unwrap(),
+    ]);
+    assert_eq!(again["data"]["cloned"], false);
+    assert_eq!(again["data"]["registered"], false);
+
+    // No tree checks the default branch out.
+    let refused = h
+        .wt()
+        .args(["new", "hub/main", "--no-sync", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(2));
+    let envelope: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "DEFAULT_BRANCH_RESERVED");
+
+    // A tree branches from the local default branch after `new` brought it
+    // to origin's tip, and tracks it.
+    let tip2 = advance_origin(&h, "source", "two.txt");
+    let created = h.json(&["new", "hub/feat", "--no-sync"]);
+    let tree = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
+    assert_eq!(
+        common::git_stdout(&tree, &["rev-parse", "HEAD"]).trim(),
+        tip2
+    );
+    assert_eq!(
+        common::git_stdout(&hub, &["rev-parse", "refs/heads/main"]).trim(),
+        tip2
+    );
+    assert_eq!(
+        common::git_stdout(&tree, &["rev-parse", "--abbrev-ref", "@{u}"]).trim(),
+        "main"
+    );
+    assert_eq!(created["data"]["tree"]["upstream"]["behind"], 0);
+    // The canonical itself has not moved yet: that is the refresh's job.
+    assert_eq!(
+        common::git_stdout(&canonical, &["rev-parse", "HEAD"]).trim(),
+        tip
+    );
+    let refreshed = h.json(&["anchor", "hub"]);
+    assert_eq!(refreshed["data"]["moved"]["from"], tip);
+    assert_eq!(refreshed["data"]["moved"]["to"], tip2);
+    assert_eq!(
+        common::git_stdout(&canonical, &["rev-parse", "HEAD"]).trim(),
+        tip2
+    );
+    assert!(canonical.join("two.txt").exists());
+    assert_eq!(
+        common::git_stdout(&canonical, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "HEAD",
+        "the canonical stays detached"
+    );
+    // A modified tracked file in the canonical keeps it where it is; the
+    // ref still moves.
+    let tip3 = advance_origin(&h, "source", "three.txt");
+    common::write(&canonical.join("README.md"), "edited\n");
+    let dirty = h.json(&["anchor", "hub"]);
+    assert!(dirty["data"]["moved"].is_null());
+    assert!(dirty["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "ANCHOR_DIRTY"));
+    assert_eq!(
+        common::git_stdout(&hub, &["rev-parse", "refs/heads/main"]).trim(),
+        tip3
+    );
+    assert_eq!(
+        common::git_stdout(&canonical, &["rev-parse", "HEAD"]).trim(),
+        tip2
+    );
+    common::git(&canonical, &["checkout", "--", "README.md"]);
+
+    // `ls` measures trees against the local default branch.
+    let listed = h.json(&["ls", "hub"]);
+    let feat = listed["data"]["trees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tree| tree["target"] == "hub/feat")
+        .unwrap();
+    assert_eq!(feat["behind_default"], 1);
+
+    // A relative --path and a repository named by a relative path resolve
+    // against the caller's directory, not the hub git runs in.
+    let relative = h
+        .wt()
+        .current_dir(&h.root)
+        .args([
+            "clone",
+            "repos/source-origin.git",
+            "--label",
+            "rel",
+            "--path",
+            "relative-hub",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        relative.status.success(),
+        "{}",
+        String::from_utf8_lossy(&relative.stdout)
+    );
+    assert!(h.root.join("relative-hub/hub.git").is_dir());
+    assert!(h.root.join("relative-hub/canonical/README.md").exists());
+    assert!(!h.root.join("relative-hub/hub.git/relative-hub").exists());
+
+    // A remote that cannot be reached leaves no half-made hub behind, so
+    // the retry the error asks for is a clean clone.
+    let missing = h.root.join("nowhere.git");
+    let failed = h
+        .wt()
+        .args([
+            "clone",
+            missing.to_str().unwrap(),
+            "--label",
+            "gone",
+            "--path",
+            h.root.join("gone").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(!h.root.join("gone/hub.git").exists());
+
+    // Unregistering leaves the hub and canonical, and says where they are.
+    h.json(&["rm", "hub/feat", "--yes"]);
+    let unregistered = h.json(&["unregister", "hub", "--yes"]);
+    let kept = unregistered["data"]["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|artifact| artifact["action"] == "kept")
+        .map(|artifact| artifact["path"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        kept.iter().any(|path| path.ends_with("hub.git")),
+        "{kept:?}"
+    );
+    assert!(
+        kept.iter().any(|path| path.ends_with("canonical")),
+        "{kept:?}"
+    );
+    assert!(hub.exists() && canonical.exists());
+}
+
+#[test]
+fn new_brings_the_local_default_branch_to_origin_before_branching() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo("repo", "");
+    h.register(&repo);
+
+    // A clean canonical on the default branch is fast-forwarded in place.
+    let tip = advance_origin(&h, "repo", "one.txt");
+    let created = h.json(&["new", "repo/a", "--no-sync"]);
+    let tree_a = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
+    assert_eq!(
+        common::git_stdout(&tree_a, &["rev-parse", "HEAD"]).trim(),
+        tip
+    );
+    assert_eq!(
+        common::git_stdout(&repo, &["rev-parse", "HEAD"]).trim(),
+        tip
+    );
+    assert!(repo.join("one.txt").exists());
+    assert_eq!(
+        common::git_stdout(&tree_a, &["rev-parse", "--abbrev-ref", "@{u}"]).trim(),
+        "main"
+    );
+
+    // Local changes in the canonical: it stays, and the tree starts from
+    // origin's tip instead, saying so.
+    let tip2 = advance_origin(&h, "repo", "two.txt");
+    common::write(&repo.join("README.md"), "edited\n");
+    let created = h.json(&["new", "repo/b", "--no-sync"]);
+    let tree_b = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
+    assert_eq!(
+        common::git_stdout(&tree_b, &["rev-parse", "HEAD"]).trim(),
+        tip2
+    );
+    assert_eq!(
+        common::git_stdout(&repo, &["rev-parse", "HEAD"]).trim(),
+        tip
+    );
+    assert!(created["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "DEFAULT_NOT_UPDATED"));
+    common::git(&repo, &["checkout", "--", "README.md"]);
+
+    // Local commits origin lacks are part of the start, never reset.
+    common::git(&repo, &["merge", "-q", "--ff-only", "origin/main"]);
+    common::write(&repo.join("local.txt"), "local\n");
+    common::git(&repo, &["add", "-A"]);
+    common::git(&repo, &["commit", "-qm", "local only"]);
+    let local = common::git_stdout(&repo, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let created = h.json(&["new", "repo/c", "--no-sync"]);
+    let tree_c = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
+    assert_eq!(
+        common::git_stdout(&tree_c, &["rev-parse", "HEAD"]).trim(),
+        local
+    );
+    assert!(created["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "DEFAULT_DIVERGED"));
+    assert_eq!(
+        common::git_stdout(&repo, &["rev-parse", "HEAD"]).trim(),
+        local
+    );
+
+    // `--no-fetch` branches from the local default branch as it stands.
+    let created = h.json(&["new", "repo/d", "--no-sync", "--no-fetch"]);
+    let tree_d = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
+    assert_eq!(
+        common::git_stdout(&tree_d, &["rev-parse", "HEAD"]).trim(),
+        local
+    );
 }

@@ -1512,3 +1512,46 @@ by the sweep on purpose: each command reuses its own, and deleting them
 after every build would make `wt lint` recompile every dependency's
 metadata each time. Retiring the feature variants is `cargo hakari`'s job,
 which remains open on the repository side.
+
+## A81. `clone` makes a hub wt owns, and every tree branches from a default branch nothing checks out
+
+Two habits the seed and anchor work exposed. First, the canonical checkout
+in the register model is the user's own clone with the default branch
+checked out, so "work on `main` by accident" is one `cd` away and wt could
+only ever move that checkout by fast-forward when it happened to be clean.
+Second, `new` branched from `origin/<default>` after a fetch while `ls`
+and `drift` compared against the same remote ref, and the user's local
+`main` — the one they see in their canonical — drifted behind both, so
+"default" meant two things depending on where one looked.
+
+`wt clone` now produces a repository wt owns (§11.6): a bare hub with an
+ordinary `origin` and exactly one local branch, the default, plus a
+canonical checkout that is a worktree of the hub detached at that branch's
+commit. Nothing ever checks the default branch out. It is a ref wt keeps
+at origin's tip — moved directly when no worktree holds it, fast-forwarded
+in place when a user-owned canonical holds it and is clean — and the
+canonical is brought along by re-detaching it, in the anchor refresh
+(§11.10), never by a reset. `unregister` leaves the hub and canonical
+where they are and says so: they hold every branch the label ever kept.
+The register model stays exactly as it was for users who keep their own
+clone; the registry records which kind each canonical is.
+
+`new` now starts from local `<default>` after bringing it to origin's tip
+(§11.2), and refuses to create a tree on the default branch in either
+model. Where the fast-forward is not possible — the canonical has local
+changes, or another worktree holds the branch — the tree starts from
+`origin/<default>` and says so, since a silently stale start would be the
+worse outcome; where local `<default>` has commits origin lacks, they are
+part of the start and that is said too. A tree created this way tracks the
+local default branch, as one created from `origin/<default>` tracked the
+remote one, and `ls`, `status` and `drift` measure against the local
+branch, so there is one meaning of "default" everywhere wt reports one.
+`--no-fetch` starts from local `<default>` as it stands, which now includes
+unpushed local commits without any flag.
+
+Two things are deliberately not done. Nothing migrates a registered
+repository into the clone model: the user's checkout is theirs, and
+`wt clone` beside it followed by `wt unregister` of the old label is the
+migration when they want one. And the hub is never deleted by wt: an
+`unregister` that removed it would remove branches whose commits may exist
+nowhere else.

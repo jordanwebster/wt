@@ -12,6 +12,7 @@ expression: envelope
   "data": {
     "url": "https://example.test/repo",
     "cloned": true,
+    "hub": "/wt/repos/repo/hub.git",
     "label": "repo",
     "path": "/repo",
     "gitdir_id": "HASH",

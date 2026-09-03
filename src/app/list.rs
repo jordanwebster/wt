@@ -159,11 +159,7 @@ impl ReportEnv {
             let facts = (|| {
                 let git = context.git(Path::new(tree.path.as_str()))?;
                 let shared_default_ref = match git.default_branch_shared()? {
-                    Some(default) => {
-                        let default_ref = format!("refs/remotes/origin/{default}");
-                        let exists = git.ref_exists(&default_ref)?;
-                        Some((default_ref, exists))
-                    }
+                    Some(default) => Some(default_ref_of(&git, &default)?),
                     None => None,
                 };
                 Ok(LabelGitFacts { shared_default_ref })
@@ -224,13 +220,27 @@ impl ReportEnv {
             // chain here, as the sequential read would have.
             None => match git.default_branch_shared()? {
                 Some(default) => {
-                    let default_ref = format!("refs/remotes/origin/{default}");
-                    Ok(git.ref_exists(&default_ref)?.then_some(default_ref))
+                    let (default_ref, exists) = default_ref_of(git, &default)?;
+                    Ok(exists.then_some(default_ref))
                 }
                 None => head_fallback_default_ref(git, branch),
             },
         }
     }
+}
+
+/// The ref a tree is measured against: the local default branch, which
+/// `new` and `anchor` keep at origin's tip (§11.2, §11.10), so there is one
+/// meaning of "default"; `origin/<default>` only while no local branch of
+/// that name exists.
+fn default_ref_of(git: &wt_sys::git::Git, default: &str) -> Result<(String, bool), CoreError> {
+    let local = format!("refs/heads/{default}");
+    if git.ref_exists(&local)? {
+        return Ok((local, true));
+    }
+    let remote = format!("refs/remotes/origin/{default}");
+    let exists = git.ref_exists(&remote)?;
+    Ok((remote, exists))
 }
 
 /// The final step of the default-branch chain: the worktree's own HEAD
@@ -239,8 +249,8 @@ fn head_fallback_default_ref(
     git: &wt_sys::git::Git,
     branch: Option<&str>,
 ) -> Result<Option<String>, CoreError> {
-    let default_ref = format!("refs/remotes/origin/{}", branch.unwrap_or("main"));
-    Ok(git.ref_exists(&default_ref)?.then_some(default_ref))
+    let (default_ref, exists) = default_ref_of(git, branch.unwrap_or("main"))?;
+    Ok(exists.then_some(default_ref))
 }
 
 /// Builds every report through a small worker pool: each report is an
