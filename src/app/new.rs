@@ -1278,11 +1278,7 @@ fn seed_from_canonical(
             level: NoticeLevel::Info,
             code: "SEED_CLONED".to_owned(),
             subject: Some(target.to_owned()),
-            message: format!(
-                "seeded {} from {}",
-                seeded.join(", "),
-                canonical.display()
-            ),
+            message: format!("seeded {} from {}", seeded.join(", "), canonical.display()),
         }
     });
     Ok(())

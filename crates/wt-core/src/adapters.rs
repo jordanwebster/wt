@@ -581,13 +581,13 @@ mod tests {
         assert!(detect(&snapshot, &disabled).unwrap().is_empty());
 
         let hits = detect(&snapshot, &BTreeMap::new()).unwrap();
-        let contribution = contribution(&hits).unwrap();
-        assert!(contribution.sync_inputs.contains(&"Cargo.toml".to_owned()));
+        let contributed = contribution(&hits).unwrap();
+        assert!(contributed.sync_inputs.contains(&"Cargo.toml".to_owned()));
         // The tree's build lives in its own `target/`: no cargo directory
         // variable of any kind, and the compiled dependencies arrive by seed.
-        assert!(!contribution.env.keys().any(|key| key.starts_with("CARGO")));
+        assert!(!contributed.env.keys().any(|key| key.starts_with("CARGO")));
         assert_eq!(
-            contribution.seed,
+            contributed.seed,
             vec![
                 "target/debug/.fingerprint".to_owned(),
                 "target/debug/build".to_owned(),
@@ -600,7 +600,7 @@ mod tests {
             .iter()
             .any(|nudge| nudge.want == "sccache"));
         let mut config = Config::default();
-        apply_contribution(&mut config, &contribution).unwrap();
+        apply_contribution(&mut config, &contributed).unwrap();
         assert!(config
             .sync_inputs
             .iter()

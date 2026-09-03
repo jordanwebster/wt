@@ -3970,10 +3970,7 @@ fn cargo_sets_no_build_directory_and_seeds_a_tree_from_the_canonical_build() {
         );
         // Copy-on-write: a rebuild in the tree leaves the canonical as it was.
         common::write(&linked.join(rlib), "rebuilt\n");
-        assert_eq!(
-            std::fs::read_to_string(repo.join(rlib)).unwrap(),
-            "rlib\n"
-        );
+        assert_eq!(std::fs::read_to_string(repo.join(rlib)).unwrap(), "rlib\n");
         true
     } else {
         assert!(codes.contains(&"SEED_SKIPPED"), "{codes:?}");
