@@ -33,6 +33,7 @@ fn human_command_transcripts() {
 
     transcript(&h, "register", &["register", repo.to_str().unwrap()]);
     transcript(&h, "new", &["new", "repo/work", "--no-sync"]);
+    wait_for_build(&h, "repo/work");
     transcript(&h, "list", &["list"]);
     transcript(&h, "status", &["status", "repo/work"]);
     transcript(&h, "doctor", &["doctor", "repo"]);
@@ -265,6 +266,23 @@ fn every_successful_verb_uses_intentional_human_text() {
     human(&h, &["exec", "repo", "--", "printf", "exec"], b"");
     human(&h, &["shell", "repo"], b"exit\n");
     human(&h, &["unregister", "repo", "--yes"], b"");
+}
+
+/// The automatic build detaches from `new`, so a transcript taken right
+/// after it would describe whichever moment the supervisor happened to be
+/// at; the transcripts that follow describe a settled tree.
+fn wait_for_build(h: &Harness, target: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if h.json(&["status", target])["data"]["build"]["state"] != "running" {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "build of {target} never settled"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 fn transcript(h: &Harness, name: &str, args: &[&str]) {
