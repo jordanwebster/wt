@@ -12,15 +12,15 @@ hint = "install sccache and set rustc-wrapper = \"sccache\" in ~/.cargo/config.t
 requires = "cargo"
 sync_inputs = ["Cargo.lock", "Cargo.toml"]
 
-# One build directory per worktree, outside the tree so creation and removal
-# stay cheap. The directory is never shared between trees: Cargo's unit hashes
-# omit the workspace path, so two checkouts of one workspace write the same
-# slots and corrupt each other's build-script output and freshness state.
-# Cross-tree reuse belongs to content-addressed layers (sccache, CARGO_HOME)
-# instead. CARGO_TARGET_DIR must remain unset so each tree's binary stays in
-# its own target directory (SPEC §9.2a).
-[tools.cargo.env]
-CARGO_BUILD_BUILD_DIR = "{{home()}}/cache/cargo-build/{{label()}}/{{name_short()}}"
+# A new tree starts with the canonical checkout's compiled dependencies: these
+# directories are cloned copy-on-write from it when the filesystem can, and
+# the tree stays cold otherwise. Nothing is ever byte-copied. The build
+# directory itself is never shared between trees: Cargo's unit hashes omit the
+# workspace path, so two checkouts of one workspace write the same slots and
+# corrupt each other's build-script output and freshness state. The uplifted
+# binaries directly under target/debug are deliberately not listed, so a tree
+# only ever runs what it linked itself (SPEC §9.2a).
+seed = ["target/debug/.fingerprint", "target/debug/build", "target/debug/deps", "target/debug/incremental"]
 
 [tools.cargo.task.sync]
 run = "cargo fetch"
@@ -45,9 +45,8 @@ sniff = [
   { file = ".rustfmt.toml", toml_key = "imports_granularity" },
 ]
 
-# Keep output ownership identical to the regular cargo tool above.
-[tools.cargo-nightly-fmt.env]
-CARGO_BUILD_BUILD_DIR = "{{home()}}/cache/cargo-build/{{label()}}/{{name_short()}}"
+# Seeds exactly as the regular cargo tool above.
+seed = ["target/debug/.fingerprint", "target/debug/build", "target/debug/deps", "target/debug/incremental"]
 
 [tools.cargo-nightly-fmt.task.sync]
 run = "cargo fetch"

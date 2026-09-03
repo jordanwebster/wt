@@ -2455,60 +2455,6 @@ fn doctor_reports_and_prune_deletes_state_orphans() {
 }
 
 #[test]
-fn doctor_reports_and_prune_deletes_cache_orphans_and_remove_reaps_the_tree_cache() {
-    let h = Harness::new();
-    let repo = h.repo("repo", BASIC);
-    h.register(&repo);
-    h.json(&["new", "repo/work", "--no-sync"]);
-    let live = h
-        .home
-        .join("cache/cargo-build/repo")
-        .join(wt_core::model::name_short("repo", "work"));
-    wt_sys::fsx::create_private_dir(&live).unwrap();
-    common::write(&live.join("marker"), "built\n");
-    // Debris from the retired per-repository layout, and a label no longer
-    // registered: both are orphans; the live tree's directory is not.
-    let legacy = h.home.join("cache/cargo-build/repo/debug");
-    wt_sys::fsx::create_private_dir(&legacy).unwrap();
-    let foreign = h.home.join("cache/cargo-build/unregistered");
-    wt_sys::fsx::create_private_dir(&foreign).unwrap();
-
-    let findings = h.json(&["doctor"])["data"]["findings"].clone();
-    let orphaned = findings
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|finding| finding["code"] == "CACHE_ORPHAN")
-        .filter_map(|finding| finding["subject"].as_str().map(str::to_owned))
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        orphaned,
-        BTreeSet::from([
-            "cargo-build/repo/debug".to_owned(),
-            "cargo-build/unregistered".to_owned(),
-        ])
-    );
-
-    let applied = h.json(&["prune", "--yes"]);
-    assert!(applied["data"]["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|item| item["action"] == "delete-cache" && item["result"]["deleted"] == true));
-    assert!(!legacy.exists());
-    assert!(!foreign.exists());
-    assert!(live.exists());
-
-    let removed = h.json(&["remove", "repo/work", "--yes", "--force"]);
-    assert_eq!(removed["data"]["removed"], true);
-    assert_eq!(
-        removed["data"]["cache_deleted"],
-        live.to_string_lossy().as_ref()
-    );
-    assert!(!live.exists());
-}
-
-#[test]
 fn remove_keep_orphans_leaves_a_missing_live_entry() {
     let h = Harness::new();
     let repo = h.repo(
@@ -3969,9 +3915,8 @@ fn copy_populates_declared_paths_and_refuses_tracked_sources() {
 }
 
 #[test]
-fn cargo_keys_intermediates_per_tree_and_keeps_tree_outputs_local() {
+fn cargo_sets_no_build_directory_and_seeds_a_tree_from_the_canonical_build() {
     let h = Harness::new();
-    configure_backend_none(&h);
     common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
     let repo = h.repo("repo", "");
     common::write(
@@ -3983,46 +3928,72 @@ fn cargo_keys_intermediates_per_tree_and_keeps_tree_outputs_local() {
     common::git(&repo, &["commit", "-qm", "add cargo fixture"]);
     common::git(&repo, &["push", "-q", "origin", "main"]);
     h.register(&repo);
-    h.json(&["new", "repo/work", "--no-sync", "--no-build"]);
+    // A built canonical: compiled dependencies, and beside them the uplifted
+    // binary that must never travel — a tree runs only what it linked.
+    let rlib = "target/debug/deps/libfixture-0123456789abcdef.rlib";
+    common::write(&repo.join(rlib), "rlib\n");
+    common::write(
+        &repo.join("target/debug/.fingerprint/fixture-0123456789abcdef/lib-fixture"),
+        "fingerprint\n",
+    );
+    common::write(&repo.join("target/debug/fixture"), "binary\n");
+
+    let created = h.json(&["new", "repo/work", "--no-sync", "--no-build"]);
     let canonical_env = h.json(&["env", "repo"])["data"]["env"].clone();
     let linked_env = h.json(&["env", "repo/work"])["data"]["env"].clone();
-    // One build directory per tree, grouped under the repository: Cargo's
-    // unit hashes ignore the workspace path, so trees sharing one directory
-    // would overwrite each other's build-script output and freshness state.
-    let repo_cache = h.home.join("cache/cargo-build/repo");
-    let canonical_dir = repo_cache.join(wt_core::model::name_short("repo", "canonical"));
-    let linked_dir = repo_cache.join(wt_core::model::name_short("repo", "work"));
-    assert_ne!(canonical_dir, linked_dir);
-    assert_eq!(
-        canonical_env["CARGO_BUILD_BUILD_DIR"],
-        canonical_dir.to_string_lossy().as_ref()
-    );
-    assert_eq!(
-        linked_env["CARGO_BUILD_BUILD_DIR"],
-        linked_dir.to_string_lossy().as_ref()
-    );
-    let overridden = h
-        .wt()
-        .env("CARGO_BUILD_BUILD_DIR", "/inherited/cargo-build")
-        .args(["env", "repo", "--json"])
-        .output()
-        .unwrap();
-    assert!(overridden.status.success());
-    let overridden: serde_json::Value = serde_json::from_slice(&overridden.stdout).unwrap();
-    assert_eq!(
-        overridden["data"]["env"]["CARGO_BUILD_BUILD_DIR"],
-        canonical_dir.to_string_lossy().as_ref()
-    );
-    assert!(overridden["data"]["overrode"]
+    // The whole build lives in the tree's own `target/`: no cargo directory
+    // variable of any kind, so a plain `cargo build` anywhere does the right
+    // thing and no two trees can address one another's units.
+    for env in [&canonical_env, &linked_env] {
+        assert!(env.get("CARGO_BUILD_BUILD_DIR").is_none());
+        assert!(env.get("CARGO_TARGET_DIR").is_none());
+    }
+    let linked = PathBuf::from(linked_env["WT_ROOT"].as_str().unwrap());
+    let codes = created["notices"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|key| key == "CARGO_BUILD_BUILD_DIR"));
-    assert!(canonical_env.get("CARGO_TARGET_DIR").is_none());
-    assert!(linked_env.get("CARGO_TARGET_DIR").is_none());
-    let canonical_target = PathBuf::from(canonical_env["WT_ROOT"].as_str().unwrap()).join("target");
-    let linked_target = PathBuf::from(linked_env["WT_ROOT"].as_str().unwrap()).join("target");
-    assert_ne!(canonical_target, linked_target);
+        .filter_map(|notice| notice["code"].as_str())
+        .collect::<Vec<_>>();
+    let seeded = if cfg!(target_os = "macos") {
+        assert!(codes.contains(&"SEED_CLONED"), "{codes:?}");
+        assert_eq!(
+            std::fs::read_to_string(linked.join(rlib)).unwrap(),
+            "rlib\n"
+        );
+        assert!(linked
+            .join("target/debug/.fingerprint/fixture-0123456789abcdef/lib-fixture")
+            .exists());
+        assert!(
+            !linked.join("target/debug/fixture").exists(),
+            "the uplifted binary was seeded"
+        );
+        // Copy-on-write: a rebuild in the tree leaves the canonical as it was.
+        common::write(&linked.join(rlib), "rebuilt\n");
+        assert_eq!(
+            std::fs::read_to_string(repo.join(rlib)).unwrap(),
+            "rlib\n"
+        );
+        true
+    } else {
+        assert!(codes.contains(&"SEED_SKIPPED"), "{codes:?}");
+        assert!(!linked.join("target").exists());
+        false
+    };
+    // Sizing follows the build output into the tree.
+    let listed = h.json(&["list", "repo", "--disk"]);
+    let work = listed["data"]["trees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tree| tree["target"] == "repo/work")
+        .unwrap()
+        .clone();
+    if seeded {
+        assert!(work["build_kb"].as_u64().unwrap() > 0);
+    } else {
+        assert!(work["build_kb"].is_null());
+    }
 
     let synced = h.json(&["sync", "repo/work"]);
     let inputs = synced["data"]["inputs"]
@@ -4036,26 +4007,10 @@ fn cargo_keys_intermediates_per_tree_and_keeps_tree_outputs_local() {
     common::proof_capture(
         "D1",
         format!(
-            "canonical build dir (per-tree): {}\nlinked build dir (per-tree): {}\nCARGO_TARGET_DIR set: false\ncanonical target: {}\nlinked target: {}\nsync inputs: {}",
-            canonical_env["CARGO_BUILD_BUILD_DIR"],
-            linked_env["CARGO_BUILD_BUILD_DIR"],
-            canonical_target.display(),
-            linked_target.display(),
+            "CARGO_BUILD_BUILD_DIR set: false\nCARGO_TARGET_DIR set: false\nseeded from canonical: {seeded}\nlinked target: {}\nsync inputs: {}",
+            linked.join("target").display(),
             inputs.iter().copied().collect::<Vec<_>>().join(", ")
         ),
-    );
-
-    common::write(
-        &repo.join("Cargo.toml"),
-        "[package]\nname='fixture'\nversion='0.2.0'\nedition='2021'\n",
-    );
-    common::git(&repo, &["add", "Cargo.toml"]);
-    common::git(&repo, &["commit", "-qm", "advance cargo input"]);
-    common::git(&repo, &["push", "-q", "origin", "main"]);
-    let status = h.json(&["status", "repo/work"]);
-    assert_eq!(
-        status["data"]["sync"]["drift"],
-        serde_json::json!(["Cargo.toml"])
     );
 }
 
@@ -4570,7 +4525,6 @@ fn doctor_manufactures_repository_capacity_lock_and_tooling_conditions() {
 fn doctor_condition_contracts_cover_every_documented_code() {
     let covered = BTreeSet::from([
         "STATE_ORPHAN",
-        "CACHE_ORPHAN",
         "REPO_PATH_MISSING",
         "TREE_REPLACED",
         "TREE_MISSING",

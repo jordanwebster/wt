@@ -5,7 +5,6 @@ use std::collections::BTreeSet;
 
 pub const CODES: &[&str] = &[
     "STATE_ORPHAN",
-    "CACHE_ORPHAN",
     "REPO_PATH_MISSING",
     "TREE_REPLACED",
     "TREE_MISSING",
@@ -229,16 +228,6 @@ pub fn state_orphan(subject: &str, path: &str) -> Finding {
         subject,
         format!("state file `{path}` has no live registry entry"),
         "run `wt prune` to delete the orphaned state file",
-    )
-}
-
-pub fn cache_orphan(subject: &str, path: &str) -> Finding {
-    Finding::new(
-        Severity::Info,
-        "CACHE_ORPHAN",
-        subject,
-        format!("cache path `{path}` belongs to no live worktree"),
-        "run `wt prune` to delete the orphaned cache",
     )
 }
 

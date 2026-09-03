@@ -164,18 +164,6 @@ fn plan(context: &Context, args: &Prune) -> Result<Vec<PruneItemReport>, CoreErr
             },
         );
     }
-    for path in cache_orphans(context, args.label.as_deref())? {
-        let target = path.to_string_lossy().into_owned();
-        planned.insert(
-            target.clone(),
-            PruneItemReport {
-                target,
-                reasons: vec!["cache-orphan".to_owned()],
-                action: "delete-cache".to_owned(),
-                result: None,
-            },
-        );
-    }
     for entry in stale_exclusive_entries(context, args.label.as_deref())? {
         planned.insert(
             entry.target.clone(),
@@ -303,24 +291,6 @@ fn apply(
             "delete-state" => {
                 wt_sys::fsx::remove_path(Path::new(&item.target))?;
                 item.result = Some(serde_json::json!({"deleted": true}));
-            }
-            "delete-cache" => {
-                // Planned paths are always inside the cache root; the
-                // contained delete re-derives that instead of trusting the
-                // report string, and never follows symlinks.
-                let cache_root = context.cache_root();
-                let deleted = Path::new(&item.target)
-                    .strip_prefix(&cache_root)
-                    .ok()
-                    .and_then(|relative| relative.to_str())
-                    .and_then(|relative| wt_core::model::RelPath::new(relative).ok())
-                    .map(|relative| wt_sys::fsx::remove_dir_all_nofollow(&cache_root, &relative))
-                    .transpose()?
-                    .unwrap_or(false);
-                if let Some(parent) = Path::new(&item.target).parent() {
-                    let _ = wt_sys::fsx::remove_empty_dir(parent);
-                }
-                item.result = Some(serde_json::json!({"deleted": deleted}));
             }
             "delete-exclusive" => {
                 let deleted = if let Some(entry) = exclusive_entries.get(&item.target) {
@@ -518,73 +488,6 @@ fn state_orphans(
                 .iter()
                 .any(|tree| tree.label.as_str() == label && tree.name == name);
             if !live {
-                output.push(path);
-            }
-        }
-    }
-    output.sort();
-    Ok(output)
-}
-
-/// Build-cache entries under `$WT_HOME/cache/cargo-build` that belong to no
-/// registered tree: an unregistered label's whole directory, and any entry
-/// under a registered label that is not a live or tombstoned `name_short`.
-/// The latter also covers migration from the retired per-repository layout,
-/// whose `debug/`-style contents can never match a `name_short`. Tombstoned
-/// names are kept because recreating the same address reuses its
-/// coordinates, so the cache would be adopted warm.
-pub(crate) fn cache_orphans(
-    context: &Context,
-    label_filter: Option<&str>,
-) -> Result<Vec<std::path::PathBuf>, CoreError> {
-    let mut output = Vec::new();
-    let root = context.cache_root().join("cargo-build");
-    if !matches!(
-        wt_sys::fsx::path_kind(&root)?,
-        wt_sys::fsx::PathKind::Directory
-    ) {
-        return Ok(output);
-    }
-    for label_dir in wt_sys::fsx::read_dir_paths(&root)? {
-        let Some(label) = label_dir.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if label_filter.is_some_and(|filter| filter != label) {
-            continue;
-        }
-        if !context
-            .registry
-            .labels
-            .keys()
-            .any(|known| known.as_str() == label)
-        {
-            output.push(label_dir);
-            continue;
-        }
-        if !matches!(
-            wt_sys::fsx::path_kind(&label_dir)?,
-            wt_sys::fsx::PathKind::Directory
-        ) {
-            continue;
-        }
-        for path in wt_sys::fsx::read_dir_paths(&label_dir)? {
-            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            let claimed = context
-                .registry
-                .trees
-                .iter()
-                .map(|tree| (tree.label.as_str(), tree.name_short()))
-                .chain(
-                    context
-                        .registry
-                        .tombstones
-                        .iter()
-                        .map(|tombstone| (tombstone.label.as_str(), tombstone.name_short())),
-                )
-                .any(|(owner, name_short)| owner == label && name_short == name);
-            if !claimed {
                 output.push(path);
             }
         }

@@ -1386,3 +1386,63 @@ tracks nothing by construction. Each gets the warning with the push that
 would reach the pull request, and the affirmative notice appears only when
 both witnesses agree — a push that lands somewhere else, however well it
 tracks, is the failure this addendum exists to end.
+
+## A79. A tree's build lives in its own `target/` and is seeded from the canonical by clone
+
+The per-tree build directory under `$WT_HOME/cache` (A64) was measured in
+production against the trees it served: one active amux tree held 39 GB
+after a day of agent work, and removing it took 78 seconds. The size was not
+the directory's fault — cargo keeps one artifact set per build configuration
+and never deletes a superseded one — but the directory had lost its reason to
+exist. It was introduced so trees could share intermediates (A53); that
+sharing was withdrawn when it corrupted builds (A64); what remained was a
+private directory outside the tree that was cold on creation, could be
+readopted warm only by recreating the same address, and needed its own orphan
+detection, prune action, sizing, and removal step.
+
+The tree's whole build now lives in its own `target/`. The cargo tools set no
+directory variable at all, so a plain `cargo build` in a tree does what any
+Rust developer expects, `cargo clean` works, and the build dies with the tree
+in `git worktree remove`. Two trees still never share a build directory, for
+the reason A64 established: Cargo's unit hashes omit the workspace path, so
+two checkouts sharing one directory silently hand each other their compiled
+crates — measured again on this round, an untouched tree reported a finished
+build whose library carried the other tree's symbol.
+
+Warmth comes from a seed, in the narrow form A45 reserved for build output:
+clone-only, never a copy. Adapter tools declare `seed` directories (§6.1);
+cargo names `target/debug/{.fingerprint,build,deps,incremental}`. At `new`
+S3, after `copy`, wt clones each from the canonical checkout into the tree
+copy-on-write (§11.8). The clone shares its blocks with the canonical until
+either side writes, so it costs neither time nor space in proportion to its
+contents; the tree then starts with the canonical's compiled dependencies and
+rebuilds only its own crates, whose sources cargo sees as newer. Measured on
+wt itself: clone, then `cargo build` compiled three workspace crates and no
+dependencies. The uplifted binaries directly under `target/debug` are not
+seeded, so a tree only ever runs what it linked itself (A41). A filesystem
+that cannot clone — another volume, or no whole-directory primitive, which
+today means anything but APFS — leaves the tree cold with a notice; a byte
+copy is never attempted, because a copy of build output is exactly the
+multi-gigabyte creation A53 retired. Whether cloning `incremental/` speeds
+the rebuild of the workspace crates or merely occupies space is a
+measurement not yet made; it stays in the list until it is.
+
+`seed` is the adapter's to declare and not a configuration key, so the
+unknown-key rule still refuses `seed` in a repository or user layer: the
+mechanism is per-ecosystem knowledge, which is where A46 put it. The cache
+root, `CACHE_ORPHAN`, the prune `delete-cache` action, `CACHE_DELETE_FAILED`,
+`cache_deleted` and `cache_kb` are gone; `list --disk` reports `build_kb`,
+the size of the top-level directories holding the seeded paths. A
+`$WT_HOME/cache/cargo-build` left by an earlier version is not reaped — there
+is no longer anything that knows the layout — and is safe to delete by hand.
+The sccache nudge stands: it shares compile time across machines, which a
+clone cannot.
+
+Two consequences are left for the anchor work that follows. The canonical
+is the seed, so it has to be built for the seed to be worth anything — today
+that is the user's job, and the canonicals on the measured machine had no
+build at all. And nothing yet reclaims superseded artifacts inside a live
+tree, so the plateau cargo reaches is still the plateau; the repository-side
+configuration changes made on this round (one feature set for every host
+command, no abort profile in dev) shrink that plateau from 39 GB to under
+7 GB for the same workspace, which is what makes the seed cheap to carry.

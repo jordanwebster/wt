@@ -37,7 +37,6 @@ pub(crate) fn run(context: &mut Context, args: Doctor) -> Result<Output, CoreErr
         ));
     }
     state_orphan_findings(context, args.label.as_deref(), &mut findings)?;
-    cache_orphan_findings(context, args.label.as_deref(), &mut findings)?;
     for (label, record) in context.registry.labels.clone() {
         if args
             .label
@@ -799,25 +798,6 @@ fn nudge_file_contents(
         }
     }
     contents
-}
-
-fn cache_orphan_findings(
-    context: &Context,
-    label_filter: Option<&str>,
-    findings: &mut Vec<Finding>,
-) -> Result<(), CoreError> {
-    for path in super::prune::cache_orphans(context, label_filter)? {
-        let subject = path
-            .strip_prefix(context.cache_root())
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .into_owned();
-        findings.push(wt_core::doctor::cache_orphan(
-            &subject,
-            &path.to_string_lossy(),
-        ));
-    }
-    Ok(())
 }
 
 fn tooling_findings(_context: &Context, findings: &mut Vec<Finding>) {

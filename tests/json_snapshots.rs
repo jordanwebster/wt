@@ -149,7 +149,7 @@ fn normalize(mut value: serde_json::Value, root: &Path) -> serde_json::Value {
                             | "pid"
                             | "tree_id"
                             | "disk_kb"
-                            | "cache_kb"
+                            | "build_kb"
                             | "gitdir_id"
                     ) && !value.is_null()
                     {

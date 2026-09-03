@@ -787,6 +787,13 @@ fn finish_under_lock(
                 tracked_checked_at: wt_sys::fsx::timestamp()?,
             });
         }
+        seed_from_canonical(
+            Path::new(canonical.path.as_str()),
+            root,
+            &config.seed,
+            &target_of(tree).to_string(),
+            &mut notices,
+        )?;
     }
     let target = super::context::target_of(tree);
     context.mutate_state(&target, holder, |state| {
@@ -1207,4 +1214,76 @@ fn tree_path(context: &Context, label: &wt_core::model::LabelRec, target: &Targe
         .unwrap_or_else(|| context.home.join("trees"))
         .join(target.label.as_str())
         .join(&target.name)
+}
+
+/// Seeds the directories the tree's adapters declare (`target/debug/deps`
+/// and its siblings for cargo) from the canonical checkout by copy-on-write
+/// clone, so the tree starts with the canonical's compiled dependencies and
+/// rebuilds only its own crates — without a byte having been copied. Best
+/// effort by design: a canonical that was never built, a filesystem that
+/// cannot clone, and a directory already present all leave the tree cold and
+/// say so in a notice, because a cold tree is merely slower.
+fn seed_from_canonical(
+    canonical: &Path,
+    root: &Path,
+    seed: &[wt_core::model::RelPath],
+    target: &str,
+    notices: &mut Vec<Notice>,
+) -> Result<(), CoreError> {
+    if seed.is_empty() {
+        return Ok(());
+    }
+    let mut seeded = Vec::new();
+    for path in seed {
+        let source = canonical.join(path.as_str());
+        if !matches!(
+            wt_sys::fsx::path_kind(&source)?,
+            wt_sys::fsx::PathKind::Directory
+        ) {
+            continue;
+        }
+        if !matches!(
+            wt_sys::fsx::path_kind(&root.join(path.as_str()))?,
+            wt_sys::fsx::PathKind::Missing
+        ) {
+            seeded.push(path.to_string());
+            continue;
+        }
+        if !wt_sys::fsx::clone_contained(&source, root, path)? {
+            notices.push(Notice {
+                level: NoticeLevel::Info,
+                code: "SEED_SKIPPED".to_owned(),
+                subject: Some(target.to_owned()),
+                message: format!(
+                    "build output under {} cannot be cloned onto this filesystem; the tree starts cold",
+                    canonical.display()
+                ),
+            });
+            return Ok(());
+        }
+        seeded.push(path.to_string());
+    }
+    notices.push(if seeded.is_empty() {
+        Notice {
+            level: NoticeLevel::Info,
+            code: "SEED_SKIPPED".to_owned(),
+            subject: Some(target.to_owned()),
+            message: format!(
+                "{} has no build output to seed from; the tree starts cold",
+                canonical.display()
+            ),
+        }
+    } else {
+        Notice {
+            level: NoticeLevel::Info,
+            code: "SEED_CLONED".to_owned(),
+            subject: Some(target.to_owned()),
+            message: format!(
+                "seeded {} from {}",
+                seeded.join(", "),
+                canonical.display()
+            ),
+        }
+    });
+    Ok(())
 }

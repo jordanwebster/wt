@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -171,6 +171,12 @@ pub fn trace_budget(kind: &str, path: Option<&Path>) -> Result<()> {
 
 /// Computes apparent disk usage without following symlinks.
 pub fn disk_kb(path: &Path) -> Result<u64> {
+    disk_kb_except(path, &[])
+}
+
+/// Like [`disk_kb`], skipping the named top-level entries — so a caller that
+/// sizes those entries separately walks the tree once, not twice.
+pub fn disk_kb_except(path: &Path, skip: &[std::ffi::OsString]) -> Result<u64> {
     fn bytes(path: &Path) -> Result<u64> {
         let metadata =
             std::fs::symlink_metadata(path).map_err(fs_error("inspect disk usage", path))?;
@@ -188,7 +194,19 @@ pub fn disk_kb(path: &Path) -> Result<u64> {
         Ok(total)
     }
 
-    bytes(path).map(|value| value.saturating_add(1023) / 1024)
+    let metadata = std::fs::symlink_metadata(path).map_err(fs_error("inspect disk usage", path))?;
+    if skip.is_empty() || !metadata.is_dir() {
+        return bytes(path).map(|value| value.saturating_add(1023) / 1024);
+    }
+    let mut total = metadata.len();
+    for entry in std::fs::read_dir(path).map_err(fs_error("read disk usage", path))? {
+        let entry = entry.map_err(fs_error("read disk usage entry", path))?;
+        if skip.contains(&entry.file_name()) {
+            continue;
+        }
+        total = total.saturating_add(bytes(&entry.path())?);
+    }
+    Ok(total.saturating_add(1023) / 1024)
 }
 
 pub fn read_dir_paths(path: &Path) -> Result<Vec<PathBuf>> {
@@ -459,35 +477,75 @@ pub fn remove_nofollow(root: &Path, relative: &RelPath) -> Result<bool> {
     Ok(true)
 }
 
-/// Recursively removes one contained directory without following symlinks.
-pub fn remove_dir_all_nofollow(root: &Path, relative: &RelPath) -> Result<bool> {
-    let (parent, name) = match open_parent(root, relative, false) {
-        Ok(value) => value,
-        Err(error) if error.code.0 == "PATH_MISSING" => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    let Some(stat) = statat(parent.as_raw_fd(), &name)? else {
+/// Clones the directory `source` to the contained path `relative` under
+/// `root`, copy-on-write: the clone shares its blocks with the source until
+/// either side writes, so it costs neither time nor space in proportion to
+/// its contents. `Ok(false)` means the filesystem could not clone — another
+/// volume, or none of the primitive — or the destination already exists;
+/// the caller treats both as "no seed", never as a reason to copy. Parent
+/// directories under `root` are created without following symlinks and the
+/// clone is placed by directory descriptor, so the destination is contained.
+pub fn clone_contained(source: &Path, root: &Path, relative: &RelPath) -> Result<bool> {
+    if !CLONE_SUPPORTED {
         return Ok(false);
+    }
+    // Parents created for a clone that is then declined would leave an empty
+    // hierarchy behind, which is not "cold": remember which ancestors were
+    // absent so they can be removed again.
+    let mut created = Vec::new();
+    let mut ancestor = PathBuf::new();
+    if let Some(parent) = Path::new(relative.as_str()).parent() {
+        for component in parent.components() {
+            ancestor.push(component);
+            if matches!(path_kind(&root.join(&ancestor))?, PathKind::Missing) {
+                created.push(ancestor.clone());
+            }
+        }
+    }
+    let (parent, name) = open_parent(root, relative, true)?;
+    let cloned = if statat(parent.as_raw_fd(), &name)?.is_some() {
+        false
+    } else {
+        clone_at(source, &parent, &name)?
     };
-    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
-        return remove_nofollow(root, relative);
+    if !cloned {
+        for path in created.iter().rev() {
+            let _ = std::fs::remove_dir(root.join(path));
+        }
     }
-    let directory = openat(
-        parent.as_raw_fd(),
-        &name,
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-        0,
-    )?;
-    remove_dir_contents(directory.as_raw_fd())?;
-    // SAFETY: the parent fd and final component are owned/validated above;
-    // AT_REMOVEDIR removes the directory entry without following it.
-    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } < 0 {
-        return Err(io_context("remove contained directory")(
-            std::io::Error::last_os_error(),
-        ));
+    Ok(cloned)
+}
+
+/// Only APFS offers a whole-directory clone today.
+const CLONE_SUPPORTED: bool = cfg!(target_os = "macos");
+
+#[cfg(target_os = "macos")]
+fn clone_at(source: &Path, parent: &OwnedFd, name: &CString) -> Result<bool> {
+    let source_name = CString::new(source.as_os_str().as_bytes()).map_err(nul_error)?;
+    // SAFETY: both names are NUL-terminated and outlive the call, and the
+    // parent descriptor is owned by the caller; clonefileat retains nothing.
+    let result = unsafe {
+        libc::clonefileat(
+            libc::AT_FDCWD,
+            source_name.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            0,
+        )
+    };
+    if result == 0 {
+        return Ok(true);
     }
-    sync_dir_fd(parent.as_raw_fd())?;
-    Ok(true)
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ENOTSUP) | Some(libc::EXDEV) => Ok(false),
+        _ => Err(fs_error("clone directory", source)(error)),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clone_at(_source: &Path, _parent: &OwnedFd, _name: &CString) -> Result<bool> {
+    Ok(false)
 }
 
 /// Copies a contained file tree byte-for-byte while recreating symlinks.
@@ -878,73 +936,6 @@ fn statat(dir: i32, name: &CString) -> Result<Option<libc::stat>> {
     } else {
         Err(io_context("inspect contained entry")(error))
     }
-}
-
-fn remove_dir_contents(dir: i32) -> Result<()> {
-    // SAFETY: dup creates a separately owned descriptor for fdopendir, which
-    // takes ownership and closes it when closedir is called.
-    let duplicate = unsafe { libc::dup(dir) };
-    if duplicate < 0 {
-        return Err(io_context("duplicate contained directory")(
-            std::io::Error::last_os_error(),
-        ));
-    }
-    // SAFETY: `duplicate` is a fresh directory descriptor transferred to DIR.
-    let stream = unsafe { libc::fdopendir(duplicate) };
-    if stream.is_null() {
-        // SAFETY: fdopendir failed, so ownership of duplicate was not taken.
-        unsafe { libc::close(duplicate) };
-        return Err(io_context("open contained directory stream")(
-            std::io::Error::last_os_error(),
-        ));
-    }
-    let result = (|| {
-        loop {
-            // SAFETY: stream remains valid until the single closedir below.
-            let entry = unsafe { libc::readdir(stream) };
-            if entry.is_null() {
-                break;
-            }
-            // SAFETY: readdir returned a valid dirent whose d_name is a
-            // NUL-terminated array valid until the next readdir call.
-            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-            if name.to_bytes() == b"." || name.to_bytes() == b".." {
-                continue;
-            }
-            let name = CString::new(name.to_bytes()).map_err(nul_error)?;
-            let Some(stat) = statat(dir, &name)? else {
-                continue;
-            };
-            if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
-                let child = openat(
-                    dir,
-                    &name,
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                    0,
-                )?;
-                remove_dir_contents(child.as_raw_fd())?;
-                // SAFETY: child was opened no-follow from this directory and
-                // recursive removal has emptied it.
-                if unsafe { libc::unlinkat(dir, name.as_ptr(), libc::AT_REMOVEDIR) } < 0 {
-                    return Err(io_context("remove contained child directory")(
-                        std::io::Error::last_os_error(),
-                    ));
-                }
-            } else {
-                // SAFETY: unlinkat with flags 0 removes the observed final
-                // non-directory entry without following a symlink.
-                if unsafe { libc::unlinkat(dir, name.as_ptr(), 0) } < 0 {
-                    return Err(io_context("remove contained child entry")(
-                        std::io::Error::last_os_error(),
-                    ));
-                }
-            }
-        }
-        sync_dir_fd(dir)
-    })();
-    // SAFETY: stream was returned by fdopendir and is closed exactly once.
-    unsafe { libc::closedir(stream) };
-    result
 }
 
 fn sync_dir_fd(dir: i32) -> Result<()> {
@@ -1370,8 +1361,6 @@ mod tests {
         );
         assert!(remove_nofollow(root.path(), &RelPath::new("owned/link").unwrap()).unwrap());
         assert!(outside.path().exists());
-        assert!(remove_dir_all_nofollow(root.path(), &RelPath::new("owned").unwrap()).unwrap());
-        assert!(!root.path().join("owned").exists());
     }
 
     #[test]

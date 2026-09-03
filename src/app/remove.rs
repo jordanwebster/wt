@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use wt_core::lifecycle::{OpVerb, Operation, StatePhase};
@@ -274,11 +274,6 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         door::recompute_exclude(context, &tree.label)?;
         Vec::new()
     };
-    let cache_deleted = if after == AfterDestroy::KeepLiveEntry {
-        None
-    } else {
-        remove_build_cache(context, &tree, entered.as_ref(), &mut notices)
-    };
     Ok(Output::data(RemoveData {
         target: target.to_string(),
         removed: true,
@@ -287,7 +282,6 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         branch_deleted,
         branch_kept,
         session_closed,
-        cache_deleted,
     })?
     .with_notices(notices))
 }
@@ -318,7 +312,6 @@ fn not_removed(
         branch_deleted: false,
         branch_kept: None,
         session_closed: false,
-        cache_deleted: None,
     })?
     .with_notices([Notice {
         level: NoticeLevel::Info,
@@ -326,66 +319,6 @@ fn not_removed(
         subject: Some(target.to_string()),
         message,
     }]))
-}
-
-/// Deletes the tree's per-tree build cache once the tree itself is gone. The
-/// cache lives outside the worktree, so `git worktree remove` never touches
-/// it; without this step every removal leaks the tree's compiled
-/// intermediates forever.
-///
-/// The path comes from the door's rendered `CARGO_BUILD_BUILD_DIR` when the
-/// tree could still be entered, else from the adapter's own keying scheme.
-/// wt only deletes what it can own: a directory inside its cache root whose
-/// final component is this tree's `name_short` — an override pointing
-/// anywhere else keeps its own lifecycle. Failure downgrades to a notice
-/// because the registry entry is already gone; `wt prune` reaps leftovers.
-fn remove_build_cache(
-    context: &Context,
-    tree: &wt_core::model::TreeRec,
-    door: Option<&door::Door>,
-    notices: &mut Vec<Notice>,
-) -> Option<String> {
-    let cache_root = context.cache_root();
-    if !matches!(
-        wt_sys::fsx::path_kind(&cache_root).ok()?,
-        wt_sys::fsx::PathKind::Directory
-    ) {
-        return None;
-    }
-    let path = door
-        .and_then(|door| door.env.env.get("CARGO_BUILD_BUILD_DIR"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| context.tree_cache_dir(tree.label.as_str(), &tree.name_short()));
-    if path.file_name().and_then(|name| name.to_str()) != Some(tree.name_short().as_str()) {
-        return None;
-    }
-    let relative = path
-        .strip_prefix(&cache_root)
-        .ok()
-        .and_then(|relative| relative.to_str())
-        .and_then(|relative| wt_core::model::RelPath::new(relative).ok())?;
-    match wt_sys::fsx::remove_dir_all_nofollow(&cache_root, &relative) {
-        Ok(true) => {
-            if let Some(parent) = path.parent() {
-                let _ = wt_sys::fsx::remove_empty_dir(parent);
-            }
-            Some(path.to_string_lossy().into_owned())
-        }
-        Ok(false) => None,
-        Err(error) => {
-            notices.push(Notice {
-                level: NoticeLevel::Warn,
-                code: "CACHE_DELETE_FAILED".to_owned(),
-                subject: Some(target_string(tree)),
-                message: format!("build cache {} was not deleted: {error}", path.display()),
-            });
-            None
-        }
-    }
-}
-
-fn target_string(tree: &wt_core::model::TreeRec) -> String {
-    format!("{}/{}", tree.label, tree.name)
 }
 
 /// The plan a user is asked to consent to: what this removal ends, in the

@@ -315,6 +315,10 @@ pub struct Config {
     pub locks: IndexMap<String, LockCfg>,
     pub dirs: IndexMap<String, Scope>,
     pub sync_inputs: Vec<RelPath>,
+    /// Adapter-declared directories a new tree clones from the canonical
+    /// checkout (§11.8). Not a configuration key: the layers cannot set it.
+    #[serde(skip)]
+    pub seed: Vec<RelPath>,
     pub detect: Detect,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<BranchTemplates>,
@@ -963,6 +967,7 @@ pub fn merge(layers: &[(Layer, Config)]) -> Config {
             output.locks.insert(name.clone(), lock.clone());
         }
         append_unique(&mut output.sync_inputs, &layer.sync_inputs);
+        append_unique(&mut output.seed, &layer.seed);
         if layer.branch.is_some() {
             output.branch.clone_from(&layer.branch);
         }

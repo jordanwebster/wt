@@ -54,6 +54,9 @@ pub struct Tool {
     pub sniff: Vec<Sniff>,
     pub requires: Option<String>,
     pub sync_inputs: Vec<String>,
+    /// Directories a new tree clones copy-on-write from the canonical
+    /// checkout, when the filesystem can (§11.8).
+    pub seed: Vec<String>,
     pub env: IndexMap<String, String>,
     pub commands: Vec<String>,
     pub task: IndexMap<String, Task>,
@@ -88,6 +91,7 @@ pub struct AdapterContribution {
     pub env: IndexMap<String, String>,
     pub commands: Vec<String>,
     pub sync_inputs: Vec<String>,
+    pub seed: Vec<String>,
     pub requirements: Vec<String>,
     pub nudges: Vec<Nudge>,
     pub selected_tools: BTreeSet<String>,
@@ -201,6 +205,20 @@ pub fn contribution(hits: &[AdapterHit]) -> Result<AdapterContribution, CoreErro
         }
         append_unique(&mut output.commands, &tool.commands);
         append_unique(&mut output.sync_inputs, &tool.sync_inputs);
+        // A tool detected under a configured scope seeds relative to that
+        // scope: `backend/target/...`, not the repository's `target/`.
+        let seed = tool
+            .seed
+            .iter()
+            .map(|path| {
+                if hit.dir == "." {
+                    path.clone()
+                } else {
+                    format!("{}/{}", hit.dir.trim_end_matches('/'), path)
+                }
+            })
+            .collect::<Vec<_>>();
+        append_unique(&mut output.seed, &seed);
         if let Some(requirement) = &tool.requires {
             append_unique(&mut output.requirements, std::slice::from_ref(requirement));
         }
@@ -225,6 +243,10 @@ pub fn apply_contribution(
     for path in &contribution.sync_inputs {
         let path = RelPath::new(path)?;
         append_unique(&mut config.sync_inputs, std::slice::from_ref(&path));
+    }
+    for path in &contribution.seed {
+        let path = RelPath::new(path)?;
+        append_unique(&mut config.seed, std::slice::from_ref(&path));
     }
     Ok(())
 }
@@ -561,11 +583,18 @@ mod tests {
         let hits = detect(&snapshot, &BTreeMap::new()).unwrap();
         let contribution = contribution(&hits).unwrap();
         assert!(contribution.sync_inputs.contains(&"Cargo.toml".to_owned()));
+        // The tree's build lives in its own `target/`: no cargo directory
+        // variable of any kind, and the compiled dependencies arrive by seed.
+        assert!(!contribution.env.keys().any(|key| key.starts_with("CARGO")));
         assert_eq!(
-            contribution.env["CARGO_BUILD_BUILD_DIR"],
-            "{{home()}}/cache/cargo-build/{{label()}}/{{name_short()}}"
+            contribution.seed,
+            vec![
+                "target/debug/.fingerprint".to_owned(),
+                "target/debug/build".to_owned(),
+                "target/debug/deps".to_owned(),
+                "target/debug/incremental".to_owned(),
+            ]
         );
-        assert!(!contribution.env.contains_key("CARGO_TARGET_DIR"));
         assert!(contribution
             .nudges
             .iter()
@@ -576,17 +605,25 @@ mod tests {
             .sync_inputs
             .iter()
             .any(|path| path.as_str() == "Cargo.toml"));
-        let repo =
-            crate::config::parse("[env]\nCARGO_BUILD_BUILD_DIR='/custom/cargo-build'", "repo")
-                .unwrap();
-        let merged = crate::config::merge(&[
-            (crate::config::Layer::Adapter, config),
-            (crate::config::Layer::Repo, repo),
-        ]);
-        assert_eq!(
-            crate::config::effective_scope(&merged, ".").unwrap().env["CARGO_BUILD_BUILD_DIR"],
-            "/custom/cargo-build"
-        );
+        assert!(config
+            .seed
+            .iter()
+            .any(|path| path.as_str() == "target/debug/deps"));
+        // `seed` is the adapter's to declare, never the configuration's.
+        assert!(crate::config::parse("seed = ['target']", "repo").is_err());
+        // Under a configured scope the seed follows the scope.
+        let scoped = contribution(&[AdapterHit {
+            adapter: "cargo".to_owned(),
+            tool: "cargo".to_owned(),
+            dir: "backend".to_owned(),
+            notice: None,
+            sync_override: None,
+        }])
+        .unwrap();
+        assert!(scoped
+            .seed
+            .iter()
+            .all(|path| path.starts_with("backend/target/debug/")));
     }
 
     #[test]

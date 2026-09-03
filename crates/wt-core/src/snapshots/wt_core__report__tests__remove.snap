@@ -28,8 +28,7 @@ expression: envelope
     ],
     "branch_deleted": false,
     "branch_kept": "work",
-    "session_closed": false,
-    "cache_deleted": null
+    "session_closed": false
   },
   "notices": [
     {

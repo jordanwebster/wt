@@ -7,7 +7,6 @@ expression: "normalize(value, &h.root)"
   "data": {
     "branch_deleted": true,
     "branch_kept": null,
-    "cache_deleted": null,
     "destroyed": [
       {
         "child": null,

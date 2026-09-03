@@ -558,16 +558,17 @@ any default.
 | Go | `go.mod` | download/build/test/vet/gofmt |
 | Git submodules | `.gitmodules` | recursive initialization |
 
-A fresh worktree starts warm **in that ecosystem's own terms**, not by copying
-build output around. Cargo 1.91+ separates build intermediates from outputs;
-the adapter gives every tree its own
-`{{home()}}/cache/cargo-build/{{label()}}/{{name_short()}}` build directory —
-private, because Cargo's unit hashes ignore the workspace path, so trees
-sharing one directory would corrupt each other's generated code and
-freshness — while each tree keeps its binaries in its own `target/`. The
-directory is deleted with the tree, `wt prune` reaps orphans, and
-`wt ls --disk` sizes it (`cache_kb`). Cross-tree warmth comes from
-content-addressed caches instead: install sccache and set
+A fresh worktree starts warm **without copying build output around**. A
+Rust tree's whole build lives in its own `target/` — wt sets no cargo
+directory variable, so a plain `cargo build` does the right thing, and no two
+trees can share a build directory (Cargo's unit hashes ignore the workspace
+path, so sharing one silently hands a tree another tree's compiled code). On
+a filesystem that can clone directories copy-on-write (APFS today), `wt new`
+clones the canonical checkout's compiled dependencies into the new tree in
+one step that costs neither time nor space; the tree then rebuilds only its
+own crates. Elsewhere the tree starts cold and says so. Build output dies
+with the tree, and `wt ls --disk` sizes it (`build_kb`). Cross-machine
+warmth comes from content-addressed caches: install sccache and set
 `rustc-wrapper = "sccache"` in `~/.cargo/config.toml [build]`, and every tree
 compiles shared dependencies as cache hits. pnpm hard-links packages from its
 content-addressed store, and uv hard-links from its global cache into
@@ -620,7 +621,6 @@ $WT_HOME/
   state/<label>/_repo.json    repository-tied resource state
   state/_machine.json         machine-tied resource state
   trees/<label>/<name>/       linked worktrees (unless trees_dir overrides it)
-  cache/cargo-build/<label>/<name_short>/   per-tree build intermediates; die with the tree
   locks/                      bounded coordination locks and holder records
   logs/wt.jsonl               how long wt's own operations took ([logs] trace)
 

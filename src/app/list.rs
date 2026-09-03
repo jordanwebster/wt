@@ -297,6 +297,11 @@ fn tree_report_with_env(
         wt_sys::fsx::PathKind::Directory
     );
     let identity_ok = exists && context.identity_ok(tree)?;
+    let (disk_kb, build_kb) = if disk {
+        sizes(context, tree, identity_ok)?
+    } else {
+        (None, None)
+    };
     let state = context.read_state(&target)?;
     let phase = context.phase(tree, state.as_ref())?;
     let (branch, detached_sha, dirty, upstream, behind_default, drift) = if exists && identity_ok {
@@ -450,19 +455,8 @@ fn tree_report_with_env(
         meta: tree.meta.clone(),
         resources,
         ports,
-        disk_kb: disk
-            .then(|| wt_sys::fsx::disk_kb(Path::new(tree.path.as_str())))
-            .transpose()?,
-        cache_kb: disk
-            .then(|| {
-                let cache = context.tree_cache_dir(tree.label.as_str(), &tree.name_short());
-                match wt_sys::fsx::path_kind(&cache)? {
-                    wt_sys::fsx::PathKind::Missing => Ok(None),
-                    _ => wt_sys::fsx::disk_kb(&cache).map(Some),
-                }
-            })
-            .transpose()?
-            .flatten(),
+        disk_kb,
+        build_kb,
     };
     timed.finish();
     Ok(report)
@@ -731,4 +725,52 @@ impl ResourceName for wt_core::resource::ResourceRecord {
     fn name(&self) -> &str {
         self.effective_snapshot().name.as_str()
     }
+}
+
+/// Sizes the tree on `--disk`: the whole tree, and within it the build
+/// output — the top-level directories holding the paths its adapters seed
+/// (`target` for cargo). One traversal: the build roots are walked once and
+/// the rest of the tree once, and the two are added. The build subtotal is
+/// null when the path is not the tree's own (its configuration is not to be
+/// trusted, and there is no build of *this* tree to size), when nothing is
+/// seeded, or when nothing exists.
+fn sizes(
+    context: &Context,
+    tree: &wt_core::model::TreeRec,
+    identity_ok: bool,
+) -> Result<(Option<u64>, Option<u64>), CoreError> {
+    let root = Path::new(tree.path.as_str());
+    if !matches!(
+        wt_sys::fsx::path_kind(root)?,
+        wt_sys::fsx::PathKind::Directory
+    ) {
+        return Ok((None, None));
+    }
+    let roots = if identity_ok {
+        context
+            .load_config(tree)?
+            .seed
+            .iter()
+            .filter_map(|path| {
+                Path::new(path.as_str())
+                    .components()
+                    .next()
+                    .map(|first| first.as_os_str().to_owned())
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let mut build = None;
+    for name in &roots {
+        let path = root.join(name);
+        if !matches!(
+            wt_sys::fsx::path_kind(&path)?,
+            wt_sys::fsx::PathKind::Missing
+        ) {
+            *build.get_or_insert(0) += wt_sys::fsx::disk_kb(&path)?;
+        }
+    }
+    let rest = wt_sys::fsx::disk_kb_except(root, &roots)?;
+    Ok((Some(rest + build.unwrap_or(0)), build))
 }

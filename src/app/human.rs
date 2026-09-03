@@ -519,9 +519,6 @@ fn render_remove(data: RemoveData, notices: &[Notice]) -> String {
     if data.session_closed {
         facts.push(("session", "closed".to_owned()));
     }
-    if let Some(cache) = data.cache_deleted {
-        facts.push(("cache", format!("deleted {cache}")));
-    }
     block(headline, facts, notices)
 }
 

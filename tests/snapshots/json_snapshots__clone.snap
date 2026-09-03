@@ -26,7 +26,7 @@ expression: "normalize(value, &h.root)"
       "behind_default": 0,
       "branch": "main",
       "build": null,
-      "cache_kb": null,
+      "build_kb": null,
       "canonical": true,
       "detached_sha": null,
       "dirty": {
