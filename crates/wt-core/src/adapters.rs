@@ -595,7 +595,7 @@ mod tests {
                 "target/debug/incremental".to_owned(),
             ]
         );
-        assert!(contribution
+        assert!(contributed
             .nudges
             .iter()
             .any(|nudge| nudge.want == "sccache"));
