@@ -1,9 +1,9 @@
 use serde_json::Value;
 use wt_core::doctor::Severity;
 use wt_core::report::{
-    AdoptData, CloneData, ConfigData, DoctorData, ForgetData, ListData, LocksData, NewData, Notice,
-    PruneData, RegisterData, RemoveData, ResourceActionData, SessionsData, StatusData, SyncData,
-    TasksData, UnregisterData, WhichData,
+    AdoptData, AnchorData, CloneData, ConfigData, DoctorData, ForgetData, ListData, LocksData,
+    NewData, Notice, PruneData, RegisterData, RemoveData, ResourceActionData, SessionsData,
+    StatusData, SyncData, TasksData, UnregisterData, WhichData,
 };
 
 use crate::cli::Command;
@@ -22,6 +22,7 @@ pub(crate) enum HumanKind {
     Path,
     Run,
     Sync,
+    Anchor,
     Exec,
     Shell,
     Env,
@@ -60,6 +61,7 @@ impl From<&Command> for HumanKind {
             | Command::Fmt(_)
             | Command::Build(_) => Self::Run,
             Command::Sync(_) => Self::Sync,
+            Command::Anchor(_) => Self::Anchor,
             Command::Exec(_) => Self::Exec,
             Command::Shell(_) => Self::Shell,
             Command::Env(_) => Self::Env,
@@ -92,6 +94,7 @@ impl HumanKind {
             Self::List => render_list(decode(value), notices),
             Self::Status => render_status(decode(value), notices),
             Self::Sync => render_sync(decode(value), notices),
+            Self::Anchor => render_anchor(decode(value), notices),
             Self::Open | Self::Close => render_sessions(decode(value), notices),
             Self::Remove => render_remove(decode(value), notices),
             Self::Prune => render_prune(decode(value), notices),
@@ -444,6 +447,63 @@ fn render_sync(data: SyncData, notices: &[Notice]) -> String {
                 .collect::<Vec<_>>()
                 .join(", "),
         ));
+    }
+    block(headline, facts, notices)
+}
+
+fn render_anchor(data: AnchorData, notices: &[Notice]) -> String {
+    let stayed = notices.iter().find(|notice| {
+        matches!(
+            notice.code.as_str(),
+            "ANCHOR_DIRTY" | "ANCHOR_OFF_DEFAULT" | "ANCHOR_DIVERGED" | "ANCHOR_NOT_MOVED"
+        )
+    });
+    let headline = if !data.refreshed {
+        format!("{} is being refreshed by another wt", data.label)
+    } else if data.moved.is_some() {
+        format!("Refreshed {} at the default branch's new tip", data.label)
+    } else if stayed.is_some() {
+        format!("{} stays where it is", data.label)
+    } else {
+        format!("{} is at the default branch's tip", data.label)
+    };
+    let mut facts = Vec::new();
+    if let Some(reason) = stayed {
+        facts.push(("reason", reason.message.clone()));
+    }
+    if let Some(fetched) = data.fetched {
+        facts.push(("fetch", if fetched { "ok" } else { "failed" }.to_owned()));
+    }
+    if let Some(moved) = &data.moved {
+        facts.push((
+            "moved",
+            format!(
+                "{} -> {}",
+                &moved.from[..moved.from.len().min(12)],
+                &moved.to[..moved.to.len().min(12)]
+            ),
+        ));
+    }
+    facts.push((
+        "build",
+        match data.build.as_str() {
+            "fresh" => "already current".to_owned(),
+            "none" => "no build task".to_owned(),
+            other => other.to_owned(),
+        },
+    ));
+    if let Some(swept) = &data.swept {
+        if swept.units > 0 || swept.incremental > 0 {
+            facts.push((
+                "swept",
+                format!(
+                    "{} units, {} incremental directories, {} MB",
+                    swept.units,
+                    swept.incremental,
+                    swept.kb / 1024
+                ),
+            ));
+        }
     }
     block(headline, facts, notices)
 }

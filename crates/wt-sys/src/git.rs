@@ -205,9 +205,13 @@ impl Git {
             }
             AddSpec::NewBranch { name, start, track } => {
                 args.extend([OsString::from("-b"), OsString::from(name)]);
-                if !track {
-                    args.push(OsString::from("--no-track"));
-                }
+                // Explicit either way: git tracks a remote start by default
+                // but a local one only when told to, and the caller decided.
+                args.push(OsString::from(if *track {
+                    "--track"
+                } else {
+                    "--no-track"
+                }));
                 args.push(path.as_os_str().to_owned());
                 args.push(start.into());
             }
@@ -429,6 +433,36 @@ impl Git {
         let output = self.invoke_request(tree, Class::Query, args.clone(), true, &[])?;
         let output = ensure_success(Class::Query, &args, output)?;
         parse_status_porcelain(&output.stdout)
+    }
+
+    /// Whether any tracked file in `tree` is modified, staged or deleted;
+    /// untracked files do not count. This is the bar a canonical must
+    /// clear before wt moves it (§11.10).
+    pub fn tracked_modified(&self, tree: &Path) -> Result<bool> {
+        Ok(self
+            .status_porcelain(tree)?
+            .iter()
+            .any(|entry| !(entry.index == '?' && entry.worktree == '?')))
+    }
+
+    /// Fast-forwards the checkout at `tree` to `reference`. `Ok(false)`
+    /// when git refuses because it would not be a fast-forward or would
+    /// overwrite local changes; the checkout is then untouched.
+    pub fn merge_ff_only(&self, tree: &Path, reference: &str) -> Result<bool> {
+        let args = proc::os_args(&["merge", "--ff-only", "--quiet", reference]);
+        let output = self.invoke_status_in(tree, Class::Worktree, args.clone())?;
+        match output.child.code {
+            Some(0) => Ok(true),
+            Some(1 | 128) if !output.timed_out => Ok(false),
+            _ => Err(command_failed(Class::Worktree, &args, &output)),
+        }
+    }
+
+    /// The commit `tree`'s HEAD names.
+    pub fn head_oid_in(&self, tree: &Path) -> Result<String> {
+        let args = proc::os_args(&["rev-parse", "--verify", "HEAD"]);
+        let output = self.invoke_in(tree, Class::Query, args)?;
+        Ok(text(&output.stdout))
     }
 
     /// Counts commits in one rev-list range.
@@ -712,6 +746,7 @@ impl Git {
             .collect(),
             remove_env: git_environment_to_clear(),
             clear_env: false,
+            nice: None,
         };
         request
             .env

@@ -319,9 +319,32 @@ pub struct Config {
     /// checkout (§11.8). Not a configuration key: the layers cannot set it.
     #[serde(skip)]
     pub seed: Vec<RelPath>,
+    /// Adapter-declared build directories wt sweeps after a build and in
+    /// `prune` (§11.9). Not a configuration key either.
+    #[serde(skip)]
+    pub sweeps: Vec<Sweep>,
     pub detect: Detect,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<BranchTemplates>,
+}
+
+/// One build directory an adapter asks wt to sweep, and how (§11.9).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Sweep {
+    pub kind: SweepKind,
+    /// The scope the tool was detected in, `.` at the root: where the
+    /// strategy asks the tool about the workspace, and what relative
+    /// paths in build output resolve against.
+    pub workspace: String,
+    /// The build directory, relative to the tree root.
+    pub build_dir: RelPath,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SweepKind {
+    /// Cargo's `target/` layout: units under `.fingerprint`, `deps`,
+    /// `build` and `incremental` per profile directory.
+    Cargo,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -968,6 +991,7 @@ pub fn merge(layers: &[(Layer, Config)]) -> Config {
         }
         append_unique(&mut output.sync_inputs, &layer.sync_inputs);
         append_unique(&mut output.seed, &layer.seed);
+        append_unique(&mut output.sweeps, &layer.sweeps);
         if layer.branch.is_some() {
             output.branch.clone_from(&layer.branch);
         }

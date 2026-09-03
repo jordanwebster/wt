@@ -6,6 +6,7 @@ expression: "normalize(value, &h.root)"
   "command": "new",
   "data": {
     "build": {
+      "head": "<head>",
       "log": "<log>",
       "pid": "<pid>",
       "started": "<started>"

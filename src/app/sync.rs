@@ -121,13 +121,17 @@ pub(crate) fn run(context: &mut Context, args: Sync) -> Result<Output, CoreError
         state.last_error = None;
         Ok(())
     })?;
+    let mut notices = door.notices;
+    // A linked tree that just caught up with its inputs is the moment the
+    // canonical is likely behind too (§11.10).
+    notices.extend(super::anchor::spawn_after(context, &tree, true));
     Ok(Output::data(SyncData {
         target: target.to_string(),
         ran,
         steps,
         inputs,
     })?
-    .with_notices(door.notices))
+    .with_notices(notices))
 }
 
 fn fail(

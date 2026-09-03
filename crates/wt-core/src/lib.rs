@@ -31,6 +31,7 @@ pub mod session;
 pub mod settings;
 pub mod setup;
 pub mod snapshot;
+pub mod sweep;
 pub mod task;
 pub mod template;
 pub mod tmuxconf;

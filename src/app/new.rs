@@ -859,6 +859,9 @@ fn finish_under_lock(
     } else {
         Some(Vec::new())
     };
+    // Everything after the last child process, so a slow tail is named in
+    // the timing log rather than inferred from the gap after it (A75).
+    let finish = wt_sys::trace::span("span", "new.finish").about(target.to_string());
     context.mutate_state(&target, holder, |state| {
         state.phase = StatePhase::Ready;
         state.op = None;
@@ -866,6 +869,7 @@ fn finish_under_lock(
         state.last_error = None;
         Ok(())
     })?;
+    finish.finish();
     let verify = if args.verify {
         Some(run_verify(context, &door, holder, &mut notices)?)
     } else {

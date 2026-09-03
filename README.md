@@ -370,7 +370,8 @@ happens to say now — and then removes the Git worktree. The branch goes too
 when its commits are on a remote, since `origin` can restore it; a branch
 carrying unpushed commits is kept, and the summary says so. `--delete-branch`
 deletes it either way, `--keep-branch` never does. `wt prune` reports or
-repairs stale records and out-of-band deletions.
+repairs stale records and out-of-band deletions, and sweeps superseded build
+output from every tree and canonical.
 
 `wt forget` recovers a mis-adoption without touching the directory, branch, or
 Git worktree registration. It removes wt's owned artifacts and records, then
@@ -567,7 +568,16 @@ a filesystem that can clone directories copy-on-write (APFS today), `wt new`
 clones the canonical checkout's compiled dependencies into the new tree in
 one step that costs neither time nor space; the tree then rebuilds only its
 own crates. Elsewhere the tree starts cold and says so. Build output dies
-with the tree, and `wt ls --disk` sizes it (`build_kb`). Cross-machine
+with the tree, and `wt ls --disk` sizes it (`build_kb`). The canonical
+checkout is kept worth seeding from: after `wt new`, `wt rm` and `wt sync`,
+wt fetches the default branch, fast-forwards the canonical when that is safe
+(the default branch checked out, no modified tracked files, origin strictly
+ahead), builds it, and sweeps it — in the background, at low priority.
+`wt anchor <label>` does the same on demand, and `wt doctor` says when a
+canonical has no build of its commit. The sweep deletes the build output a
+workspace will never read again — old dependency versions, superseded twins,
+deleted targets — judged by what `cargo metadata` resolves to rather than by
+age, after every build wt launches and in `wt prune`. Cross-machine
 warmth comes from content-addressed caches: install sccache and set
 `rustc-wrapper = "sccache"` in `~/.cargo/config.toml [build]`, and every tree
 compiles shared dependencies as cache hits. pnpm hard-links packages from its

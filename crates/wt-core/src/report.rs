@@ -316,6 +316,40 @@ pub struct CloneData {
     #[serde(flatten)]
     pub register: RegisterData,
 }
+/// What one anchor refresh did (§11.10).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AnchorData {
+    pub label: String,
+    /// False when another refresh held the anchor lock and this one did
+    /// nothing.
+    pub refreshed: bool,
+    /// Null when the fetch was skipped.
+    pub fetched: Option<bool>,
+    /// The fast-forward the canonical took, when it took one.
+    pub moved: Option<MovedReport>,
+    /// The canonical's commit after the refresh.
+    pub head: Option<String>,
+    /// `ok` or `failed` when the build ran, `fresh` when the recorded build
+    /// already covered this commit, `none` when the label has no build
+    /// task, `busy` when nothing ran.
+    pub build: String,
+    pub swept: Option<SweepReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MovedReport {
+    pub from: String,
+    pub to: String,
+}
+
+/// What a sweep pass reclaimed (§11.9).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SweepReport {
+    pub units: u64,
+    pub incremental: u64,
+    pub kb: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnregisterData {
     pub label: String,

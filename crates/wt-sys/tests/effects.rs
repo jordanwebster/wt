@@ -84,6 +84,7 @@ fn spawn_tracer_records_argv_cwd_and_exit_state() {
         ]),
         remove_env: Vec::new(),
         clear_env: false,
+        nice: None,
     };
     let output = proc::capture(&request, Duration::from_secs(1)).unwrap();
     assert_eq!(output.mapped_exit(), 7);
@@ -118,6 +119,7 @@ fn docker_like_path_stub_obeys_exit_two_probe_state() {
         ]),
         remove_env: Vec::new(),
         clear_env: false,
+        nice: None,
     };
     assert!(matches!(
         proc::probe(&request, Duration::from_secs(1), "now").result,

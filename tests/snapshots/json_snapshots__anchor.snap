@@ -1,0 +1,27 @@
+---
+source: tests/json_snapshots.rs
+expression: "normalize(value, &h.root)"
+---
+{
+  "command": "anchor",
+  "data": {
+    "build": "ok",
+    "fetched": true,
+    "head": "<head>",
+    "label": "repo",
+    "moved": null,
+    "refreshed": true,
+    "swept": {
+      "incremental": 0,
+      "kb": 0,
+      "units": 0
+    }
+  },
+  "error": null,
+  "notices": [],
+  "ok": true,
+  "wt": {
+    "schema": 1,
+    "version": "<version>"
+  }
+}

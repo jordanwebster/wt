@@ -52,6 +52,7 @@ fn every_verb_has_a_normalized_json_contract_snapshot() {
     snapshot(&h, "fmt", &["fmt", "repo"]);
     snapshot(&h, "build", &["build", "repo"]);
     snapshot(&h, "sync", &["sync", "repo"]);
+    snapshot(&h, "anchor", &["anchor", "repo"]);
 
     h.json(&["run", "service", "repo"]);
     snapshot(&h, "destroy", &["destroy", "service", "repo", "--yes"]);
@@ -146,6 +147,7 @@ fn normalize(mut value: serde_json::Value, root: &Path) -> serde_json::Value {
                             | "removed_at"
                             | "duration_ms"
                             | "log"
+                            | "head"
                             | "pid"
                             | "tree_id"
                             | "disk_kb"

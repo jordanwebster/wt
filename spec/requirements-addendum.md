@@ -1446,3 +1446,69 @@ tree, so the plateau cargo reaches is still the plateau; the repository-side
 configuration changes made on this round (one feature set for every host
 command, no abort profile in dev) shrink that plateau from 39 GB to under
 7 GB for the same workspace, which is what makes the seed cheap to carry.
+
+## A80. The canonical is kept at the default branch's tip and built, and build output is swept by what the workspace resolves to
+
+A79 made the canonical checkout the seed every new tree clones from, and
+left two things open: the canonical had to be built for the seed to be
+worth anything, which was the user's job, and nothing reclaimed superseded
+artifacts, so a build directory still grew to cargo's plateau. Both were
+measured on the same machine on the same day. wt's own canonical had
+accumulated 401 thousand files of superseded units; every tree seeded from
+it inherited them, and removing such a tree took 42 seconds against 0.9
+seconds from a clean canonical of 5 thousand files. Seeding from a
+canonical nobody builds is seeding cold.
+
+The anchor refresh is one verb, `wt anchor <label>` (§11.10): fetch the
+default branch, move the canonical to its tip, build it through the
+ordinary `build` task, sweep. It records nothing new beyond `head` in the
+build state, so `status` and `doctor` classify the canonical's build with
+the codes they already have, and a canonical that seeds trees but has no
+build of its commit is a `doctor` finding with the verb as its remedy. The
+verb starts by itself where the canonical is most likely to have fallen
+behind: after `new` has started the tree's own build, after `rm`, and after
+`sync` of a linked tree — detached through the supervisor A69 introduced,
+with its scheduling priority lowered so the foreground tree's build wins
+the machine, and only for labels whose adapters seed, since a label with
+nothing to seed has nothing to keep warm. `new` does not wait for it. The
+seed carries dependency units only, which change with the lockfile and the
+toolchain rather than with every commit, and §11.8 already accepts a
+partial snapshot. A per-label lock serialises refreshes and a second one
+returns busy rather than waiting. In the register model the canonical is
+the user's checkout, so it moves only by fast-forward, and only when the
+default branch is checked out in it with no modified tracked file and
+origin strictly ahead; every other state is left alone and named.
+
+The sweep (§11.9) had to be told what is live, and cargo will not say
+directly: it keeps one artifact set per configuration, deletes none, and
+writes no mark on a unit it merely reuses, so a rule by age deletes
+artifacts the next build would have read. What cargo will say is what the
+workspace resolves to — `cargo metadata --locked --offline` lists every
+package's target source paths — and each unit records the crate root it was
+compiled from in its own dep-info. A unit whose crate root the resolve no
+longer contains is dead: an old dependency version, a deleted target, and
+the canonical's own workspace units carried into a tree by the seed, which
+that tree can never use because its unit hashes embed a different path.
+Among units that are the same thing built twice — same target, features,
+profile, flags and output kind — only the newest survives, which is how a
+bumped dependency or toolchain retires its predecessor once the successor
+exists. Build-script runs carry no dep-info and live while a live unit's
+recorded dependencies name their fingerprint. `incremental/` is the one
+place age is honest, because rustc rewrites a session directory on every
+use, so one untouched for two weeks goes. A pass that matches nothing to
+the workspace refuses rather than deleting everything, since it is then
+looking at some other checkout's output. The pass holds cargo's own
+build-directory lock, so it excludes a build the way two builds exclude
+each other, and stands down when the lock is held. It runs after every
+build wt launches and inside plain `wt prune`; there is no `--cache` flag,
+because superseded build output is one more kind of garbage `prune`
+already reclaims.
+
+`incremental/` leaves the seed list. rustc names its session directories
+by crate metadata, which embeds the workspace path, so a tree never reuses
+the canonical's; cloning it was pure carry, and the sweep would have had
+to delete it at once. Feature-set variants and check-mode twins are kept
+by the sweep on purpose: each command reuses its own, and deleting them
+after every build would make `wt lint` recompile every dependency's
+metadata each time. Retiring the feature variants is `cargo hakari`'s job,
+which remains open on the repository side.

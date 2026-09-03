@@ -132,6 +132,18 @@ fn tree_findings(
             "re-run `wt new --verify` for this tree",
         ));
     }
+    if tree.canonical
+        && phase == wt_core::lifecycle::DerivedPhase::Ready
+        && super::anchor::is_cold(context, tree)?
+    {
+        findings.push(finding(
+            Severity::Info,
+            "ANCHOR_COLD",
+            &subject,
+            "the canonical has no build of its current commit, so new trees are seeded cold",
+            format!("run `wt anchor {}`", tree.label),
+        ));
+    }
     if let Some(build) = &list::build_report(tree, state.as_ref())? {
         match build.state.as_str() {
             "running" => findings.push(finding(

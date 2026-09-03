@@ -276,6 +276,9 @@ pub struct CommandRequest {
     pub env: BTreeMap<String, String>,
     pub remove_env: Vec<OsString>,
     pub clear_env: bool,
+    /// A scheduling priority decrement applied by [`spawn_detached`] before
+    /// the exec, so a background build yields to foreground work.
+    pub nice: Option<i32>,
 }
 
 impl CommandRequest {
@@ -287,6 +290,7 @@ impl CommandRequest {
             env: BTreeMap::new(),
             remove_env: Vec::new(),
             clear_env: false,
+            nice: None,
         }
     }
 
@@ -322,6 +326,7 @@ impl CommandRequest {
             env,
             remove_env: Vec::new(),
             clear_env: true,
+            nice: None,
         })
     }
 }
@@ -403,10 +408,27 @@ pub fn run(
 }
 
 /// Starts a process in a new session through an intermediate child, so the
-/// launched process is reparented and outlives the invoking CLI.
+/// launched process is reparented and outlives the invoking CLI. Its output
+/// goes nowhere.
 pub fn spawn_detached(request: &CommandRequest) -> Result<u32> {
+    spawn_detached_logged(request, None)
+}
+
+/// [`spawn_detached`] with the process's stdout and stderr written to `log`
+/// (created or truncated first), so a detached verb's own report survives it.
+pub fn spawn_detached_logged(request: &CommandRequest, log: Option<&Path>) -> Result<u32> {
     let traced = trace_spawn(request, None)?;
     traced.finish(crate::trace::Outcome::Detached);
+    // Opened before the fork so a failure is reported by the parent; the
+    // descriptor is inherited by the supervisor and closed here after.
+    let log = log
+        .map(|path| {
+            if let Some(parent) = path.parent() {
+                crate::fsx::create_private_dir(parent)?;
+            }
+            File::create(path).map_err(io_error("create detached log"))
+        })
+        .transpose()?;
     let mut pipe = [0; 2];
     // SAFETY: `pipe` points to two writable integers.
     if unsafe { libc::pipe(pipe.as_mut_ptr()) } < 0 {
@@ -458,11 +480,24 @@ pub fn spawn_detached(request: &CommandRequest) -> Result<u32> {
         }
         let supervisor_pid = std::process::id();
         detached_child_write(pipe[1], format!("{supervisor_pid}\n").as_bytes());
+        if let Some(decrement) = request.nice {
+            // SAFETY: nice only adjusts this process's own scheduling
+            // priority; a failure leaves the priority unchanged.
+            unsafe { libc::nice(decrement) };
+        }
         let mut command = build_command(request, false);
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        command.stdin(Stdio::null());
+        match log {
+            Some(log) => {
+                let stderr = log.try_clone().unwrap_or_else(|_| {
+                    detached_child_error(pipe[1], "could not duplicate the log descriptor")
+                });
+                command.stdout(Stdio::from(log)).stderr(Stdio::from(stderr));
+            }
+            None => {
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
         let error = command.exec();
         detached_child_error(pipe[1], &format!("exec failed: {error}"));
     }
@@ -1180,6 +1215,7 @@ mod tests {
             env: BTreeMap::new(),
             remove_env: Vec::new(),
             clear_env: false,
+            nice: None,
         }
     }
 

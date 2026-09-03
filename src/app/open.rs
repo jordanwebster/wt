@@ -122,7 +122,12 @@ pub(crate) fn open_new_after_summary(
         .expect("opening one tree produces one session");
     if build {
         match start_build(context, &target.to_string()) {
-            Ok(build) => println!("build started  {}", build.log),
+            Ok((build, notice)) => {
+                println!("build started  {}", build.log);
+                if let Some(notice) = notice {
+                    eprintln!("wt: {} — {}", notice.code, notice.message);
+                }
+            }
             Err(error) => eprintln!(
                 "wt: BUILD_START_FAILED — automatic build for {target} did not start: {}; remedy: {}",
                 error.message, error.remedy
@@ -136,55 +141,54 @@ pub(crate) fn open_new_after_summary(
 pub(crate) fn start_build(
     context: &mut Context,
     target: &str,
-) -> Result<wt_core::lifecycle::BuildState, CoreError> {
+) -> Result<
+    (
+        wt_core::lifecycle::BuildState,
+        Option<wt_core::report::Notice>,
+    ),
+    CoreError,
+> {
     let target = context.resolve(Some(target))?;
     let tree = context.tree(&target)?;
-    let logs = Path::new(tree.path.as_str()).join(".wt/logs");
-    wt_sys::fsx::create_private_dir(&logs)?;
-    let log = logs.join("wt-setup.log");
-    let status = Path::new(tree.path.as_str()).join(".wt/build.status");
-    wt_sys::fsx::write_store(&status, b"running\n")?;
+    let slot = super::build::Slot::for_tree(&tree);
+    wt_sys::fsx::create_private_dir(slot.log.parent().expect("the log has a directory"))?;
+    wt_sys::fsx::write_store(&slot.status, b"running\n")?;
     let started = wt_sys::fsx::timestamp()?;
-    let running_binary = std::env::current_exe().map_err(|error| {
-        CoreError::new(
-            ExitClass::Internal,
-            "CURRENT_EXE_FAILED",
-            format!("could not resolve the running wt binary: {error}"),
-            "retry and report this wt bug if it repeats",
-        )
-    })?;
-    let mut request = wt_sys::proc::CommandRequest::new(running_binary);
-    request.args = wt_sys::proc::os_args(&["build", &target.to_string()]);
-    request.cwd = Some(Path::new(tree.path.as_str()).to_path_buf());
-    request.env.insert(
-        "WT_BUILD_LOG".to_owned(),
-        log.to_string_lossy().into_owned(),
-    );
-    request.env.insert(
-        "WT_HOME".to_owned(),
-        context.home.to_string_lossy().into_owned(),
-    );
-    request
-        .env
-        .insert("WT_ROOT".to_owned(), tree.path.as_str().to_owned());
-    request.env.insert(
-        "WT_BACKGROUND_BUILD_STATUS".to_owned(),
-        status.to_string_lossy().into_owned(),
-    );
-    let pid = wt_sys::proc::spawn_detached(&request).inspect_err(|_| {
-        let _ = wt_sys::fsx::write_store(&status, b"failed\n");
+    let root = Path::new(tree.path.as_str());
+    let pid = super::build::spawn_wt(
+        context,
+        root,
+        &["build", &target.to_string()],
+        &[
+            ("WT_BUILD_LOG", slot.log.to_string_lossy().into_owned()),
+            ("WT_ROOT", tree.path.as_str().to_owned()),
+            (
+                "WT_BACKGROUND_BUILD_STATUS",
+                slot.status.to_string_lossy().into_owned(),
+            ),
+        ],
+        None,
+        None,
+    )
+    .inspect_err(|_| {
+        let _ = wt_sys::fsx::write_store(&slot.status, b"failed\n");
     })?;
     let build = wt_core::lifecycle::BuildState {
         started,
-        log: log.to_string_lossy().into_owned(),
+        log: slot.log.to_string_lossy().into_owned(),
         pid,
+        head: super::build::head_of(context, &target),
     };
     let holder = context.holder(target.to_string(), "build")?;
     context.mutate_state(&target, &holder, |state| {
         state.build = Some(build.clone());
         Ok(())
     })?;
-    Ok(build)
+    // The tree's build is under way; now the canonical's, so the next tree
+    // is seeded warm (§11.10). Detached and niced: it yields to this one.
+    // A refresh that does not start is the caller's notice to carry.
+    let notice = super::anchor::spawn_after(context, &tree, false);
+    Ok((build, notice))
 }
 
 pub(crate) fn should_attach(context: &Context, no_attach: bool) -> bool {

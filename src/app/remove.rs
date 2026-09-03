@@ -240,6 +240,8 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
             branch_kept = Some(branch.clone());
         }
     }
+    // Everything after the last child process (A75).
+    let finish = wt_sys::trace::span("span", "remove.finish").about(target.to_string());
     let orphans_kept = if after == AfterDestroy::KeepLiveEntry {
         context.mutate_state(&target, &holder, |state| {
             state.op = None;
@@ -274,6 +276,10 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         door::recompute_exclude(context, &tree.label)?;
         Vec::new()
     };
+    finish.finish();
+    // The tree is gone; the canonical it was seeded from is refreshed in
+    // the background so the next one starts warm (§11.10).
+    notices.extend(super::anchor::spawn_after(context, &tree, true));
     Ok(Output::data(RemoveData {
         target: target.to_string(),
         removed: true,

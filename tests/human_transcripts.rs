@@ -38,6 +38,7 @@ fn human_command_transcripts() {
     transcript(&h, "status", &["status", "repo/work"]);
     transcript(&h, "doctor", &["doctor", "repo"]);
     transcript(&h, "sync", &["sync", "repo/work"]);
+    transcript(&h, "anchor", &["anchor", "repo"]);
     transcript(&h, "tasks", &["tasks", "repo/work"]);
     transcript(&h, "config", &["config", "repo/work", "--origin"]);
     transcript(&h, "which", &["which", "repo/work", "git"]);

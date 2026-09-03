@@ -1043,6 +1043,7 @@ run = "true"
         started: wt_sys::fsx::timestamp().unwrap(),
         log: log.to_string_lossy().into_owned(),
         pid: u32::MAX,
+        head: None,
     });
     wt_sys::fsx::write_json(&state_path, &state).unwrap();
     common::write(&repo.join(".wt/build.status"), "running\n");
@@ -1105,6 +1106,7 @@ run = "true"
             .to_string_lossy()
             .into_owned(),
         pid: u32::MAX,
+        head: None,
     });
     wt_sys::fsx::write_json(&state_path, &state).unwrap();
     common::write(&repo.join(".wt/build.status"), "running\n");
@@ -5115,4 +5117,629 @@ fn doctor_stays_quiet_about_the_shell_guard_when_nothing_is_claimed() {
         .unwrap()
         .iter()
         .any(|finding| finding["code"] == "SHELL_INIT_MISSING"));
+}
+
+/// A `cargo` that answers `metadata` with the fixture workspace — the
+/// package at `$PWD` with its library and build script, and one registry
+/// dependency at version 1.0.1 — and succeeds silently at everything else.
+fn install_cargo_with_metadata(h: &Harness, registry: &Path) {
+    common::write_executable(
+        &h.shims.join("cargo"),
+        &format!(
+            r#"#!/bin/sh
+if [ "$1" = "metadata" ]; then
+  cat <<EOF
+{{"workspace_root":"$PWD","packages":[
+ {{"name":"fixture","targets":[{{"name":"fixture","kind":["lib"],"src_path":"$PWD/src/lib.rs"}},{{"name":"build-script-build","kind":["custom-build"],"src_path":"$PWD/build.rs"}}]}},
+ {{"name":"dep","targets":[{{"name":"dep","kind":["lib"],"src_path":"{reg}/dep-1.0.1/src/lib.rs"}}]}}
+]}}
+EOF
+fi
+exit 0
+"#,
+            reg = registry.display()
+        ),
+    );
+}
+
+/// Writes one cargo unit: fingerprint directory, dep-info and an artifact.
+/// `fingerprint` is the unit's own hash (as cargo's little-endian hex),
+/// `deps` the hashes it records, `root` what its dep-info names.
+struct Unit<'a> {
+    package: &'a str,
+    hash: &'a str,
+    kind: &'a str,
+    fingerprint: u64,
+    deps: &'a [u64],
+    root: Option<&'a str>,
+    features: &'a str,
+    age_secs: u64,
+}
+
+#[allow(clippy::disallowed_types)]
+fn write_unit(profile: &Path, unit: &Unit) {
+    let dir = profile.join(format!(".fingerprint/{}-{}", unit.package, unit.hash));
+    let deps = unit
+        .deps
+        .iter()
+        .map(|dep| format!("[0,\"x\",false,{dep}]"))
+        .collect::<Vec<_>>()
+        .join(",");
+    common::write(
+        &dir.join(format!("{}.json", unit.kind)),
+        &format!(
+            r#"{{"rustc":1,"features":"{}","target":2,"profile":3,"path":4,"deps":[{deps}],"local":[],"rustflags":[],"config":5,"compile_kind":0}}"#,
+            unit.features
+        ),
+    );
+    let le = unit
+        .fingerprint
+        .to_le_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    common::write(&dir.join(unit.kind), &le);
+    let stamp = dir.join("invoked.timestamp");
+    common::write(&stamp, "");
+    let when = std::time::SystemTime::now() - Duration::from_secs(unit.age_secs);
+    std::fs::File::options()
+        .write(true)
+        .open(&stamp)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+    let artifact = |path: &Path, body: &str| common::write(path, body);
+    if unit.kind.starts_with("build-script-") {
+        let build = profile.join(format!("build/{}-{}", unit.package, unit.hash));
+        artifact(
+            &build.join(format!("build_script_build-{}.d", unit.hash)),
+            &format!("x: {}\n", unit.root.unwrap()),
+        );
+        artifact(&build.join("build-script-build"), "exe");
+    } else if unit.kind.starts_with("run-") {
+        let build = profile.join(format!("build/{}-{}", unit.package, unit.hash));
+        artifact(&build.join("out/generated.rs"), "");
+        artifact(&build.join("output"), "");
+    } else {
+        artifact(
+            &profile.join(format!("deps/lib{}-{}.rlib", unit.package, unit.hash)),
+            "rlib",
+        );
+        artifact(
+            &profile.join(format!("deps/{}-{}.d", unit.package, unit.hash)),
+            &format!("x: {}\n", unit.root.unwrap()),
+        );
+    }
+}
+
+fn unit_exists(profile: &Path, package: &str, hash: &str) -> bool {
+    profile
+        .join(format!(".fingerprint/{package}-{hash}"))
+        .exists()
+}
+
+#[test]
+#[allow(clippy::disallowed_types)]
+fn sweep_reclaims_superseded_units_after_a_build_and_in_prune() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let registry = h.root.join("registry");
+    install_cargo_with_metadata(&h, &registry);
+    let repo = h.repo("repo", "");
+    common::write(
+        &repo.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
+    );
+    common::write(&repo.join("Cargo.lock"), "# lock\n");
+    common::git(&repo, &["add", "-A"]);
+    common::git(&repo, &["commit", "-qm", "cargo fixture"]);
+    h.register(&repo);
+    let canonical = wt_sys::fsx::canonicalize(&repo).unwrap();
+    let profile = canonical.join("target/debug");
+    let old_dep = format!("{}/dep-1.0.0/src/lib.rs", registry.display());
+    let new_dep = format!("{}/dep-1.0.1/src/lib.rs", registry.display());
+    let fixtures = |profile: &Path| {
+        // The library, built twice: the older twin is superseded.
+        write_unit(
+            profile,
+            &Unit {
+                package: "fixture",
+                hash: "aaaaaaaaaaaaaaaa",
+                kind: "lib-fixture",
+                fingerprint: 10,
+                deps: &[1],
+                root: Some("src/lib.rs"),
+                features: "[]",
+                age_secs: 10,
+            },
+        );
+        write_unit(
+            profile,
+            &Unit {
+                package: "fixture",
+                hash: "bbbbbbbbbbbbbbbb",
+                kind: "lib-fixture",
+                fingerprint: 11,
+                deps: &[1],
+                root: Some("src/lib.rs"),
+                features: "[]",
+                age_secs: 5_000,
+            },
+        );
+        // A different feature set of the same library is another live thing.
+        write_unit(
+            profile,
+            &Unit {
+                package: "fixture",
+                hash: "0000000000000000",
+                kind: "lib-fixture",
+                fingerprint: 12,
+                deps: &[],
+                root: Some("src/lib.rs"),
+                features: "[\"extra\"]",
+                age_secs: 9_000,
+            },
+        );
+        // The dependency at the version the lockfile names, and the one it no longer does.
+        write_unit(
+            profile,
+            &Unit {
+                package: "dep",
+                hash: "dddddddddddddddd",
+                kind: "lib-dep",
+                fingerprint: 20,
+                deps: &[],
+                root: Some(&new_dep),
+                features: "[]",
+                age_secs: 10,
+            },
+        );
+        write_unit(
+            profile,
+            &Unit {
+                package: "dep",
+                hash: "cccccccccccccccc",
+                kind: "lib-dep",
+                fingerprint: 21,
+                deps: &[],
+                root: Some(&old_dep),
+                features: "[]",
+                age_secs: 10,
+            },
+        );
+        // The build script: its compile unit names build.rs, its run unit
+        // has no dep-info and lives because the live library names it.
+        write_unit(
+            profile,
+            &Unit {
+                package: "fixture",
+                hash: "eeeeeeeeeeeeeeee",
+                kind: "build-script-build-script-build",
+                fingerprint: 30,
+                deps: &[],
+                root: Some("build.rs"),
+                features: "[]",
+                age_secs: 10,
+            },
+        );
+        write_unit(
+            profile,
+            &Unit {
+                package: "fixture",
+                hash: "ffffffffffffffff",
+                kind: "run-build-script-build-script-build",
+                fingerprint: 1,
+                deps: &[30],
+                root: None,
+                features: "[]",
+                age_secs: 10,
+            },
+        );
+        write_unit(
+            profile,
+            &Unit {
+                package: "fixture",
+                hash: "9999999999999999",
+                kind: "run-build-script-build-script-build",
+                fingerprint: 2,
+                deps: &[30],
+                root: None,
+                features: "[]",
+                age_secs: 10,
+            },
+        );
+        // Incremental session directories: one used yesterday, one not for a month.
+        common::write(&profile.join("incremental/fixture-fresh/s-1/x"), "");
+        common::write(&profile.join("incremental/fixture-stale/s-1/x"), "");
+        let month_ago = std::time::SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60);
+        std::fs::File::open(profile.join("incremental/fixture-stale"))
+            .unwrap()
+            .set_modified(month_ago)
+            .unwrap();
+    };
+    fixtures(&profile);
+
+    let built = h.json(&["build", "repo"]);
+    let codes = built["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|notice| {
+            (
+                notice["code"].as_str().unwrap().to_owned(),
+                notice["message"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        codes.iter().any(|(code, message)| code == "SWEPT"
+            && message.contains("3 superseded units")
+            && message.contains("1 stale incremental directory")),
+        "{codes:?}"
+    );
+    for (package, hash, live) in [
+        ("fixture", "aaaaaaaaaaaaaaaa", true),
+        ("fixture", "bbbbbbbbbbbbbbbb", false),
+        ("fixture", "0000000000000000", true),
+        ("dep", "dddddddddddddddd", true),
+        ("dep", "cccccccccccccccc", false),
+        ("fixture", "eeeeeeeeeeeeeeee", true),
+        ("fixture", "ffffffffffffffff", true),
+        ("fixture", "9999999999999999", false),
+    ] {
+        assert_eq!(
+            unit_exists(&profile, package, hash),
+            live,
+            "{package}-{hash}"
+        );
+    }
+    assert!(!profile
+        .join("deps/libfixture-bbbbbbbbbbbbbbbb.rlib")
+        .exists());
+    assert!(!profile.join("deps/fixture-bbbbbbbbbbbbbbbb.d").exists());
+    assert!(profile
+        .join("deps/libfixture-aaaaaaaaaaaaaaaa.rlib")
+        .exists());
+    assert!(!profile.join("build/fixture-9999999999999999").exists());
+    assert!(profile.join("build/fixture-ffffffffffffffff/out").exists());
+    assert!(profile.join("incremental/fixture-fresh").exists());
+    assert!(!profile.join("incremental/fixture-stale").exists());
+
+    // Plain prune plans a sweep for whatever accumulated since, applies it
+    // with the rest, and reports what it reclaimed.
+    fixtures(&profile);
+    let planned = h.json(&["prune"]);
+    assert_eq!(planned["data"]["applied"], false);
+    let item = planned["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["action"] == "sweep")
+        .expect("a sweep item");
+    assert_eq!(item["target"], "repo");
+    assert!(item["reasons"][0]
+        .as_str()
+        .unwrap()
+        .starts_with("superseded-build-output (3 units"));
+    assert!(unit_exists(&profile, "fixture", "bbbbbbbbbbbbbbbb"));
+    let applied = h.json(&["prune", "--yes"]);
+    let item = applied["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["action"] == "sweep")
+        .unwrap();
+    assert_eq!(item["result"]["units"], 3);
+    assert_eq!(item["result"]["incremental"], 1);
+    assert!(!unit_exists(&profile, "fixture", "bbbbbbbbbbbbbbbb"));
+    assert!(h.json(&["prune"])["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["action"] != "sweep"));
+
+    // Nothing that matches the workspace at all is a refusal, never a wipe:
+    // the observation is about some other checkout.
+    for path in wt_sys::fsx::read_dir_paths(&profile.join("deps")).unwrap() {
+        if path.extension().is_some_and(|ext| ext == "d") {
+            common::write(&path, "x: /elsewhere/src/lib.rs\n");
+        }
+    }
+    common::write(
+        &profile.join("build/fixture-eeeeeeeeeeeeeeee/build_script_build-eeeeeeeeeeeeeeee.d"),
+        "x: /elsewhere/build.rs\n",
+    );
+    let built = h.json(&["build", "repo"]);
+    assert!(built["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "SWEEP_SKIPPED"));
+    assert!(unit_exists(&profile, "fixture", "aaaaaaaaaaaaaaaa"));
+    assert!(unit_exists(&profile, "dep", "dddddddddddddddd"));
+
+    // A build in flight holds cargo's lock; the sweep stands down.
+    let cargo_lock = profile.join(".cargo-lock");
+    let held = wt_sys::fsx::try_lock_exclusive(&cargo_lock)
+        .unwrap()
+        .unwrap();
+    let built = h.json(&["build", "repo"]);
+    assert!(built["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "SWEEP_SKIPPED"
+            && notice["message"]
+                .as_str()
+                .unwrap()
+                .contains("a build holds")));
+    drop(held);
+}
+
+fn cargo_repo(h: &Harness, name: &str) -> PathBuf {
+    let repo = h.repo(name, "");
+    common::write(
+        &repo.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
+    );
+    common::write(&repo.join("Cargo.lock"), "# lock\n");
+    common::git(&repo, &["add", "-A"]);
+    common::git(&repo, &["commit", "-qm", "cargo fixture"]);
+    common::git(&repo, &["push", "-q", "origin", "main"]);
+    repo
+}
+
+/// Pushes one commit to the repository's origin from a second clone and
+/// returns its id.
+fn advance_origin(h: &Harness, name: &str, file: &str) -> String {
+    let origin = h.repos.join(format!("{name}-origin.git"));
+    let other = h.root.join(format!("{name}-other-{file}"));
+    common::git(
+        &h.root,
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    common::write(&other.join(file), "upstream\n");
+    common::git(&other, &["add", "-A"]);
+    common::git(&other, &["commit", "-qm", "upstream change"]);
+    common::git(&other, &["push", "-q", "origin", "main"]);
+    common::git_stdout(&other, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn anchor_fast_forwards_a_clean_canonical_and_records_its_build() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
+    let repo = cargo_repo(&h, "repo");
+    h.register(&repo);
+    let before = common::git_stdout(&repo, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let tip = advance_origin(&h, "repo", "one.txt");
+
+    let refreshed = h.json(&["anchor", "repo"]);
+    assert_eq!(refreshed["data"]["refreshed"], true);
+    assert_eq!(refreshed["data"]["fetched"], true);
+    assert_eq!(refreshed["data"]["moved"]["from"], before);
+    assert_eq!(refreshed["data"]["moved"]["to"], tip);
+    assert_eq!(refreshed["data"]["head"], tip);
+    assert_eq!(refreshed["data"]["build"], "ok");
+    assert_eq!(
+        common::git_stdout(&repo, &["rev-parse", "HEAD"]).trim(),
+        tip
+    );
+    assert!(repo.join("one.txt").exists());
+    let status = h.json(&["status", "repo"]);
+    assert_eq!(status["data"]["build"]["state"], "ok");
+    let target = wt_core::model::Target::parse("repo").unwrap();
+    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
+        &h.home.join(wt_core::model::tree_state_path(&target)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        state.build.as_ref().unwrap().head.as_deref(),
+        Some(tip.as_str())
+    );
+    assert!(state.build.unwrap().log.ends_with(".wt/logs/wt-setup.log"));
+    assert!(h.json(&["doctor", "repo"])["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|finding| finding["code"] != "ANCHOR_COLD"));
+
+    // Current already: nothing moves, nothing builds.
+    let again = h.json(&["anchor", "repo"]);
+    assert!(again["data"]["moved"].is_null());
+    assert_eq!(again["data"]["build"], "fresh");
+
+    // A modified tracked file keeps the canonical where it is.
+    let tip2 = advance_origin(&h, "repo", "two.txt");
+    common::write(&repo.join("README.md"), "edited locally\n");
+    let dirty = h.json(&["anchor", "repo"]);
+    assert!(dirty["data"]["moved"].is_null());
+    assert_eq!(dirty["data"]["head"], tip);
+    assert!(dirty["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "ANCHOR_DIRTY"));
+    assert!(h.json(&["doctor", "repo"])["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|finding| finding["code"] != "ANCHOR_COLD"));
+    common::git(&repo, &["checkout", "--", "README.md"]);
+
+    // Another branch checked out: the default branch is not what is here.
+    common::git(&repo, &["checkout", "-qb", "other"]);
+    let off = h.json(&["anchor", "repo"]);
+    assert!(off["data"]["moved"].is_null());
+    assert!(off["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "ANCHOR_OFF_DEFAULT"));
+    common::git(&repo, &["checkout", "-q", "main"]);
+
+    // Local commits origin lacks: never reset.
+    common::write(&repo.join("local.txt"), "local\n");
+    common::git(&repo, &["add", "-A"]);
+    common::git(&repo, &["commit", "-qm", "local only"]);
+    let diverged = h.json(&["anchor", "repo"]);
+    assert!(diverged["data"]["moved"].is_null());
+    assert!(diverged["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "ANCHOR_DIVERGED"));
+    assert!(repo.join("local.txt").exists());
+    common::git(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+
+    // Clean again: the fast-forward catches up with both upstream commits.
+    let caught_up = h.json(&["anchor", "repo"]);
+    assert_eq!(caught_up["data"]["moved"]["to"], tip2);
+    assert_eq!(caught_up["data"]["build"], "ok");
+
+    // A refresh already under way is the reason not to start another.
+    let holder = wt_sys::lock::Holder::current("repo", "test", "now");
+    let lock = wt_sys::lock::anchor(&h.home.join("locks/repo/anchor.lock"), &holder).unwrap();
+    let busy = h.json(&["anchor", "repo"]);
+    assert_eq!(busy["data"]["refreshed"], false);
+    assert_eq!(busy["data"]["build"], "busy");
+    assert!(busy["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "ANCHOR_BUSY"));
+    drop(lock);
+
+    let unknown = h.wt().args(["anchor", "nope", "--json"]).output().unwrap();
+    assert_eq!(unknown.status.code(), Some(3));
+
+    // A canonical that seeds trees but has no build of its commit is cold.
+    common::write(&repo.join(".wt/build.status"), "failed\n");
+    assert!(h.json(&["doctor", "repo"])["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "ANCHOR_COLD"
+            && finding["remedy"]
+                .as_str()
+                .unwrap()
+                .contains("wt anchor repo")));
+}
+
+/// Polls until the file holds `needle`, returning its content.
+fn wait_for_contains(path: &Path, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        if text.contains(needle) {
+            return text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} never contained {needle:?}; last content:\n{text}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_file(path: &Path, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "{what} never appeared at {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn lifecycle_verbs_refresh_the_anchor_only_for_labels_that_seed() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
+    let repo = cargo_repo(&h, "repo");
+    h.register(&repo);
+    let plain = h.repo("plain", "[task.build]\nrun = \"true\"\n");
+    h.register(&plain);
+    let anchor_log = repo.join(".wt/logs/wt-anchor.log");
+    let canonical_status = repo.join(".wt/build.status");
+
+    // `new` starts the tree's own build first, then the canonical's,
+    // detached: the canonical ends up built at its commit.
+    let tip = advance_origin(&h, "repo", "one.txt");
+    let created = h.json(&["new", "repo/work", "--no-sync"]);
+    assert!(created["data"]["build"]["log"].is_string());
+    wait_for_file(&anchor_log, "the anchor log");
+    wait_for_text(&canonical_status, "ok\n");
+    let target = wt_core::model::Target::parse("repo").unwrap();
+    let read_state = || {
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
+            &h.home.join(wt_core::model::tree_state_path(&target)),
+            "STATE_CORRUPT",
+        )
+        .unwrap()
+        .unwrap()
+    };
+    // `new` fetched already, so its refresh skips the fetch and
+    // fast-forwards to the tip `new` brought in.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while read_state().build.and_then(|build| build.head).as_deref() != Some(tip.as_str()) {
+        assert!(
+            Instant::now() < deadline,
+            "new's refresh never moved the canonical"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    wait_for_text(&canonical_status, "ok\n");
+    // The refresh writes its own report as it exits, after the build's
+    // status; wait for it rather than reading a half-written log.
+    let log = wait_for_contains(
+        &anchor_log,
+        "Refreshed repo at the default branch's new tip",
+    );
+    assert!(!log.contains("fetch"), "{log}");
+
+    // `rm` refreshes with a fetch: the canonical catches up with a commit
+    // nothing else has fetched.
+    let tip2 = advance_origin(&h, "repo", "two.txt");
+    h.json(&["rm", "repo/work", "--yes"]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while read_state().build.unwrap().head.as_deref() != Some(tip2.as_str()) {
+        assert!(
+            Instant::now() < deadline,
+            "rm's refresh never moved the canonical"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    wait_for_text(&canonical_status, "ok\n");
+    assert_eq!(
+        common::git_stdout(&repo, &["rev-parse", "HEAD"]).trim(),
+        tip2
+    );
+    wait_for_contains(&anchor_log, "fetch  ok");
+
+    // A label whose adapters seed nothing has nothing to keep warm.
+    h.json(&["new", "plain/work", "--no-sync"]);
+    let plain_target = wt_core::model::Target::parse("plain/work").unwrap();
+    wait_for_text(&h.home.join("trees/plain/work/.wt/build.status"), "ok\n");
+    h.json(&["rm", "plain/work", "--yes"]);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!plain.join(".wt/logs/wt-anchor.log").exists());
+    assert!(!plain.join(".wt/build.status").exists());
+    let _ = plain_target;
 }

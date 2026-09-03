@@ -209,6 +209,61 @@ pub fn disk_kb_except(path: &Path, skip: &[std::ffi::OsString]) -> Result<u64> {
     Ok(total.saturating_add(1023) / 1024)
 }
 
+/// Modification time in whole seconds since the epoch, without following a
+/// symlink at the path; `None` when the path is missing.
+pub fn modified_secs(path: &Path) -> Result<Option<u64>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_secs())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(fs_error("inspect modification time", path)(error)),
+    }
+}
+
+/// An exclusive advisory lock on an arbitrary file, released on drop. Used
+/// to hold cargo's own build-directory lock while a sweep runs (§11.9), so
+/// the sweep and a build exclude each other exactly as two builds do.
+#[derive(Debug)]
+pub struct FileLock(File);
+
+/// Takes an exclusive `flock` on `path` without waiting, creating the file
+/// when absent; `Ok(None)` when another process holds it.
+pub fn try_lock_exclusive(path: &Path) -> Result<Option<FileLock>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(fs_error("open lock file", path))?;
+    // SAFETY: `file` owns a valid descriptor; LOCK_EX | LOCK_NB is a
+    // supported flock operation and never blocks.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(FileLock(file)));
+    }
+    let error = std::io::Error::last_os_error();
+    if error
+        .raw_os_error()
+        .is_some_and(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+    {
+        return Ok(None);
+    }
+    Err(fs_error("lock file", path)(error))
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // SAFETY: the file owns a valid open descriptor; LOCK_UN only
+        // releases this process's advisory lock.
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
 pub fn read_dir_paths(path: &Path) -> Result<Vec<PathBuf>> {
     let entries = match std::fs::read_dir(path) {
         Ok(entries) => entries,

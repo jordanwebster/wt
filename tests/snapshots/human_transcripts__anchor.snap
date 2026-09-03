@@ -1,0 +1,7 @@
+---
+source: tests/human_transcripts.rs
+expression: normalized
+---
+repo is at the default branch's tip
+  fetch  ok
+  build  ok

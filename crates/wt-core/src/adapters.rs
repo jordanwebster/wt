@@ -57,9 +57,19 @@ pub struct Tool {
     /// Directories a new tree clones copy-on-write from the canonical
     /// checkout, when the filesystem can (§11.8).
     pub seed: Vec<String>,
+    /// How the tool's build output is reclaimed after a build and by `prune`
+    /// (§11.9): the strategy and the build directory it applies to.
+    pub sweep: Option<SweepSpec>,
     pub env: IndexMap<String, String>,
     pub commands: Vec<String>,
     pub task: IndexMap<String, Task>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SweepSpec {
+    pub kind: String,
+    pub dir: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -92,6 +102,7 @@ pub struct AdapterContribution {
     pub commands: Vec<String>,
     pub sync_inputs: Vec<String>,
     pub seed: Vec<String>,
+    pub sweeps: Vec<crate::config::Sweep>,
     pub requirements: Vec<String>,
     pub nudges: Vec<Nudge>,
     pub selected_tools: BTreeSet<String>,
@@ -219,6 +230,32 @@ pub fn contribution(hits: &[AdapterHit]) -> Result<AdapterContribution, CoreErro
             })
             .collect::<Vec<_>>();
         append_unique(&mut output.seed, &seed);
+        if let Some(spec) = &tool.sweep {
+            let kind = match spec.kind.as_str() {
+                "cargo" => crate::config::SweepKind::Cargo,
+                other => {
+                    return Err(CoreError::new(
+                        ExitClass::Internal,
+                        "ADAPTER_INVALID",
+                        format!(
+                            "built-in adapter `{}` names unknown sweep `{other}`",
+                            hit.adapter
+                        ),
+                        "reinstall a valid wt build",
+                    ))
+                }
+            };
+            let sweep = crate::config::Sweep {
+                kind,
+                workspace: hit.dir.trim_end_matches('/').to_owned(),
+                build_dir: RelPath::new(if hit.dir == "." {
+                    spec.dir.clone()
+                } else {
+                    format!("{}/{}", hit.dir.trim_end_matches('/'), spec.dir)
+                })?,
+            };
+            append_unique(&mut output.sweeps, std::slice::from_ref(&sweep));
+        }
         if let Some(requirement) = &tool.requires {
             append_unique(&mut output.requirements, std::slice::from_ref(requirement));
         }
@@ -248,6 +285,7 @@ pub fn apply_contribution(
         let path = RelPath::new(path)?;
         append_unique(&mut config.seed, std::slice::from_ref(&path));
     }
+    append_unique(&mut config.sweeps, &contribution.sweeps);
     Ok(())
 }
 
@@ -586,14 +624,23 @@ mod tests {
         // The tree's build lives in its own `target/`: no cargo directory
         // variable of any kind, and the compiled dependencies arrive by seed.
         assert!(!contributed.env.keys().any(|key| key.starts_with("CARGO")));
+        // incremental/ is not seeded: rustc keys it by crate metadata,
+        // which embeds the workspace path, so a tree never reuses it.
         assert_eq!(
             contributed.seed,
             vec![
                 "target/debug/.fingerprint".to_owned(),
                 "target/debug/build".to_owned(),
                 "target/debug/deps".to_owned(),
-                "target/debug/incremental".to_owned(),
             ]
+        );
+        assert_eq!(
+            contributed.sweeps,
+            vec![crate::config::Sweep {
+                kind: crate::config::SweepKind::Cargo,
+                workspace: ".".to_owned(),
+                build_dir: RelPath::new("target").unwrap(),
+            }]
         );
         assert!(contributed
             .nudges
@@ -624,6 +671,8 @@ mod tests {
             .seed
             .iter()
             .all(|path| path.starts_with("backend/target/debug/")));
+        assert_eq!(scoped.sweeps[0].workspace, "backend");
+        assert_eq!(scoped.sweeps[0].build_dir.as_str(), "backend/target");
     }
 
     #[test]

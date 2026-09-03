@@ -10,10 +10,10 @@ use wt_sys::lock;
 
 use crate::cli::{Prune, Remove};
 
-use super::{door, executor, remove, Context, Output};
+use super::{door, executor, remove, sweep, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Prune) -> Result<Output, CoreError> {
-    let mut items = plan(context, &args)?;
+    let (mut items, plan_notices) = plan(context, &args)?;
     let should_apply = if context.yes {
         true
     } else if context.tty.stdin {
@@ -35,7 +35,7 @@ pub(crate) fn run(context: &mut Context, args: Prune) -> Result<Output, CoreErro
             subject: None,
             message: "prune plan was reported but not applied; re-run with --yes".to_owned(),
         });
-        return Ok(output);
+        return Ok(output.with_notices(plan_notices));
     }
 
     let original_yes = context.yes;
@@ -47,10 +47,14 @@ pub(crate) fn run(context: &mut Context, args: Prune) -> Result<Output, CoreErro
         applied: true,
         items,
     })?
+    .with_notices(plan_notices)
     .with_notices(notices))
 }
 
-fn plan(context: &Context, args: &Prune) -> Result<Vec<PruneItemReport>, CoreError> {
+/// The plan, and the notices that explain what it could not plan — a
+/// sweep that stood down says why here, since apply never revisits it.
+fn plan(context: &Context, args: &Prune) -> Result<(Vec<PruneItemReport>, Vec<Notice>), CoreError> {
+    let mut notices = Vec::new();
     if let Some(target) = &args.records {
         let target = context.resolve(Some(target))?;
         let tree = context.tree(&target)?;
@@ -67,12 +71,15 @@ fn plan(context: &Context, args: &Prune) -> Result<Vec<PruneItemReport>, CoreErr
                 "use --records only for missing, replaced, or remove-interrupted trees",
             ));
         }
-        return Ok(vec![PruneItemReport {
-            target: target.to_string(),
-            reasons: vec!["records".to_owned()],
-            action: "destroy-records".to_owned(),
-            result: None,
-        }]);
+        return Ok((
+            vec![PruneItemReport {
+                target: target.to_string(),
+                reasons: vec!["records".to_owned()],
+                action: "destroy-records".to_owned(),
+                result: None,
+            }],
+            notices,
+        ));
     }
 
     let mut planned = BTreeMap::<String, PruneItemReport>::new();
@@ -152,6 +159,56 @@ fn plan(context: &Context, args: &Prune) -> Result<Vec<PruneItemReport>, CoreErr
             );
         }
     }
+    // Build output the workspace will never read again, in every live tree
+    // and canonical (§11.9). A pass that stands down — a lockfile cargo
+    // refuses, a build holding the directory — has no item and says why.
+    for tree in &context.registry.trees {
+        if args
+            .label
+            .as_deref()
+            .is_some_and(|label| tree.label.as_str() != label)
+            || !context.identity_ok(tree).unwrap_or(false)
+        {
+            continue;
+        }
+        let target = super::context::target_of(tree).to_string();
+        if planned.contains_key(&target) {
+            continue;
+        }
+        let passes = match sweep::sweep_tree(context, tree, false) {
+            Ok(passes) => passes,
+            Err(error) => {
+                notices.push(Notice {
+                    level: NoticeLevel::Info,
+                    code: "SWEEP_SKIPPED".to_owned(),
+                    subject: Some(target.clone()),
+                    message: format!("build output was not swept: {}", error.message),
+                });
+                continue;
+            }
+        };
+        notices.extend(
+            sweep::notices(&target, &passes)
+                .into_iter()
+                .filter(|notice| notice.code == "SWEEP_SKIPPED"),
+        );
+        if passes.iter().any(sweep::Pass::reclaims) {
+            let total = sweep::total(&passes);
+            planned.insert(
+                target.clone(),
+                PruneItemReport {
+                    target,
+                    reasons: vec![format!(
+                        "superseded-build-output ({} units, {} MB)",
+                        total.units,
+                        total.kb / 1024
+                    )],
+                    action: "sweep".to_owned(),
+                    result: None,
+                },
+            );
+        }
+    }
     for path in state_orphans(context, args.label.as_deref())? {
         let target = path.to_string_lossy().into_owned();
         planned.insert(
@@ -175,7 +232,7 @@ fn plan(context: &Context, args: &Prune) -> Result<Vec<PruneItemReport>, CoreErr
             },
         );
     }
-    Ok(planned.into_values().collect())
+    Ok((planned.into_values().collect(), notices))
 }
 
 fn apply(
@@ -291,6 +348,18 @@ fn apply(
             "delete-state" => {
                 wt_sys::fsx::remove_path(Path::new(&item.target))?;
                 item.result = Some(serde_json::json!({"deleted": true}));
+            }
+            "sweep" => {
+                let target = context.resolve(Some(&item.target))?;
+                let tree = context.tree(&target)?;
+                let passes = sweep::sweep_tree(context, &tree, true)?;
+                notices.extend(sweep::notices(&item.target, &passes));
+                let total = sweep::total(&passes);
+                item.result = Some(serde_json::json!({
+                    "units": total.units,
+                    "incremental": total.incremental,
+                    "kb": total.kb,
+                }));
             }
             "delete-exclusive" => {
                 let deleted = if let Some(entry) = exclusive_entries.get(&item.target) {

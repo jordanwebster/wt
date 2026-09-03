@@ -19,8 +19,13 @@ sync_inputs = ["Cargo.lock", "Cargo.toml"]
 # workspace path, so two checkouts of one workspace write the same slots and
 # corrupt each other's build-script output and freshness state. The uplifted
 # binaries directly under target/debug are deliberately not listed, so a tree
-# only ever runs what it linked itself (SPEC §9.2a).
-seed = ["target/debug/.fingerprint", "target/debug/build", "target/debug/deps", "target/debug/incremental"]
+# only ever runs what it linked itself (SPEC §9.2a). Neither is incremental/:
+# rustc keys its session directories by crate metadata, which embeds the
+# workspace path, so a tree can never reuse the canonical's.
+seed = ["target/debug/.fingerprint", "target/debug/build", "target/debug/deps"]
+# After every build wt launches, and in `wt prune`, units the workspace will
+# never read again are deleted from target/ (SPEC §11.9).
+sweep = { kind = "cargo", dir = "target" }
 
 [tools.cargo.task.sync]
 run = "cargo fetch"
@@ -45,8 +50,9 @@ sniff = [
   { file = ".rustfmt.toml", toml_key = "imports_granularity" },
 ]
 
-# Seeds exactly as the regular cargo tool above.
-seed = ["target/debug/.fingerprint", "target/debug/build", "target/debug/deps", "target/debug/incremental"]
+# Seeds and sweeps exactly as the regular cargo tool above.
+seed = ["target/debug/.fingerprint", "target/debug/build", "target/debug/deps"]
+sweep = { kind = "cargo", dir = "target" }
 
 [tools.cargo-nightly-fmt.task.sync]
 run = "cargo fetch"

@@ -183,6 +183,11 @@ impl Context {
         self.home.join(format!("locks/git/{gitdir_id}.lock"))
     }
 
+    /// The level-0 lock one label's anchor refreshes take (§11.10).
+    pub fn anchor_lock_path(&self, label: &wt_core::model::Label) -> PathBuf {
+        self.home.join(format!("locks/{label}/anchor.lock"))
+    }
+
     /// Root under which adapters key per-tree build caches.
     pub fn read_state(&self, target: &Target) -> Result<Option<TreeState>, CoreError> {
         fsx::trace_budget("state_read", Some(&self.state_path(target)))?;

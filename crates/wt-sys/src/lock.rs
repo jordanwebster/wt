@@ -14,6 +14,9 @@ use crate::{fsx, Result};
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Level {
+    /// Serialises one label's anchor refreshes (§11.10); held across the
+    /// build, so it sits below every other level.
+    Anchor = 0,
     Tree = 1,
     RepoGit = 2,
     Resource = 3,
@@ -166,6 +169,21 @@ impl Drop for DoorToken {
         drop(self.guard.take());
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+#[derive(Debug)]
+pub struct AnchorToken(Guard);
+
+impl AnchorToken {
+    pub fn raw_fd(&self) -> RawFd {
+        self.0.raw_fd()
+    }
+}
+
+/// Takes a label's anchor lock without waiting: a refresh already under way
+/// is the reason not to start another (§11.10).
+pub fn anchor(path: &Path, holder: &Holder) -> Result<AnchorToken> {
+    acquire(path, Level::Anchor, Mode::Exclusive, holder, Duration::ZERO).map(AnchorToken)
 }
 
 /// Acquires a level-1 tree lock and returns its fd-owning token.

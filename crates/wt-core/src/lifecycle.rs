@@ -55,6 +55,11 @@ pub struct BuildState {
     pub log: String,
     #[serde(default)]
     pub pid: u32,
+    /// The commit the tree was at when the build started, so a canonical's
+    /// build can be told to be current for the commit it now sits on
+    /// (SPEC §11.10).
+    #[serde(default)]
+    pub head: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -1,4 +1,6 @@
 mod adopt;
+mod anchor;
+mod build;
 mod clone_repo;
 mod close;
 mod completions;
@@ -28,6 +30,7 @@ mod setup;
 mod shell;
 mod shell_init;
 mod status;
+mod sweep;
 mod sync;
 mod tasks;
 mod unregister;
@@ -144,9 +147,10 @@ fn run(cli: Cli) -> i32 {
                             .expect("deferred actions require an open context"),
                         &target,
                     ) {
-                        Ok(build) => {
+                        Ok((build, notice)) => {
                             output.data["build"] =
                                 serde_json::to_value(build).expect("build state always serializes");
+                            output = output.with_notices(notice);
                         }
                         Err(error) => output = output.with_failure(error),
                     }
@@ -200,7 +204,17 @@ fn run(cli: Cli) -> i32 {
                         }
                     }
                     AfterRender::Build { target } => match open::start_build(context, &target) {
-                        Ok(build) => println!("build started  {}", build.log),
+                        Ok((build, notice)) => {
+                            println!("build started  {}", build.log);
+                            if let Some(notice) = notice {
+                                let _ = writeln!(
+                                    std::io::stderr(),
+                                    "wt: {} — {}",
+                                    notice.code,
+                                    notice.message
+                                );
+                            }
+                        }
                         Err(error) => {
                             return render_error(&command, json, color, error, Vec::new())
                         }
@@ -317,23 +331,8 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Test(args) => run::run(context, args.into_run("test")),
         Command::Lint(args) => run::run(context, args.into_run("lint")),
         Command::Fmt(args) => run::run(context, args.into_run("fmt")),
-        Command::Build(args) => {
-            let dry_run = args.dry_run;
-            let target = args.target.clone();
-            let status = (!dry_run)
-                .then(|| build_status_path(context, target.as_deref()))
-                .flatten();
-            if let Some(path) = &status {
-                let _ = wt_sys::fsx::write_store(path, b"running\n");
-                // The recorded pid otherwise still names the finished
-                // supervisor, and a dead pid beside a `running` status reads
-                // as abandoned (A69) — for the whole foreground run.
-                record_build_pid(context, target.as_deref());
-            }
-            let result = run::run(context, args.into_run("build"));
-            record_build_result(status.as_deref(), &result);
-            result
-        }
+        Command::Build(args) => build::dispatch(context, args),
+        Command::Anchor(args) => anchor::run(context, args),
         Command::Exec(args) => exec::run(context, args),
         Command::Shell(args) => shell::run(context, args),
         Command::Env(args) => env::run(context, args),
@@ -352,50 +351,6 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Locks(args) => locks::run(context, args),
         Command::ShellInit(args) => shell_init::run(context, args),
         Command::Completions(args) => completions::run(context, args),
-    }
-}
-
-fn record_build_pid(context: &Context, target: Option<&str>) {
-    let Ok(target) = context.resolve(target) else {
-        return;
-    };
-    let Ok(holder) = context.holder(target.to_string(), "build") else {
-        return;
-    };
-    let _ = context.mutate_state(&target, &holder, |state| {
-        if let Some(build) = state.build.as_mut() {
-            build.pid = std::process::id();
-            build.started = wt_sys::fsx::timestamp()?;
-        }
-        Ok(())
-    });
-}
-
-fn build_status_path(context: &Context, target: Option<&str>) -> Option<std::path::PathBuf> {
-    if let Some(path) = std::env::var_os("WT_BACKGROUND_BUILD_STATUS").map(std::path::PathBuf::from)
-    {
-        return valid_background_build_status(&path).then_some(path);
-    }
-    let target = context.resolve(target).ok()?;
-    context.read_state(&target).ok()??.build.as_ref()?;
-    let tree = context.tree(&target).ok()?;
-    Some(std::path::Path::new(tree.path.as_str()).join(".wt/build.status"))
-}
-
-fn valid_background_build_status(path: &std::path::Path) -> bool {
-    path.file_name().is_some_and(|name| name == "build.status")
-        && path
-            .parent()
-            .is_some_and(|parent| parent.file_name().is_some_and(|name| name == ".wt"))
-        && std::env::var_os("WT_ROOT")
-            .map(std::path::PathBuf::from)
-            .is_some_and(|root| path.parent() == Some(root.join(".wt").as_path()))
-}
-
-fn record_build_result(path: Option<&std::path::Path>, result: &Result<Output, CoreError>) {
-    if let Some(path) = path {
-        let status = if result.is_ok() { "ok\n" } else { "failed\n" };
-        let _ = wt_sys::fsx::write_store(path, status.as_bytes());
     }
 }
 
