@@ -73,8 +73,14 @@ pub fn epoch_seconds() -> u64 {
         .unwrap_or(0)
 }
 
+// The crash-recovery test arms a simulated failure at one step of the store
+// write protocol. The arming is per-thread because the rest of the suite runs
+// on sibling threads: a process-wide flag would abort an unrelated test's
+// store write that happened to land in the same instant.
 #[cfg(test)]
-static STORE_FAIL_AFTER: AtomicU64 = AtomicU64::new(u64::MAX);
+thread_local! {
+    static STORE_FAIL_AFTER: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CopyReport {
@@ -874,7 +880,7 @@ fn write_atomic_mode(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 
 #[cfg(test)]
 fn store_boundary(index: u64) -> Result<()> {
-    if STORE_FAIL_AFTER.load(Ordering::Relaxed) == index {
+    if STORE_FAIL_AFTER.with(|armed| armed.get()) == index {
         return Err(CoreError::new(
             ExitClass::Internal,
             "STORE_TEST_INTERRUPT",
@@ -1302,7 +1308,7 @@ mod tests {
             (5, true),
         ] {
             let path = dir.path().join(format!("state/{index}.json"));
-            STORE_FAIL_AFTER.store(u64::MAX, Ordering::Relaxed);
+            STORE_FAIL_AFTER.with(|armed| armed.set(u64::MAX));
             write_json(&path, &old).unwrap();
             assert_eq!(
                 std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -1316,12 +1322,12 @@ mod tests {
                     & 0o777,
                 0o700
             );
-            STORE_FAIL_AFTER.store(index, Ordering::Relaxed);
+            STORE_FAIL_AFTER.with(|armed| armed.set(index));
             assert!(write_json(&path, &new).is_err());
             let actual = read_json::<Doc>(&path, "STATE_CORRUPT").unwrap().unwrap();
             assert_eq!(&actual, if expect_new { &new } else { &old });
         }
-        STORE_FAIL_AFTER.store(u64::MAX, Ordering::Relaxed);
+        STORE_FAIL_AFTER.with(|armed| armed.set(u64::MAX));
     }
 
     #[test]
