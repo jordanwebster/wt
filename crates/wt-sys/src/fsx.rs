@@ -598,18 +598,31 @@ pub fn clone_contained(source: &Path, root: &Path, relative: &RelPath) -> Result
 /// Only APFS offers a whole-directory clone today.
 const CLONE_SUPPORTED: bool = cfg!(target_os = "macos");
 
+/// Whether this build of wt can clone at all, so a caller can skip a
+/// per-file snapshot without opening anything.
+pub const fn clone_supported() -> bool {
+    CLONE_SUPPORTED
+}
+
+/// `CLONE_NOFOLLOW` from `<sys/clonefile.h>`, which the libc crate does
+/// not name.
+#[cfg(target_os = "macos")]
+const CLONE_NOFOLLOW: u32 = 0x0001;
+
 #[cfg(target_os = "macos")]
 fn clone_at(source: &Path, parent: &OwnedFd, name: &CString) -> Result<bool> {
     let source_name = CString::new(source.as_os_str().as_bytes()).map_err(nul_error)?;
     // SAFETY: both names are NUL-terminated and outlive the call, and the
     // parent descriptor is owned by the caller; clonefileat retains nothing.
+    // A symlink at the source is cloned as a symlink, never followed:
+    // the snapshot of a checkout must reproduce what git tracks.
     let result = unsafe {
         libc::clonefileat(
             libc::AT_FDCWD,
             source_name.as_ptr(),
             parent.as_raw_fd(),
             name.as_ptr(),
-            0,
+            CLONE_NOFOLLOW,
         )
     };
     if result == 0 {

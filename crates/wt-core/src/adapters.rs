@@ -54,12 +54,10 @@ pub struct Tool {
     pub sniff: Vec<Sniff>,
     pub requires: Option<String>,
     pub sync_inputs: Vec<String>,
-    /// Directories a new tree clones copy-on-write from the canonical
-    /// checkout, when the filesystem can (§11.8).
-    pub seed: Vec<String>,
-    /// How the tool's build output is reclaimed after a build and by `prune`
-    /// (§11.9): the strategy and the build directory it applies to.
-    pub sweep: Option<SweepSpec>,
+    /// The tool's build output roots: what a new tree's snapshot of the
+    /// canonical clones (§11.8) and what the sweep reclaims from (§11.9),
+    /// each with the strategy that knows its layout.
+    pub output: Vec<OutputSpec>,
     pub env: IndexMap<String, String>,
     pub commands: Vec<String>,
     pub task: IndexMap<String, Task>,
@@ -67,9 +65,9 @@ pub struct Tool {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SweepSpec {
+pub struct OutputSpec {
+    pub path: String,
     pub kind: String,
-    pub dir: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -101,8 +99,7 @@ pub struct AdapterContribution {
     pub env: IndexMap<String, String>,
     pub commands: Vec<String>,
     pub sync_inputs: Vec<String>,
-    pub seed: Vec<String>,
-    pub sweeps: Vec<crate::config::Sweep>,
+    pub outputs: Vec<crate::config::Output>,
     pub requirements: Vec<String>,
     pub nudges: Vec<Nudge>,
     pub selected_tools: BTreeSet<String>,
@@ -206,62 +203,53 @@ pub fn contribution(hits: &[AdapterHit]) -> Result<AdapterContribution, CoreErro
         .into_iter()
         .map(|adapter| (adapter.name.clone(), adapter))
         .collect();
-    let mut output = AdapterContribution::default();
+    let mut contributed = AdapterContribution::default();
     for hit in hits {
         let adapter = &adapters[&hit.adapter];
         let tool = &adapter.tools[&hit.tool];
-        output.selected_tools.insert(hit.tool.clone());
+        contributed.selected_tools.insert(hit.tool.clone());
         for (key, value) in &tool.env {
-            output.env.insert(key.clone(), value.clone());
+            contributed.env.insert(key.clone(), value.clone());
         }
-        append_unique(&mut output.commands, &tool.commands);
-        append_unique(&mut output.sync_inputs, &tool.sync_inputs);
-        // A tool detected under a configured scope seeds relative to that
-        // scope: `backend/target/...`, not the repository's `target/`.
-        let seed = tool
-            .seed
-            .iter()
-            .map(|path| {
-                if hit.dir == "." {
-                    path.clone()
-                } else {
-                    format!("{}/{}", hit.dir.trim_end_matches('/'), path)
-                }
-            })
-            .collect::<Vec<_>>();
-        append_unique(&mut output.seed, &seed);
-        if let Some(spec) = &tool.sweep {
+        append_unique(&mut contributed.commands, &tool.commands);
+        append_unique(&mut contributed.sync_inputs, &tool.sync_inputs);
+        // A tool detected under a configured scope has its output relative
+        // to that scope: `backend/target`, not the repository's `target/`.
+        for spec in &tool.output {
             let kind = match spec.kind.as_str() {
-                "cargo" => crate::config::SweepKind::Cargo,
+                "cargo" => crate::config::OutputKind::Cargo,
                 other => {
                     return Err(CoreError::new(
                         ExitClass::Internal,
                         "ADAPTER_INVALID",
                         format!(
-                            "built-in adapter `{}` names unknown sweep `{other}`",
+                            "built-in adapter `{}` names unknown output kind `{other}`",
                             hit.adapter
                         ),
                         "reinstall a valid wt build",
                     ))
                 }
             };
-            let sweep = crate::config::Sweep {
+            let output = crate::config::Output {
                 kind,
                 workspace: hit.dir.trim_end_matches('/').to_owned(),
-                build_dir: RelPath::new(if hit.dir == "." {
-                    spec.dir.clone()
+                path: RelPath::new(if hit.dir == "." {
+                    spec.path.clone()
                 } else {
-                    format!("{}/{}", hit.dir.trim_end_matches('/'), spec.dir)
+                    format!("{}/{}", hit.dir.trim_end_matches('/'), spec.path)
                 })?,
             };
-            append_unique(&mut output.sweeps, std::slice::from_ref(&sweep));
+            append_unique(&mut contributed.outputs, std::slice::from_ref(&output));
         }
         if let Some(requirement) = &tool.requires {
-            append_unique(&mut output.requirements, std::slice::from_ref(requirement));
+            append_unique(
+                &mut contributed.requirements,
+                std::slice::from_ref(requirement),
+            );
         }
-        append_unique(&mut output.nudges, &adapter.nudge);
+        append_unique(&mut contributed.nudges, &adapter.nudge);
     }
-    Ok(output)
+    Ok(contributed)
 }
 
 pub fn apply_contribution(
@@ -281,11 +269,7 @@ pub fn apply_contribution(
         let path = RelPath::new(path)?;
         append_unique(&mut config.sync_inputs, std::slice::from_ref(&path));
     }
-    for path in &contribution.seed {
-        let path = RelPath::new(path)?;
-        append_unique(&mut config.seed, std::slice::from_ref(&path));
-    }
-    append_unique(&mut config.sweeps, &contribution.sweeps);
+    append_unique(&mut config.outputs, &contribution.outputs);
     Ok(())
 }
 
@@ -622,27 +606,18 @@ mod tests {
         let contributed = contribution(&hits).unwrap();
         assert!(contributed.sync_inputs.contains(&"Cargo.toml".to_owned()));
         // The tree's build lives in its own `target/`: no cargo directory
-        // variable of any kind, and the compiled dependencies arrive by seed.
+        // variable of any kind, and the output root is what a new tree's
+        // snapshot clones and the sweep reclaims from.
         assert!(!contributed.env.keys().any(|key| key.starts_with("CARGO")));
-        // incremental/ is not seeded: rustc keys it by crate metadata,
-        // which embeds the workspace path, so a tree never reuses it.
         assert_eq!(
-            contributed.seed,
-            vec![
-                "target/debug/.fingerprint".to_owned(),
-                "target/debug/build".to_owned(),
-                "target/debug/deps".to_owned(),
-            ]
-        );
-        assert_eq!(
-            contributed.sweeps,
-            vec![crate::config::Sweep {
-                kind: crate::config::SweepKind::Cargo,
+            contributed.outputs,
+            vec![crate::config::Output {
+                kind: crate::config::OutputKind::Cargo,
                 workspace: ".".to_owned(),
-                build_dir: RelPath::new("target").unwrap(),
+                path: RelPath::new("target").unwrap(),
             }]
         );
-        assert!(contributed
+        assert!(!contributed
             .nudges
             .iter()
             .any(|nudge| nudge.want == "sccache"));
@@ -653,12 +628,15 @@ mod tests {
             .iter()
             .any(|path| path.as_str() == "Cargo.toml"));
         assert!(config
-            .seed
+            .outputs
             .iter()
-            .any(|path| path.as_str() == "target/debug/deps"));
-        // `seed` is the adapter's to declare, never the configuration's.
+            .any(|output| output.path.as_str() == "target"));
+        // Output roots are the adapter's to declare, never the configuration's.
+        assert!(
+            crate::config::parse("output = [{ path = 'target', kind = 'cargo' }]", "repo").is_err()
+        );
         assert!(crate::config::parse("seed = ['target']", "repo").is_err());
-        // Under a configured scope the seed follows the scope.
+        // Under a configured scope the output follows the scope.
         let scoped = contribution(&[AdapterHit {
             adapter: "cargo".to_owned(),
             tool: "cargo".to_owned(),
@@ -667,12 +645,8 @@ mod tests {
             sync_override: None,
         }])
         .unwrap();
-        assert!(scoped
-            .seed
-            .iter()
-            .all(|path| path.starts_with("backend/target/debug/")));
-        assert_eq!(scoped.sweeps[0].workspace, "backend");
-        assert_eq!(scoped.sweeps[0].build_dir.as_str(), "backend/target");
+        assert_eq!(scoped.outputs[0].workspace, "backend");
+        assert_eq!(scoped.outputs[0].path.as_str(), "backend/target");
     }
 
     #[test]

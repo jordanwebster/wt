@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
-use std::ffi::OsString;
-use std::os::unix::ffi::OsStringExt;
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -232,6 +232,111 @@ impl Git {
         let output =
             self.invoke_request(&self.repo, Class::Worktree, args.clone(), false, &extra_env)?;
         ensure_success(Class::Worktree, &args, output)?;
+        crate::failpoint::new_g()
+    }
+
+    /// Adds a worktree at `path` detached at `commit` with nothing checked
+    /// out: the first half of a snapshot creation (§11.8), whose files the
+    /// caller clones from the canonical before [`Git::populate`] fills in
+    /// the rest and [`Git::checkout_spec`] moves to the tree's own start.
+    pub fn worktree_add_no_checkout(&self, path: &Path, commit: &str) -> Result<()> {
+        let args = proc::os_args(&[
+            "worktree",
+            "add",
+            "--no-checkout",
+            "--detach",
+            &path.to_string_lossy(),
+            commit,
+        ]);
+        let output = self.invoke_request(&self.repo, Class::Worktree, args.clone(), false, &[])?;
+        ensure_success(Class::Worktree, &args, output)?;
+        Ok(())
+    }
+
+    /// Every path git tracks in `tree`, as `ls-files` lists them.
+    pub fn tracked_files(&self, tree: &Path) -> Result<Vec<PathBuf>> {
+        let args = proc::os_args(&["ls-files", "-z"]);
+        let output = self.invoke_request(tree, Class::Query, args.clone(), true, &[])?;
+        let output = ensure_success(Class::Query, &args, output)?;
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| PathBuf::from(OsStr::from_bytes(path)))
+            .collect())
+    }
+
+    /// Every tracked path of `tree` whose working copy or index entry is
+    /// not exactly what HEAD holds — modified, staged, renamed or deleted —
+    /// which a snapshot must not clone as it stands.
+    pub fn dirty_tracked_paths(&self, tree: &Path) -> Result<BTreeSet<PathBuf>> {
+        Ok(self
+            .status_porcelain(tree)?
+            .into_iter()
+            .filter(|entry| !(entry.index == '?' && entry.worktree == '?'))
+            .flat_map(|entry| [Some(entry.path), entry.original_path])
+            .flatten()
+            .collect())
+    }
+
+    /// Fills a `--no-checkout` worktree in around what was cloned into it:
+    /// the index from HEAD, the tracked files named by `missing` (every
+    /// tracked file when `None`), and the index's stat cache, so the
+    /// checkout that follows rewrites only what differs and leaves cloned
+    /// files with their modification times.
+    pub fn populate(&self, tree: &Path, missing: Option<&[PathBuf]>) -> Result<()> {
+        self.invoke_in(tree, Class::Worktree, proc::os_args(&["reset", "-q"]))?;
+        match missing {
+            None => {
+                self.invoke_in(
+                    tree,
+                    Class::Worktree,
+                    proc::os_args(&["checkout-index", "-a", "-q"]),
+                )?;
+            }
+            Some(paths) => {
+                // Bounded argument lists: a cold snapshot of a large
+                // checkout can name every file here.
+                for chunk in paths.chunks(500) {
+                    let mut args = proc::os_args(&["checkout-index", "-q", "--"]);
+                    args.extend(chunk.iter().map(|path| path.as_os_str().to_owned()));
+                    self.invoke_in(tree, Class::Worktree, args)?;
+                }
+            }
+        }
+        // `--refresh` exits 1 when it merely found something to report,
+        // which `-q` asks it to keep quiet about; the cache is written
+        // either way.
+        let args = proc::os_args(&["update-index", "-q", "--refresh"]);
+        let output = self.invoke_status_in(tree, Class::Worktree, args.clone())?;
+        match output.child.code {
+            Some(0 | 1) if !output.timed_out => Ok(()),
+            _ => Err(command_failed(Class::Worktree, &args, &output)),
+        }
+    }
+
+    /// Moves a populated worktree to its start exactly as `worktree add`
+    /// with the same spec would have checked it out.
+    pub fn checkout_spec(&self, tree: &Path, spec: &AddSpec) -> Result<()> {
+        let mut args = vec![OsString::from("checkout"), OsString::from("--quiet")];
+        match spec {
+            AddSpec::ExistingBranch(branch) => args.push(branch.into()),
+            AddSpec::NewBranch { name, start, track } => {
+                args.extend([OsString::from("-b"), OsString::from(name)]);
+                args.push(OsString::from(if *track {
+                    "--track"
+                } else {
+                    "--no-track"
+                }));
+                args.push(start.into());
+            }
+            AddSpec::Detached { start } => {
+                args.push(OsString::from("--detach"));
+                args.push(start.into());
+            }
+        }
+        args.push(OsString::from("--"));
+        self.invoke_in(tree, Class::Worktree, args)?;
         crate::failpoint::new_g()
     }
 

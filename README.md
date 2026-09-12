@@ -572,29 +572,33 @@ Rust tree's whole build lives in its own `target/` — wt sets no cargo
 directory variable, so a plain `cargo build` does the right thing, and no two
 trees can share a build directory (Cargo's unit hashes ignore the workspace
 path, so sharing one silently hands a tree another tree's compiled code). On
-a filesystem that can clone directories copy-on-write (APFS today), `wt new`
-clones the canonical checkout's compiled dependencies into the new tree in
-one step that costs neither time nor space; the tree then rebuilds only its
-own crates. Elsewhere the tree starts cold and says so. Build output dies
-with the tree, and `wt ls --disk` sizes it (`build_kb`). The canonical
-checkout is kept worth seeding from: after `wt new`, `wt rm` and `wt sync`,
-wt fetches the default branch, fast-forwards the canonical when that is safe
-(the default branch checked out, no modified tracked files, origin strictly
-ahead), builds it, and sweeps it — in the background, at low priority.
-`wt anchor <label>` does the same on demand, and `wt doctor` says when a
-canonical has no build of its commit. The sweep deletes the build output a
-workspace will never read again — old dependency versions, superseded twins,
-deleted targets, the object files rustc leaves behind for the debugger and
-never removes, incremental state of configurations nothing builds any more —
-judged by what `cargo metadata` resolves to and what the workspace's own
-units still reach rather than by age, after every task wt runs that changed
-the build directory and in `wt prune`. Cross-machine
-warmth comes from content-addressed caches: install sccache and set
-`rustc-wrapper = "sccache"` in `~/.cargo/config.toml [build]`, and every tree
-compiles shared dependencies as cache hits. pnpm hard-links packages from its
-content-addressed store, and uv hard-links from its global cache into
-`.venv`. `wt doctor` reports whether the relevant cache or accelerator is in
-use; it never switches tools for you.
+a filesystem that can clone files copy-on-write (APFS today), `wt new` takes
+a snapshot of the canonical checkout instead of a plain checkout: its clean
+tracked files with their modification times, and its whole `target/`, cloned
+in one step that costs neither time nor space; git then rewrites only what
+the branch changes. Cargo finds everything the branch did not touch fresh —
+dependencies, workspace crates and incremental state alike — so the first
+build in a new tree compiles only what the branch changed. Elsewhere the
+tree is an ordinary checkout, cold, and says so. Build output dies with the
+tree, and `wt ls --disk` sizes it (`build_kb`). The canonical checkout is
+kept worth snapshotting: after `wt new`, `wt rm` and `wt sync`, wt fetches
+the default branch, fast-forwards the canonical when that is safe (the
+default branch checked out, no modified tracked files, origin strictly
+ahead), warms it, and sweeps it — in the background, at low priority. The
+warm-up is the repository's `warm` task when it declares one (an aggregate
+over `build` and whatever test or check builds its trees run is the usual
+shape), else `build`. `wt anchor <label>` does the same on demand, and
+`wt doctor` says when a canonical has no warm-up of its commit. The sweep
+deletes the build output a workspace will never read again — old dependency
+versions, superseded twins, deleted targets, the object files rustc leaves
+behind for the debugger and never removes, incremental state of
+configurations nothing builds any more — judged by what `cargo metadata`
+resolves to and what the workspace's own units still reach rather than by
+age, after every task wt runs that changed the build directory and in
+`wt prune`. pnpm hard-links packages from its content-addressed store, and
+uv hard-links from its global cache into `.venv`. `wt doctor` reports
+whether the relevant cache or accelerator is in use; it never switches tools
+for you.
 
 And a cold first build is not a wait: the `build` task runs in the background
 after `wt new`, so you are working in the worktree while it compiles.

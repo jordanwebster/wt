@@ -3917,6 +3917,7 @@ fn copy_populates_declared_paths_and_refuses_tracked_sources() {
 }
 
 #[test]
+#[allow(clippy::disallowed_types)]
 fn cargo_sets_no_build_directory_and_seeds_a_tree_from_the_canonical_build() {
     let h = Harness::new();
     common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
@@ -3930,15 +3931,26 @@ fn cargo_sets_no_build_directory_and_seeds_a_tree_from_the_canonical_build() {
     common::git(&repo, &["commit", "-qm", "add cargo fixture"]);
     common::git(&repo, &["push", "-q", "origin", "main"]);
     h.register(&repo);
-    // A built canonical: compiled dependencies, and beside them the uplifted
-    // binary that must never travel — a tree runs only what it linked.
+    // A built canonical: compiled dependencies, incremental state, and the
+    // uplifted binary — the whole output root travels with the snapshot.
     let rlib = "target/debug/deps/libfixture-0123456789abcdef.rlib";
     common::write(&repo.join(rlib), "rlib\n");
     common::write(
         &repo.join("target/debug/.fingerprint/fixture-0123456789abcdef/lib-fixture"),
         "fingerprint\n",
     );
+    common::write(&repo.join("target/debug/incremental/fixture-abc/s-1/x"), "");
     common::write(&repo.join("target/debug/fixture"), "binary\n");
+    // A source file whose modification time is what cargo's freshness rule
+    // reads, and one with uncommitted changes the snapshot must not carry.
+    let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_876_400);
+    std::fs::File::options()
+        .write(true)
+        .open(repo.join("Cargo.toml"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    common::write(&repo.join("Cargo.lock"), "# edited, not committed\n");
 
     let created = h.json(&["new", "repo/work", "--no-sync", "--no-build"]);
     let canonical_env = h.json(&["env", "repo"])["data"]["env"].clone();
@@ -3957,8 +3969,17 @@ fn cargo_sets_no_build_directory_and_seeds_a_tree_from_the_canonical_build() {
         .iter()
         .filter_map(|notice| notice["code"].as_str())
         .collect::<Vec<_>>();
+    // Whatever the filesystem, the tree is the committed checkout: the
+    // canonical's uncommitted edit stays there.
+    assert_eq!(
+        std::fs::read_to_string(linked.join("Cargo.lock")).unwrap(),
+        "# generated fixture lockfile\n"
+    );
+    assert!(
+        common::git_stdout(&linked, &["status", "--porcelain", "--untracked-files=no"]).is_empty()
+    );
     let seeded = if cfg!(target_os = "macos") {
-        assert!(codes.contains(&"SEED_CLONED"), "{codes:?}");
+        assert!(codes.contains(&"SNAPSHOT_CLONED"), "{codes:?}");
         assert_eq!(
             std::fs::read_to_string(linked.join(rlib)).unwrap(),
             "rlib\n"
@@ -3966,16 +3987,25 @@ fn cargo_sets_no_build_directory_and_seeds_a_tree_from_the_canonical_build() {
         assert!(linked
             .join("target/debug/.fingerprint/fixture-0123456789abcdef/lib-fixture")
             .exists());
-        assert!(
-            !linked.join("target/debug/fixture").exists(),
-            "the uplifted binary was seeded"
+        assert!(linked
+            .join("target/debug/incremental/fixture-abc/s-1/x")
+            .exists());
+        assert!(linked.join("target/debug/fixture").exists());
+        // A clean tracked file keeps the canonical's modification time, so
+        // cargo finds the snapshot's units as fresh as the canonical's.
+        assert_eq!(
+            std::fs::metadata(linked.join("Cargo.toml"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            old
         );
         // Copy-on-write: a rebuild in the tree leaves the canonical as it was.
         common::write(&linked.join(rlib), "rebuilt\n");
         assert_eq!(std::fs::read_to_string(repo.join(rlib)).unwrap(), "rlib\n");
         true
     } else {
-        assert!(codes.contains(&"SEED_SKIPPED"), "{codes:?}");
+        assert!(codes.contains(&"SNAPSHOT_SKIPPED"), "{codes:?}");
         assert!(!linked.join("target").exists());
         false
     };
@@ -4677,7 +4707,6 @@ fn doctor_manufactures_git_environment_port_and_adapter_conditions() {
     h_rust.register(&rust);
     codes.extend(finding_codes(&h_rust.json(&["doctor", "rust"])));
     common::write_executable(&h_rust.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
-    common::write_executable(&h_rust.shims.join("sccache"), "#!/bin/sh\nexit 0\n");
     codes.extend(finding_codes(&h_rust.json(&["doctor", "rust"])));
 
     let h_node = Harness::new();
@@ -4685,8 +4714,10 @@ fn doctor_manufactures_git_environment_port_and_adapter_conditions() {
     common::write(&node.join("package.json"), "{\"name\":\"fixture\"}\n");
     common::write(&node.join("package-lock.json"), "{}\n");
     common::write_executable(&h_node.shims.join("npm"), "#!/bin/sh\nexit 0\n");
-    common::write_executable(&h_node.shims.join("pnpm"), "#!/bin/sh\nexit 0\n");
     h_node.register(&node);
+    // The nudged tool absent, then installed.
+    codes.extend(finding_codes(&h_node.json(&["doctor", "node"])));
+    common::write_executable(&h_node.shims.join("pnpm"), "#!/bin/sh\nexit 0\n");
     codes.extend(finding_codes(&h_node.json(&["doctor", "node"])));
 
     for code in [
@@ -4706,7 +4737,6 @@ fn doctor_manufactures_git_environment_port_and_adapter_conditions() {
         "NO_COORDINATION",
         "ADAPTER_TOOL_MISSING",
         "ACCELERATOR_MISSING",
-        "ACCELERATOR_INACTIVE",
         "ACCELERATOR_AVAILABLE",
         "NO_LOCKFILE",
     ] {
@@ -6167,4 +6197,34 @@ fn sweep_follows_any_task_that_changes_build_output() {
     assert_eq!(envelope["error"]["code"], "TASK_FAILED");
     assert!(swept(&envelope), "{envelope}");
     assert!(!unit_exists(&profile, "fixture", "bbbbbbbbbbbbbbbb"));
+}
+
+#[test]
+fn anchor_warms_the_canonical_with_the_warm_task_when_one_is_declared() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
+    // `warm` names the configurations trees inherit — here, a recipe that
+    // leaves its mark — while `build` stays the product build.
+    let repo = h.repo(
+        "repo",
+        "[task.warm]\nrun = 'touch warmed'\n[task.build]\nrun = 'touch built'\n",
+    );
+    common::write(
+        &repo.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
+    );
+    common::git(&repo, &["add", "-A"]);
+    common::git(&repo, &["commit", "-qm", "cargo fixture"]);
+    h.register(&repo);
+
+    let refreshed = h.json(&["anchor", "repo", "--no-fetch"]);
+    assert_eq!(refreshed["data"]["build"], "ok");
+    assert!(repo.join("warmed").exists());
+    assert!(!repo.join("built").exists());
+    assert_eq!(h.json(&["status", "repo"])["data"]["build"]["state"], "ok");
+    assert_eq!(
+        h.json(&["anchor", "repo", "--no-fetch"])["data"]["build"],
+        "fresh"
+    );
 }

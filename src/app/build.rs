@@ -38,16 +38,18 @@ pub(crate) fn dispatch(context: &mut Context, args: AliasRun) -> Result<Output, 
     } else {
         slot_for(context, args.target.as_deref())
     };
-    run_build(context, args, slot).map(|(output, _)| output)
+    run_build(context, args, slot, "build").map(|(output, _)| output)
 }
 
-/// Runs the effective `build` task as `wt build` does — status `running`
-/// then `ok`/`failed`, this process as the recorded owner — and sweeps the
-/// tree afterwards. Without a slot the run is a plain task run.
+/// Runs `task` — the effective `build`, or the anchor's `warm` — as
+/// `wt build` does: status `running` then `ok`/`failed`, this process as
+/// the recorded owner, and the sweep of the run afterwards. Without a slot
+/// the run is a plain task run.
 pub(crate) fn run_build(
     context: &mut Context,
     args: AliasRun,
     slot: Option<Slot>,
+    task: &str,
 ) -> Result<(Output, Option<wt_core::report::SweepReport>), CoreError> {
     let target = args.target.clone();
     if let Some(slot) = &slot {
@@ -63,7 +65,7 @@ pub(crate) fn run_build(
         );
     }
     let dry_run = args.dry_run;
-    let result = run::run(context, args.into_run("build"));
+    let result = run::run(context, args.into_run(task));
     if let Some(slot) = &slot {
         let status = if result.is_ok() { "ok\n" } else { "failed\n" };
         let _ = wt_sys::fsx::write_store(&slot.status, status.as_bytes());

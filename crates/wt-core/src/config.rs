@@ -315,33 +315,32 @@ pub struct Config {
     pub locks: IndexMap<String, LockCfg>,
     pub dirs: IndexMap<String, Scope>,
     pub sync_inputs: Vec<RelPath>,
-    /// Adapter-declared directories a new tree clones from the canonical
-    /// checkout (§11.8). Not a configuration key: the layers cannot set it.
+    /// Adapter-declared build output roots: what a new tree's snapshot of
+    /// the canonical clones (§11.8) and what wt sweeps after every task and
+    /// in `prune` (§11.9). Not a configuration key: the layers cannot set it.
     #[serde(skip)]
-    pub seed: Vec<RelPath>,
-    /// Adapter-declared build directories wt sweeps after a build and in
-    /// `prune` (§11.9). Not a configuration key either.
-    #[serde(skip)]
-    pub sweeps: Vec<Sweep>,
+    pub outputs: Vec<Output>,
     pub detect: Detect,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<BranchTemplates>,
 }
 
-/// One build directory an adapter asks wt to sweep, and how (§11.9).
+/// One build output root an adapter declares (§6.1): cloned whole into a
+/// new tree's snapshot (§11.8) and swept by the strategy that knows its
+/// layout (§11.9).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Sweep {
-    pub kind: SweepKind,
+pub struct Output {
+    pub kind: OutputKind,
     /// The scope the tool was detected in, `.` at the root: where the
     /// strategy asks the tool about the workspace, and what relative
     /// paths in build output resolve against.
     pub workspace: String,
-    /// The build directory, relative to the tree root.
-    pub build_dir: RelPath,
+    /// The output root, relative to the tree root.
+    pub path: RelPath,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SweepKind {
+pub enum OutputKind {
     /// Cargo's `target/` layout: units under `.fingerprint`, `deps`,
     /// `build` and `incremental` per profile directory.
     Cargo,
@@ -990,8 +989,7 @@ pub fn merge(layers: &[(Layer, Config)]) -> Config {
             output.locks.insert(name.clone(), lock.clone());
         }
         append_unique(&mut output.sync_inputs, &layer.sync_inputs);
-        append_unique(&mut output.seed, &layer.seed);
-        append_unique(&mut output.sweeps, &layer.sweeps);
+        append_unique(&mut output.outputs, &layer.outputs);
         if layer.branch.is_some() {
             output.branch.clone_from(&layer.branch);
         }

@@ -549,7 +549,12 @@ fn add_worktree(
     }
     let spec =
         wt_core::from_ref::add_spec(&branch, &start, args.detach, branch_exists, false, track)?;
-    git.worktree_add(Path::new(tree.path.as_str()), &spec)?;
+    snapshot_worktree(
+        &git,
+        Path::new(canonical.path.as_str()),
+        Path::new(tree.path.as_str()),
+        &spec,
+    )?;
     // Wt-created worktrees get git's own exact status caches. Best-effort:
     // a tree is never lost to a failed optimisation, and doctor reports
     // trees whose caches are off.
@@ -802,10 +807,10 @@ fn finish_under_lock(
                 tracked_checked_at: wt_sys::fsx::timestamp()?,
             });
         }
-        seed_from_canonical(
+        snapshot_outputs(
             Path::new(canonical.path.as_str()),
             root,
-            &config.seed,
+            &config.outputs,
             &target_of(tree).to_string(),
             &mut notices,
         )?;
@@ -1235,13 +1240,55 @@ fn tree_path(context: &Context, label: &wt_core::model::LabelRec, target: &Targe
         .join(&target.name)
 }
 
-/// Seeds the directories the tree's adapters declare (`target/debug/deps`
-/// and its siblings for cargo) from the canonical checkout by copy-on-write
-/// clone, so the tree starts with the canonical's compiled dependencies and
-/// rebuilds only its own crates — without a byte having been copied. Best
-/// effort by design: a canonical that was never built, a filesystem that
-/// cannot clone, and a directory already present all leave the tree cold and
-/// say so in a notice, because a cold tree is merely slower.
+/// Creates the tree's worktree as a snapshot of the canonical checkout
+/// (§11.8): the worktree is added with nothing checked out, detached at
+/// the canonical's commit; every tracked file whose working copy is clean
+/// in the canonical is cloned copy-on-write with its modification time;
+/// git then fills in whatever was not cloned, and moves the tree to its own
+/// start, rewriting only the files that differ. A build system that judges
+/// freshness by modification time — cargo — then finds the snapshot's
+/// output fresh for everything the branch did not change. Where the
+/// filesystem cannot clone, git writes every file and the tree is exactly
+/// the checkout it always was.
+fn snapshot_worktree(
+    git: &wt_sys::git::Git,
+    canonical: &Path,
+    root: &Path,
+    spec: &wt_core::from_ref::AddSpec,
+) -> Result<(), CoreError> {
+    let head = git.head_oid_in(canonical)?;
+    git.worktree_add_no_checkout(root, &head)?;
+    let mut missing = None;
+    if wt_sys::fsx::clone_supported() {
+        let dirty = git.dirty_tracked_paths(canonical)?;
+        let mut left = Vec::new();
+        let mut cloning = true;
+        for path in git.tracked_files(canonical)? {
+            let relative = wt_core::model::RelPath::new(path.to_string_lossy().into_owned())?;
+            if cloning && !dirty.contains(&path) {
+                if wt_sys::fsx::clone_contained(&canonical.join(&path), root, &relative)? {
+                    continue;
+                }
+                // The first refusal says the filesystem cannot clone: the
+                // rest is git's to write.
+                cloning = false;
+            }
+            left.push(path);
+        }
+        if cloning {
+            missing = Some(left);
+        }
+    }
+    git.populate(root, missing.as_deref())?;
+    git.checkout_spec(root, spec)
+}
+
+/// Clones the output roots the tree's adapters declare (`target` for cargo)
+/// from the canonical checkout copy-on-write, whole, so the tree starts
+/// with everything the canonical built — without a byte having been copied.
+/// Best effort by design: a canonical that was never built, a filesystem
+/// that cannot clone, and a directory already present all leave the tree
+/// cold and say so in a notice, because a cold tree is merely slower.
 /// The start of a creation that names none: the local default branch,
 /// brought to origin's tip first (§11.2). Fast-forward only — by moving the
 /// ref when no worktree holds the branch, by `merge --ff-only` when the
@@ -1314,18 +1361,19 @@ fn default_start(
     }
 }
 
-fn seed_from_canonical(
+fn snapshot_outputs(
     canonical: &Path,
     root: &Path,
-    seed: &[wt_core::model::RelPath],
+    outputs: &[wt_core::config::Output],
     target: &str,
     notices: &mut Vec<Notice>,
 ) -> Result<(), CoreError> {
-    if seed.is_empty() {
+    if outputs.is_empty() {
         return Ok(());
     }
     let mut seeded = Vec::new();
-    for path in seed {
+    for output in outputs {
+        let path = &output.path;
         let source = canonical.join(path.as_str());
         if !matches!(
             wt_sys::fsx::path_kind(&source)?,
@@ -1343,7 +1391,7 @@ fn seed_from_canonical(
         if !wt_sys::fsx::clone_contained(&source, root, path)? {
             notices.push(Notice {
                 level: NoticeLevel::Info,
-                code: "SEED_SKIPPED".to_owned(),
+                code: "SNAPSHOT_SKIPPED".to_owned(),
                 subject: Some(target.to_owned()),
                 message: format!(
                     "build output under {} cannot be cloned onto this filesystem; the tree starts cold",
@@ -1357,19 +1405,19 @@ fn seed_from_canonical(
     notices.push(if seeded.is_empty() {
         Notice {
             level: NoticeLevel::Info,
-            code: "SEED_SKIPPED".to_owned(),
+            code: "SNAPSHOT_SKIPPED".to_owned(),
             subject: Some(target.to_owned()),
             message: format!(
-                "{} has no build output to seed from; the tree starts cold",
+                "{} has no build output to snapshot; the tree starts cold",
                 canonical.display()
             ),
         }
     } else {
         Notice {
             level: NoticeLevel::Info,
-            code: "SEED_CLONED".to_owned(),
+            code: "SNAPSHOT_CLONED".to_owned(),
             subject: Some(target.to_owned()),
-            message: format!("seeded {} from {}", seeded.join(", "), canonical.display()),
+            message: format!("cloned {} from {}", seeded.join(", "), canonical.display()),
         }
     });
     Ok(())

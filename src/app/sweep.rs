@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use wt_core::config::{Sweep, SweepKind};
+use wt_core::config::{Output, OutputKind as Root};
 use wt_core::report::{Notice, NoticeLevel, SweepReport};
 use wt_core::sweep::{FileObs, IncrementalObs, OutputKind, Plan, Snapshot, UnitObs};
 use wt_core::CoreError;
@@ -43,21 +43,21 @@ pub(crate) fn sweep_tree(
     let config = context.load_config(tree)?;
     let root = Path::new(tree.path.as_str());
     let mut passes = Vec::new();
-    for sweep in &config.sweeps {
-        let build_dir = root.join(sweep.build_dir.as_str());
+    for output in &config.outputs {
+        let build_dir = root.join(output.path.as_str());
         if !matches!(
             wt_sys::fsx::path_kind(&build_dir)?,
             wt_sys::fsx::PathKind::Directory
         ) {
             continue;
         }
-        let pass = match sweep.kind {
-            SweepKind::Cargo => cargo_pass(context, root, sweep, &build_dir, apply),
+        let pass = match output.kind {
+            Root::Cargo => cargo_pass(context, root, output, &build_dir, apply),
         };
         passes.push(match pass {
             Ok(pass) => pass,
             Err(error) => Pass {
-                build_dir: sweep.build_dir.to_string(),
+                build_dir: output.path.to_string(),
                 report: SweepReport::default(),
                 skipped: Some(error.message),
             },
@@ -90,8 +90,8 @@ pub(crate) fn sample(
     let config = context.load_config(tree)?;
     let root = Path::new(tree.path.as_str());
     let mut sample = Vec::new();
-    for sweep in &config.sweeps {
-        let build_dir = root.join(sweep.build_dir.as_str());
+    for output in &config.outputs {
+        let build_dir = root.join(output.path.as_str());
         if !matches!(
             wt_sys::fsx::path_kind(&build_dir)?,
             wt_sys::fsx::PathKind::Directory
@@ -221,19 +221,19 @@ pub(crate) fn total(passes: &[Pass]) -> SweepReport {
 fn cargo_pass(
     context: &Context,
     root: &Path,
-    sweep: &Sweep,
+    output: &Output,
     build_dir: &Path,
     apply: bool,
 ) -> Result<Pass, CoreError> {
-    let workspace = if sweep.workspace == "." {
+    let workspace = if output.workspace == "." {
         root.to_path_buf()
     } else {
-        root.join(&sweep.workspace)
+        root.join(&output.workspace)
     };
     let resolve = cargo_metadata(context, &workspace)?;
     let now = wt_sys::fsx::epoch_seconds();
     let mut pass = Pass {
-        build_dir: sweep.build_dir.to_string(),
+        build_dir: output.path.to_string(),
         ..Pass::default()
     };
     for profile in profile_dirs(build_dir)? {

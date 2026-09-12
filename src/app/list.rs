@@ -738,12 +738,12 @@ impl ResourceName for wt_core::resource::ResourceRecord {
 }
 
 /// Sizes the tree on `--disk`: the whole tree, and within it the build
-/// output — the top-level directories holding the paths its adapters seed
-/// (`target` for cargo). One traversal: the build roots are walked once and
-/// the rest of the tree once, and the two are added. The build subtotal is
-/// null when the path is not the tree's own (its configuration is not to be
-/// trusted, and there is no build of *this* tree to size), when nothing is
-/// seeded, or when nothing exists.
+/// output — the top-level directories holding the output roots its adapters
+/// declare (`target` for cargo). One traversal: the build roots are walked
+/// once and the rest of the tree once, and the two are added. The build
+/// subtotal is null when the path is not the tree's own (its configuration
+/// is not to be trusted, and there is no build of *this* tree to size), when
+/// no output is declared, or when nothing exists.
 fn sizes(
     context: &Context,
     tree: &wt_core::model::TreeRec,
@@ -759,10 +759,10 @@ fn sizes(
     let roots = if identity_ok {
         context
             .load_config(tree)?
-            .seed
+            .outputs
             .iter()
-            .filter_map(|path| {
-                Path::new(path.as_str())
+            .filter_map(|output| {
+                Path::new(output.path.as_str())
                     .components()
                     .next()
                     .map(|first| first.as_os_str().to_owned())

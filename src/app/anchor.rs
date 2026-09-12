@@ -95,41 +95,44 @@ pub(crate) fn run(context: &mut Context, args: Anchor) -> Result<Output, CoreErr
     };
     let head = git.head_oid_in(path)?;
     let config = context.load_config(&tree)?;
-    let has_build = context.task_catalog(&tree, &config)?.contains_key("build");
+    let task = warm_task(&context.task_catalog(&tree, &config)?);
     let mut swept = None;
-    let build = if !has_build {
-        "none"
-    } else if build::is_fresh(context, &tree, &head)? {
-        "fresh"
-    } else {
-        let result = build::run_build(
-            context,
-            AliasRun {
-                target: Some(target.to_string()),
-                wait: None,
-                timeout: None,
-                dry_run: false,
-                no_log: false,
-                args: Vec::new(),
-            },
-            Some(build::Slot::for_tree(&tree)),
-        );
-        match result {
-            Ok((output, report)) => {
-                swept = report;
-                notices.extend(output.notices);
-                "ok"
-            }
-            Err(error) => {
-                notices.push(Notice {
-                    level: NoticeLevel::Warn,
-                    code: "BUILD_FAILED".to_owned(),
-                    subject: Some(target.to_string()),
-                    message: format!("{}; remedy: {}", error.message, error.remedy),
-                });
-                "failed"
+    let build = if let Some(task) = task {
+        if build::is_fresh(context, &tree, &head)? {
+            "fresh"
+        } else {
+            let result = build::run_build(
+                context,
+                AliasRun {
+                    target: Some(target.to_string()),
+                    wait: None,
+                    timeout: None,
+                    dry_run: false,
+                    no_log: false,
+                    args: Vec::new(),
+                },
+                Some(build::Slot::for_tree(&tree)),
+                task,
+            );
+            match result {
+                Ok((output, report)) => {
+                    swept = report;
+                    notices.extend(output.notices);
+                    "ok"
+                }
+                Err(error) => {
+                    notices.push(Notice {
+                        level: NoticeLevel::Warn,
+                        code: "BUILD_FAILED".to_owned(),
+                        subject: Some(target.to_string()),
+                        message: format!("{}; remedy: {}", error.message, error.remedy),
+                    });
+                    "failed"
+                }
             }
         }
+    } else {
+        "none"
     };
     Ok(Output::data(AnchorData {
         label: label.to_string(),
@@ -265,12 +268,25 @@ fn move_canonical(
     }
 }
 
+/// The task the anchor keeps the canonical warm with: `warm` when the
+/// repository declares one — the union of the configurations its trees
+/// use, typically an aggregate over `build` and the test builds — else
+/// `build` (§11.10).
+fn warm_task(
+    catalog: &std::collections::BTreeMap<String, wt_core::task::Node>,
+) -> Option<&'static str> {
+    ["warm", "build"]
+        .into_iter()
+        .find(|task| catalog.contains_key(*task))
+}
+
 /// Whether a canonical that seeds trees lacks a build of its current
 /// commit — the condition a refresh exists to end (§11.10). A label whose
-/// adapters seed nothing, or that has no build task, is never cold.
+/// adapters declare no output, or that has neither a warm nor a build
+/// task, is never cold.
 pub(crate) fn is_cold(context: &Context, tree: &TreeRec) -> Result<bool, CoreError> {
     let config = context.load_config(tree)?;
-    if config.seed.is_empty() || !context.task_catalog(tree, &config)?.contains_key("build") {
+    if config.outputs.is_empty() || warm_task(&context.task_catalog(tree, &config)?).is_none() {
         return Ok(false);
     }
     let Some(head) = build::head_of(context, &super::context::target_of(tree)) else {
@@ -280,7 +296,7 @@ pub(crate) fn is_cold(context: &Context, tree: &TreeRec) -> Result<bool, CoreErr
 }
 
 /// Starts a detached refresh of `tree`'s label after a lifecycle verb, when
-/// the label has something to keep warm — adapters that seed — and no
+/// the label has something to keep warm — adapters that declare output — and no
 /// refresh is already running. Fire-and-forget: the verb that called has
 /// finished, and a refresh that cannot start is a warning, never a failure.
 pub(crate) fn spawn_after(context: &Context, tree: &TreeRec, fetch: bool) -> Option<Notice> {
@@ -299,7 +315,7 @@ pub(crate) fn spawn_after(context: &Context, tree: &TreeRec, fetch: bool) -> Opt
     }
     let seeds = context
         .load_config(&canonical)
-        .map(|config| !config.seed.is_empty())
+        .map(|config| !config.outputs.is_empty())
         .unwrap_or(false);
     if !seeds {
         return None;

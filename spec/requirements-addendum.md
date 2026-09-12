@@ -1555,3 +1555,102 @@ repository into the clone model: the user's checkout is theirs, and
 migration when they want one. And the hub is never deleted by wt: an
 `unregister` that removed it would remove branches whose commits may exist
 nowhere else.
+
+## A82. A new tree is a snapshot of the canonical, the sweep follows the workspace's units and every task, and the canonical is warmed by a declared task
+
+Measured on a Rust repository of thirteen workspace crates whose trees
+are created and discarded by agents several times a day, against wt at
+A81. The canonical's build directory held 45 GiB; one linked tree's held
+70 GiB, another's 171 GiB. Where the space went, and why the machinery A79
+and A80 introduced could not reclaim it, decided each of the changes here.
+
+**What was shared was almost nothing.** The seed carried compiled
+dependencies, about one gigabyte of the canonical's 45. Everything large
+was private to each tree and rebuilt in each tree: the workspace crates,
+their test harnesses, and their incremental state. The cause was not the
+seed list but `git worktree add`, which writes every source file with a
+fresh modification time, and cargo judges a path crate's freshness by
+modification time. Cargo's unit hashes and fingerprints are independent
+of the checkout's path — the same workspace rlib, hash for hash, was
+found in two trees — so a snapshot that preserved the times would be
+fresh for everything. Three ways of creating a tree from wt's own
+canonical were timed: the seeded worktree cost 342 MiB and recompiled
+every workspace crate; a whole-directory clone cost 2.5 MiB and the first
+build was a no-op; a `--no-checkout` worktree whose clean tracked files,
+index and whole `target/` were cloned from the canonical cost 3.7 MiB,
+showed a clean `git status`, switched branches, and the first build was
+a no-op too. The third is what `new` now does (§11.8). It keeps the git
+worktree model, keeps the canonical's uncommitted edits out of the tree,
+and falls back to the ordinary checkout where nothing can be cloned. The
+`seed` and `sweep` keys become one adapter key, `output` (§6.1): the root
+a snapshot clones whole and the sweep reclaims from. A79's claim that
+`incremental/` could never be reused rested on the path being embedded
+in rustc's session keys; it is not, and the snapshot carries it.
+
+**What grew was object files nothing owned.** On macOS cargo defaults
+debug profiles to `split-debuginfo = "unpacked"`, so rustc leaves each
+codegen unit's object file under `deps/` for the debugger, hard-linked
+from the incremental session that produced it. rustc collects old
+sessions; nothing collects the links. The canonical held 26 GiB of them
+across 109 thousand files — 12 GiB for units that no longer existed and
+7 GiB left behind by earlier sessions of live units — and the largest
+tree 158 GiB. The sweep could not see them: its name parser read the
+last dash-separated segment as the unit hash, and an object's name ends
+in its codegen unit. Objects now belong to their unit and die with it; a
+live unit's object that no session links and that predates the unit's
+last compile dies; a hash-carrying file whose unit no longer exists dies
+(§11.9). Incremental directories were kept by age alone, fourteen days,
+which in a tree that lives for days never fired; each crate now keeps as
+many as it has live configurations, newest first, with age as the
+backstop.
+
+**What the sweep did delete was live.** A note from the repository side
+had caught it: two variants of one dependency that differ only in what
+they were compiled against shared the sweep's identity, so the older was
+deleted while live consumers still named it, and the next build paid a
+27 second rebuild — on the canonical, 18 of the 93 units the rule would
+delete were still reachable from a live workspace unit. Adding
+dependency identity to the slot key, the note's proposed fix, would have
+made superseded units immortal in the one case the sweep exists for: a
+dependency bump leaves the dependents' old units differing from the new
+only in what they were compiled against. Liveness now starts from the
+workspace's member units — the newest of each configuration — and
+follows recorded dependency fingerprints outward; everything reached is
+live, nothing else is. A dependency is never judged on its own.
+
+**The sweep rarely ran.** Its triggers were `wt build` and `prune`. A
+repository whose Cargo work is all custom recipes — tests by package,
+clippy, checks, cross-target checks, release builds — was never swept.
+It now follows every task wt runs in a tree with declared output:
+`build` always, any other task when the build directories changed since
+the last sweep, judged by a sample of each profile's fingerprint
+directory kept in the tree after every applied pass. Output produced by
+a `cargo` run by hand is swept by the next task; a task after which
+nothing changed costs one directory listing.
+
+**The canonical was warm for the wrong configurations.** The anchor ran
+the repository's `build` task, and this repository's `build` is a narrow
+product build, so trees inherited nothing for their tests or lints. A
+repository may now declare `warm` (§11.10): the configurations its trees
+inherit, ordinarily an aggregate over `build` and the test builds. The
+anchor runs it in place of `build`; `doctor` judges coldness against it.
+There is no new configuration key: `warm` is a task name with a
+convention, like `build` and `test`.
+
+**The compiler cache nudge goes.** The sccache nudge A79 kept was
+measured against this repository with identical sources and a controlled
+cache: zero additional hits across trees. The snapshot already shares
+compiled dependencies and workspace units at near-zero cost; sccache
+cannot cache the incremental compiles where a tree's time goes; and it
+cannot hit on sources that differ, which is what a branch is. cargo
+carries no nudge now, and `doctor` reports no accelerator for it.
+
+Two things are deliberately not done. No repository-level budget or
+byte pool: the repository's own attempt summed `du` per tree, and on
+APFS `du` counts every clone-shared extent once per tree — two clones of
+a 256 MiB file report 768 MiB and cost nothing — so the pool measured a
+number that did not exist. Per-tree exclusive physical usage is not
+computable; free space on the volume is, and if capacity ever needs
+managing that is the quantity to manage. And no typed retention classes
+on output roots: nothing measured needed one, and a root nested under a
+declared one (`target/embed`) is already swept as part of it.
