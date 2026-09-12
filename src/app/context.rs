@@ -28,6 +28,9 @@ pub(crate) struct Context {
     pub verbose: bool,
     pub tty: wt_sys::snapshot::Tty,
     pub pending_notices: Vec<Notice>,
+    /// What the sweep after the most recent task run reclaimed, for the
+    /// verbs that report it (`anchor`).
+    pub last_sweep: Option<wt_core::report::SweepReport>,
 }
 
 impl Context {
@@ -77,6 +80,7 @@ impl Context {
             verbose: cli.verbose,
             tty: wt_sys::snapshot::tty(),
             pending_notices: Vec::new(),
+            last_sweep: None,
         })
     }
 

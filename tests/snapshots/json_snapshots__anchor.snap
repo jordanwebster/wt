@@ -12,6 +12,7 @@ expression: "normalize(value, &h.root)"
     "moved": null,
     "refreshed": true,
     "swept": {
+      "files": 0,
       "incremental": 0,
       "kb": 0,
       "units": 0

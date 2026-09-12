@@ -1,7 +1,7 @@
 //! The build verb's bookkeeping (SPEC §11.2 automatic build, §11.9): the
 //! status file and recorded pid that `status`, `doctor` and the shims read,
 //! the detached supervisor that runs a build after `new` returns, and the
-//! sweep that follows every build wt launches.
+//! sweep report of the run that follows every build wt launches.
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +11,7 @@ use wt_core::{CoreError, ExitClass};
 
 use crate::cli::AliasRun;
 
-use super::{run, sweep, Context, Output};
+use super::{run, Context, Output};
 
 /// Where one build's status lives and which log it writes: one slot owned
 /// by the most recent build starter (A69).
@@ -71,17 +71,10 @@ pub(crate) fn run_build(
     if dry_run {
         return result.map(|output| (output, None));
     }
-    // A failed build leaves superseded units behind as readily as a
-    // finished one; the sweep runs either way, and on failure its notices
-    // ride on the error envelope through the pending set.
-    let (notices, swept) = sweep::after_build(context, target.as_deref());
-    match result {
-        Ok(output) => Ok((output.with_notices(notices), swept)),
-        Err(error) => {
-            context.pending_notices.extend(notices);
-            Err(error)
-        }
-    }
+    // The run swept the tree (§11.9); its notices are already on the
+    // output or, for a failed build, on the pending set.
+    let swept = context.last_sweep.take();
+    result.map(|output| (output, swept))
 }
 
 /// The slot a plain `wt build` writes: the one named by a supervisor's

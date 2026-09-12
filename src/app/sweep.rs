@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use wt_core::config::{Sweep, SweepKind};
 use wt_core::report::{Notice, NoticeLevel, SweepReport};
-use wt_core::sweep::{IncrementalObs, OutputKind, Plan, Snapshot, UnitObs};
+use wt_core::sweep::{FileObs, IncrementalObs, OutputKind, Plan, Snapshot, UnitObs};
 use wt_core::CoreError;
 
 use super::Context;
@@ -27,7 +27,8 @@ pub(crate) struct Pass {
 
 impl Pass {
     pub fn reclaims(&self) -> bool {
-        self.skipped.is_none() && (self.report.units > 0 || self.report.incremental > 0)
+        self.skipped.is_none()
+            && (self.report.units > 0 || self.report.incremental > 0 || self.report.files > 0)
     }
 }
 
@@ -62,32 +63,109 @@ pub(crate) fn sweep_tree(
             },
         });
     }
+    // The next task compares against what the directories hold now, so a
+    // pass that stood down is retried by the next task and one that ran is
+    // not repeated for nothing.
+    if apply && passes.iter().all(|pass| pass.skipped.is_none()) {
+        store_sample(context, tree)?;
+    }
     Ok(passes)
 }
 
-/// Sweeps after a build wt launched and turns the passes into notices; a
-/// sweep never fails the build that preceded it.
-pub(crate) fn after_build(
+/// What the tree's build directories hold, as cheaply as it can be told
+/// apart from what they held at the last sweep: for each profile directory,
+/// the fingerprint directory's own modification time, its entry count, and
+/// its newest entry. Cargo creates a unit's fingerprint directory when it
+/// first compiles the unit and deletes and rewrites the fingerprint file on
+/// every recompile, so anything that produced output — a wt task, or a
+/// build run by hand in the tree — moves the sample, and a task that
+/// produced nothing leaves it alone.
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Sample(Vec<(String, u64, usize, u64)>);
+
+pub(crate) fn sample(
     context: &Context,
-    target: Option<&str>,
-) -> (Vec<Notice>, Option<SweepReport>) {
+    tree: &wt_core::model::TreeRec,
+) -> Result<Sample, CoreError> {
+    let config = context.load_config(tree)?;
+    let root = Path::new(tree.path.as_str());
+    let mut sample = Vec::new();
+    for sweep in &config.sweeps {
+        let build_dir = root.join(sweep.build_dir.as_str());
+        if !matches!(
+            wt_sys::fsx::path_kind(&build_dir)?,
+            wt_sys::fsx::PathKind::Directory
+        ) {
+            continue;
+        }
+        for profile in profile_dirs(&build_dir)? {
+            let fingerprints = profile.join(".fingerprint");
+            let own = wt_sys::fsx::modified_secs(&fingerprints)?.unwrap_or(0);
+            let entries = wt_sys::fsx::read_dir_paths(&fingerprints)?;
+            let newest = entries
+                .iter()
+                .map(|entry| wt_sys::fsx::modified_secs(entry).map(|at| at.unwrap_or(0)))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .max()
+                .unwrap_or(0);
+            sample.push((
+                profile.to_string_lossy().into_owned(),
+                own,
+                entries.len(),
+                newest,
+            ));
+        }
+    }
+    Ok(Sample(sample))
+}
+
+/// Where the sample taken after the last sweep of a tree is kept.
+fn sample_path(tree: &wt_core::model::TreeRec) -> PathBuf {
+    Path::new(tree.path.as_str()).join(".wt/sweep.sample")
+}
+
+fn stored_sample(tree: &wt_core::model::TreeRec) -> Result<Option<Sample>, CoreError> {
+    Ok(wt_sys::fsx::read_string(&sample_path(tree))?
+        .and_then(|text| serde_json::from_str(&text).ok()))
+}
+
+fn store_sample(context: &Context, tree: &wt_core::model::TreeRec) -> Result<(), CoreError> {
+    let sample = sample(context, tree)?;
+    let text = serde_json::to_string(&sample).expect("a sample serializes");
+    wt_sys::fsx::write_store(&sample_path(tree), text.as_bytes())
+}
+
+/// Sweeps after a task wt ran — always after `build`, and after any other
+/// task when the build directories changed since the last sweep — and
+/// turns the passes into notices; a sweep never fails the task that
+/// preceded it. The report of a sweep that ran is left in the context for
+/// verbs that report it.
+pub(crate) fn after_task(
+    context: &mut Context,
+    tree: &wt_core::model::TreeRec,
+    always: bool,
+) -> Vec<Notice> {
     let timed = wt_sys::trace::span("span", "sweep");
+    let target = super::context::target_of(tree).to_string();
     let result = (|| {
-        let target = context.resolve(target)?;
-        let tree = context.tree(&target)?;
-        let passes = sweep_tree(context, &tree, true)?;
-        Ok::<_, CoreError>((notices(&target.to_string(), &passes), Some(total(&passes))))
+        if !always {
+            let current = sample(context, tree)?;
+            if stored_sample(tree)? == Some(current) {
+                return Ok::<_, CoreError>(Vec::new());
+            }
+        }
+        let passes = sweep_tree(context, tree, true)?;
+        context.last_sweep = Some(total(&passes));
+        Ok(notices(&target, &passes))
     })()
     .unwrap_or_else(|error| {
-        (
-            vec![Notice {
-                level: NoticeLevel::Warn,
-                code: "SWEEP_SKIPPED".to_owned(),
-                subject: target.map(str::to_owned),
-                message: format!("build output was not swept: {}", error.message),
-            }],
-            None,
-        )
+        vec![Notice {
+            level: NoticeLevel::Warn,
+            code: "SWEEP_SKIPPED".to_owned(),
+            subject: Some(target.clone()),
+            message: format!("build output was not swept: {}", error.message),
+        }]
     });
     timed.finish();
     result
@@ -110,11 +188,13 @@ pub(crate) fn notices(target: &str, passes: &[Pass]) -> Vec<Notice> {
                     code: "SWEPT".to_owned(),
                     subject: Some(target.to_owned()),
                     message: format!(
-                        "removed {} superseded unit{} and {} stale incremental director{} from {} ({} MB)",
+                        "removed {} superseded unit{}, {} stale incremental director{} and {} stale file{} from {} ({} MB)",
                         pass.report.units,
                         if pass.report.units == 1 { "" } else { "s" },
                         pass.report.incremental,
                         if pass.report.incremental == 1 { "y" } else { "ies" },
+                        pass.report.files,
+                        if pass.report.files == 1 { "" } else { "s" },
                         pass.build_dir,
                         pass.report.kb / 1024
                     ),
@@ -132,6 +212,7 @@ pub(crate) fn total(passes: &[Pass]) -> SweepReport {
         .fold(SweepReport::default(), |mut total, pass| {
             total.units += pass.report.units;
             total.incremental += pass.report.incremental;
+            total.files += pass.report.files;
             total.kb += pass.report.kb;
             total
         })
@@ -176,7 +257,8 @@ fn cargo_pass(
         let layout = Layout::observe(&profile)?;
         let snapshot = Snapshot {
             units: layout.units(&resolve.workspace_root)?,
-            crate_roots: resolve.crate_roots.clone(),
+            workspace_roots: resolve.workspace_roots.clone(),
+            files: layout.files()?,
             incremental: layout.incremental()?,
             now,
         };
@@ -191,6 +273,7 @@ fn cargo_pass(
         }
         pass.report.units += report.units;
         pass.report.incremental += report.incremental;
+        pass.report.files += report.files;
         pass.report.kb += report.kb;
         drop(held);
     }
@@ -199,12 +282,13 @@ fn cargo_pass(
 
 struct Resolve {
     workspace_root: PathBuf,
-    crate_roots: BTreeSet<String>,
+    workspace_roots: BTreeSet<String>,
 }
 
 /// Asks cargo for the current resolve without touching the network or the
-/// lockfile: every target source path of every package in it, and the
-/// workspace root relative dep-info paths resolve against.
+/// lockfile: every target source path of every workspace member — a package
+/// without a `source`, which is what path packages are — and the workspace
+/// root relative dep-info paths resolve against.
 fn cargo_metadata(context: &Context, workspace: &Path) -> Result<Resolve, CoreError> {
     let mut request = wt_sys::proc::CommandRequest::new("cargo");
     request.args =
@@ -246,17 +330,18 @@ fn cargo_metadata(context: &Context, workspace: &Path) -> Result<Resolve, CoreEr
         .as_str()
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace.to_path_buf());
-    let crate_roots = value["packages"]
+    let workspace_roots = value["packages"]
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|package| package["source"].is_null())
         .flat_map(|package| package["targets"].as_array().into_iter().flatten())
         .filter_map(|target| target["src_path"].as_str())
         .map(str::to_owned)
         .collect();
     Ok(Resolve {
         workspace_root,
-        crate_roots,
+        workspace_roots,
     })
 }
 
@@ -305,6 +390,9 @@ struct Layout {
     deps: BTreeMap<String, Vec<PathBuf>>,
     /// `build/<package>-<hash>` directories: hash → path.
     builds: BTreeMap<String, PathBuf>,
+    /// Every hash-carrying entry under `deps/` and `build/`, as the decision
+    /// sees it.
+    files: Vec<FileObs>,
 }
 
 impl Layout {
@@ -316,25 +404,53 @@ impl Layout {
             }
         }
         let mut deps = BTreeMap::<String, Vec<PathBuf>>::new();
+        let mut files = Vec::new();
         for path in wt_sys::fsx::read_dir_paths(&profile.join("deps"))? {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            let stem = strip_artifact_extension(&name);
-            if let Some(hash) = unit_hash(stem) {
-                deps.entry(hash).or_default().push(path.clone());
-            }
+            let Some(hash) = unit_hash(&name) else {
+                continue;
+            };
+            let Some(stat) = wt_sys::fsx::link_stat(&path)? else {
+                continue;
+            };
+            files.push(FileObs {
+                path: format!("deps/{name}"),
+                hash: hash.clone(),
+                object: !stat.is_dir && path.extension().is_some_and(|ext| ext == "o"),
+                links: stat.links,
+                modified_at: stat.modified_secs,
+            });
+            deps.entry(hash).or_default().push(path.clone());
         }
         let mut builds = BTreeMap::new();
         for path in wt_sys::fsx::read_dir_paths(&profile.join("build"))? {
-            if let Some(hash) = unit_hash(&path.file_name().unwrap_or_default().to_string_lossy()) {
-                builds.insert(hash, path);
-            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let Some(hash) = unit_hash(&name) else {
+                continue;
+            };
+            let Some(stat) = wt_sys::fsx::link_stat(&path)? else {
+                continue;
+            };
+            files.push(FileObs {
+                path: format!("build/{name}"),
+                hash: hash.clone(),
+                object: false,
+                links: stat.links,
+                modified_at: stat.modified_secs,
+            });
+            builds.insert(hash, path);
         }
         Ok(Self {
             profile: profile.to_path_buf(),
             fingerprints,
             deps,
             builds,
+            files,
         })
+    }
+
+    fn files(&self) -> Result<Vec<FileObs>, CoreError> {
+        Ok(self.files.clone())
     }
 
     fn units(&self, workspace_root: &Path) -> Result<Vec<UnitObs>, CoreError> {
@@ -410,7 +526,7 @@ impl Layout {
             let candidate = match path.extension().and_then(|ext| ext.to_str()) {
                 Some("rlib" | "dylib" | "so" | "dll" | "a" | "wasm") => OutputKind::Library,
                 Some("rmeta") => OutputKind::Metadata,
-                Some("d" | "dSYM" | "pdb") => OutputKind::None,
+                Some("d" | "dSYM" | "pdb" | "o") => OutputKind::None,
                 Some("exe") => OutputKind::Executable,
                 _ if !name.starts_with("lib") && wt_sys::fsx::is_executable_file(path)? => {
                     OutputKind::Executable
@@ -444,12 +560,21 @@ impl Layout {
             ) {
                 continue;
             }
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            // rustc names a session directory `<crate>-<hash>`, the hash
+            // in its own base-36 spelling; the crate is what comes before
+            // the last dash.
+            let crate_name = name
+                .rsplit_once('-')
+                .map_or(name.as_str(), |(crate_name, _)| crate_name)
+                .to_owned();
             dirs.push(IncrementalObs {
-                name: path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
+                name,
+                crate_name,
                 modified_at: wt_sys::fsx::modified_secs(&path)?.unwrap_or(0),
             });
         }
@@ -465,6 +590,9 @@ impl Layout {
         }
         for name in &plan.dead_incremental {
             paths.push(self.profile.join("incremental").join(name));
+        }
+        for file in &plan.dead_files {
+            paths.push(self.profile.join(file));
         }
         paths
     }
@@ -482,6 +610,7 @@ impl Layout {
         Ok(SweepReport {
             units: plan.dead_units.len() as u64,
             incremental: plan.dead_incremental.len() as u64,
+            files: plan.dead_files.len() as u64,
             kb,
         })
     }
@@ -494,23 +623,27 @@ impl Layout {
     }
 }
 
-/// The `<hash>` suffix of a `<name>-<hash>` file or directory name: the last
-/// dash-separated segment when it is sixteen hex digits.
+/// The unit hash in a `deps/` or `build/` entry name: the first
+/// `-<sixteen hex digits>` that ends the name or is followed by `.`.
+/// `libserde-<hash>.rlib`, `wt-<hash>`, `wt-<hash>.dSYM` and a codegen
+/// unit's `wt-<hash>.<cgu>.rcgu.o` all name their unit this way; the
+/// hashes inside a codegen-unit name are never preceded by a dash, so they
+/// do not qualify.
 fn unit_hash(name: &str) -> Option<String> {
-    let (_, hash) = name.rsplit_once('-')?;
-    (hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| hash.to_owned())
-}
-
-/// Strips one artifact extension so the hash segment is last. A bare
-/// executable has none; `foo-<hash>.dSYM` and `libfoo-<hash>.rlib` do.
-fn strip_artifact_extension(name: &str) -> &str {
-    const EXTENSIONS: [&str; 11] = [
-        ".rlib", ".rmeta", ".d", ".dylib", ".so", ".dll", ".dSYM", ".exe", ".pdb", ".a", ".wasm",
-    ];
-    EXTENSIONS
-        .iter()
-        .find_map(|extension| name.strip_suffix(extension))
-        .unwrap_or(name)
+    let bytes = name.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = name[from..].find('-') {
+        let start = from + offset + 1;
+        let end = start + 16;
+        if end <= bytes.len()
+            && bytes[start..end].iter().all(u8::is_ascii_hexdigit)
+            && (end == bytes.len() || bytes[end] == b'.')
+        {
+            return Some(name[start..end].to_owned());
+        }
+        from = start;
+    }
+    None
 }
 
 /// The fingerprint file's name inside a unit directory: the one with a
@@ -588,24 +721,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hashes_are_the_last_sixteen_hex_digits_after_the_extension() {
+    fn unit_hashes_are_the_sixteen_hex_digits_after_a_dash() {
         assert_eq!(
             unit_hash("wt-core-7f01163ae9f9618b"),
             Some("7f01163ae9f9618b".to_owned())
         );
         assert_eq!(unit_hash("build-script-build"), None);
         assert_eq!(
-            unit_hash(strip_artifact_extension("libserde-c8872ac183e5e9ac.rlib")),
+            unit_hash("libserde-c8872ac183e5e9ac.rlib"),
             Some("c8872ac183e5e9ac".to_owned())
         );
         assert_eq!(
-            unit_hash(strip_artifact_extension("wt-0123456789abcdef.dSYM")),
+            unit_hash("wt-0123456789abcdef.dSYM"),
             Some("0123456789abcdef".to_owned())
         );
         assert_eq!(
-            unit_hash(strip_artifact_extension("wt-0123456789abcdef")),
+            unit_hash("wt-0123456789abcdef"),
             Some("0123456789abcdef".to_owned())
         );
+        // A codegen unit's object: the unit hash, not the codegen-unit hash.
+        assert_eq!(
+            unit_hash("amux-391077e733a30568.00gl9pq6dplm4nifnwqr6oca9.09885ma.rcgu.o"),
+            Some("391077e733a30568".to_owned())
+        );
+        assert_eq!(
+            unit_hash("wt_core-0123456789abcdef.wt_core.fedcba9876543210-cgu.0.rcgu.o"),
+            Some("0123456789abcdef".to_owned())
+        );
+        assert_eq!(unit_hash("libfoo-0123456789abcdefg.rlib"), None);
     }
 
     #[test]

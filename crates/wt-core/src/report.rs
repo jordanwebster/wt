@@ -349,6 +349,10 @@ pub struct MovedReport {
 pub struct SweepReport {
     pub units: u64,
     pub incremental: u64,
+    /// Files reclaimed on their own: orphaned by a unit that no longer
+    /// exists, or stale objects of a live unit.
+    #[serde(default)]
+    pub files: u64,
     pub kb: u64,
 }
 

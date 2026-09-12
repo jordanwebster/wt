@@ -223,6 +223,30 @@ pub fn modified_secs(path: &Path) -> Result<Option<u64>> {
     }
 }
 
+/// Link count and modification time of one path, without following a
+/// symlink at it; `None` when the path is missing. What the sweep reads to
+/// tell an object file a current incremental session still links from one
+/// a finished session left behind (§11.9).
+pub fn link_stat(path: &Path) -> Result<Option<LinkStat>> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(LinkStat {
+            links: metadata.nlink(),
+            modified_secs: u64::try_from(metadata.mtime()).unwrap_or(0),
+            is_dir: metadata.is_dir(),
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(fs_error("inspect link count", path)(error)),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinkStat {
+    pub links: u64,
+    pub modified_secs: u64,
+    pub is_dir: bool,
+}
+
 /// An exclusive advisory lock on an arbitrary file, released on drop. Used
 /// to hold cargo's own build-directory lock while a sweep runs (§11.9), so
 /// the sweep and a build exclude each other exactly as two builds do.

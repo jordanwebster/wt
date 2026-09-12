@@ -584,8 +584,11 @@ ahead), builds it, and sweeps it — in the background, at low priority.
 `wt anchor <label>` does the same on demand, and `wt doctor` says when a
 canonical has no build of its commit. The sweep deletes the build output a
 workspace will never read again — old dependency versions, superseded twins,
-deleted targets — judged by what `cargo metadata` resolves to rather than by
-age, after every build wt launches and in `wt prune`. Cross-machine
+deleted targets, the object files rustc leaves behind for the debugger and
+never removes, incremental state of configurations nothing builds any more —
+judged by what `cargo metadata` resolves to and what the workspace's own
+units still reach rather than by age, after every task wt runs that changed
+the build directory and in `wt prune`. Cross-machine
 warmth comes from content-addressed caches: install sccache and set
 `rustc-wrapper = "sccache"` in `~/.cargo/config.toml [build]`, and every tree
 compiles shared dependencies as cache hits. pnpm hard-links packages from its

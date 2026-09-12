@@ -5130,8 +5130,8 @@ fn install_cargo_with_metadata(h: &Harness, registry: &Path) {
 if [ "$1" = "metadata" ]; then
   cat <<EOF
 {{"workspace_root":"$PWD","packages":[
- {{"name":"fixture","targets":[{{"name":"fixture","kind":["lib"],"src_path":"$PWD/src/lib.rs"}},{{"name":"build-script-build","kind":["custom-build"],"src_path":"$PWD/build.rs"}}]}},
- {{"name":"dep","targets":[{{"name":"dep","kind":["lib"],"src_path":"{reg}/dep-1.0.1/src/lib.rs"}}]}}
+ {{"name":"fixture","source":null,"targets":[{{"name":"fixture","kind":["lib"],"src_path":"$PWD/src/lib.rs"}},{{"name":"build-script-build","kind":["custom-build"],"src_path":"$PWD/build.rs"}}]}},
+ {{"name":"dep","source":"registry+https://github.com/rust-lang/crates.io-index","targets":[{{"name":"dep","kind":["lib"],"src_path":"{reg}/dep-1.0.1/src/lib.rs"}}]}}
 ]}}
 EOF
 fi
@@ -5168,8 +5168,8 @@ fn write_unit(profile: &Path, unit: &Unit) {
     common::write(
         &dir.join(format!("{}.json", unit.kind)),
         &format!(
-            r#"{{"rustc":1,"features":"{}","target":2,"profile":3,"path":4,"deps":[{deps}],"local":[],"rustflags":[],"config":5,"compile_kind":0}}"#,
-            unit.features
+            r#"{{"rustc":1,"features":{},"target":2,"profile":3,"path":4,"deps":[{deps}],"local":[],"rustflags":[],"config":5,"compile_kind":0}}"#,
+            serde_json::to_string(unit.features).unwrap()
         ),
     );
     let le = unit
@@ -5239,7 +5239,8 @@ fn sweep_reclaims_superseded_units_after_a_build_and_in_prune() {
     let old_dep = format!("{}/dep-1.0.0/src/lib.rs", registry.display());
     let new_dep = format!("{}/dep-1.0.1/src/lib.rs", registry.display());
     let fixtures = |profile: &Path| {
-        // The library, built twice: the older twin is superseded.
+        // The library, built twice: the older twin is superseded, and with
+        // it the dependency version only it was compiled against.
         write_unit(
             profile,
             &Unit {
@@ -5247,7 +5248,7 @@ fn sweep_reclaims_superseded_units_after_a_build_and_in_prune() {
                 hash: "aaaaaaaaaaaaaaaa",
                 kind: "lib-fixture",
                 fingerprint: 10,
-                deps: &[1],
+                deps: &[1, 20],
                 root: Some("src/lib.rs"),
                 features: "[]",
                 age_secs: 10,
@@ -5260,13 +5261,14 @@ fn sweep_reclaims_superseded_units_after_a_build_and_in_prune() {
                 hash: "bbbbbbbbbbbbbbbb",
                 kind: "lib-fixture",
                 fingerprint: 11,
-                deps: &[1],
+                deps: &[1, 21],
                 root: Some("src/lib.rs"),
                 features: "[]",
                 age_secs: 5_000,
             },
         );
-        // A different feature set of the same library is another live thing.
+        // A different feature set of the same library is another live
+        // thing, compiled against its own variant of the dependency.
         write_unit(
             profile,
             &Unit {
@@ -5274,13 +5276,15 @@ fn sweep_reclaims_superseded_units_after_a_build_and_in_prune() {
                 hash: "0000000000000000",
                 kind: "lib-fixture",
                 fingerprint: 12,
-                deps: &[],
+                deps: &[22],
                 root: Some("src/lib.rs"),
                 features: "[\"extra\"]",
                 age_secs: 9_000,
             },
         );
-        // The dependency at the version the lockfile names, and the one it no longer does.
+        // The dependency at the version the lockfile names, twice — two
+        // variants that differ only in what they were compiled against,
+        // each named by a live library — and the version it no longer does.
         write_unit(
             profile,
             &Unit {
@@ -5292,6 +5296,19 @@ fn sweep_reclaims_superseded_units_after_a_build_and_in_prune() {
                 root: Some(&new_dep),
                 features: "[]",
                 age_secs: 10,
+            },
+        );
+        write_unit(
+            profile,
+            &Unit {
+                package: "dep",
+                hash: "d2d2d2d2d2d2d2d2",
+                kind: "lib-dep",
+                fingerprint: 22,
+                deps: &[],
+                root: Some(&new_dep),
+                features: "[]",
+                age_secs: 5_000,
             },
         );
         write_unit(
@@ -5356,6 +5373,27 @@ fn sweep_reclaims_superseded_units_after_a_build_and_in_prune() {
             .unwrap()
             .set_modified(month_ago)
             .unwrap();
+        // Codegen-unit objects of the live library: one its last compile
+        // wrote, one a finished incremental session left behind; and an
+        // artifact whose unit no longer exists at all.
+        let aged = |path: &Path, secs: u64| {
+            common::write(path, "o");
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - Duration::from_secs(secs))
+                .unwrap();
+        };
+        aged(
+            &profile.join("deps/fixture-aaaaaaaaaaaaaaaa.fixture.0f0f0f0f0f0f0f0f-cgu.0.rcgu.o"),
+            0,
+        );
+        aged(
+            &profile.join("deps/fixture-aaaaaaaaaaaaaaaa.fixture.0f0f0f0f0f0f0f0f-cgu.1.rcgu.o"),
+            5_000,
+        );
+        aged(&profile.join("deps/libfixture-1234567890abcdef.rlib"), 0);
     };
     fixtures(&profile);
 
@@ -5374,7 +5412,8 @@ fn sweep_reclaims_superseded_units_after_a_build_and_in_prune() {
     assert!(
         codes.iter().any(|(code, message)| code == "SWEPT"
             && message.contains("3 superseded units")
-            && message.contains("1 stale incremental directory")),
+            && message.contains("1 stale incremental directory")
+            && message.contains("2 stale files")),
         "{codes:?}"
     );
     for (package, hash, live) in [
@@ -5382,6 +5421,7 @@ fn sweep_reclaims_superseded_units_after_a_build_and_in_prune() {
         ("fixture", "bbbbbbbbbbbbbbbb", false),
         ("fixture", "0000000000000000", true),
         ("dep", "dddddddddddddddd", true),
+        ("dep", "d2d2d2d2d2d2d2d2", true),
         ("dep", "cccccccccccccccc", false),
         ("fixture", "eeeeeeeeeeeeeeee", true),
         ("fixture", "ffffffffffffffff", true),
@@ -5404,6 +5444,15 @@ fn sweep_reclaims_superseded_units_after_a_build_and_in_prune() {
     assert!(profile.join("build/fixture-ffffffffffffffff/out").exists());
     assert!(profile.join("incremental/fixture-fresh").exists());
     assert!(!profile.join("incremental/fixture-stale").exists());
+    assert!(profile
+        .join("deps/fixture-aaaaaaaaaaaaaaaa.fixture.0f0f0f0f0f0f0f0f-cgu.0.rcgu.o")
+        .exists());
+    assert!(!profile
+        .join("deps/fixture-aaaaaaaaaaaaaaaa.fixture.0f0f0f0f0f0f0f0f-cgu.1.rcgu.o")
+        .exists());
+    assert!(!profile
+        .join("deps/libfixture-1234567890abcdef.rlib")
+        .exists());
 
     // Plain prune plans a sweep for whatever accumulated since, applies it
     // with the rest, and reports what it reclaimed.
@@ -6038,4 +6087,84 @@ fn new_brings_the_local_default_branch_to_origin_before_branching() {
         common::git_stdout(&tree_d, &["rev-parse", "HEAD"]).trim(),
         local
     );
+}
+
+#[test]
+#[allow(clippy::disallowed_types)]
+fn sweep_follows_any_task_that_changes_build_output() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let registry = h.root.join("registry");
+    install_cargo_with_metadata(&h, &registry);
+    // A custom recipe that produces output — a new unit under the fingerprint
+    // directory — one that produces nothing, and one that produces and fails.
+    let repo = h.repo(
+        "repo",
+        "[task.churn]\nrun = 'mkdir -p target/debug/.fingerprint/churn-0123456789abcdef'\n\
+         [task.quiet]\nrun = 'true'\n\
+         [task.broken]\nrun = 'mkdir -p target/debug/.fingerprint/broken-fedcba9876543210 && exit 3'\n",
+    );
+    common::write(
+        &repo.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
+    );
+    common::write(&repo.join("Cargo.lock"), "# lock\n");
+    common::git(&repo, &["add", "-A"]);
+    common::git(&repo, &["commit", "-qm", "cargo fixture"]);
+    h.register(&repo);
+    let canonical = wt_sys::fsx::canonicalize(&repo).unwrap();
+    let profile = canonical.join("target/debug");
+    let twins = |profile: &Path| {
+        for (hash, fingerprint, age_secs) in [
+            ("aaaaaaaaaaaaaaaa", 10, 10),
+            ("bbbbbbbbbbbbbbbb", 11, 5_000),
+        ] {
+            write_unit(
+                profile,
+                &Unit {
+                    package: "fixture",
+                    hash,
+                    kind: "lib-fixture",
+                    fingerprint,
+                    deps: &[],
+                    root: Some("src/lib.rs"),
+                    features: "[]",
+                    age_secs,
+                },
+            );
+        }
+    };
+    let swept = |envelope: &serde_json::Value| {
+        envelope["notices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|notice| notice["code"] == "SWEPT")
+    };
+    twins(&profile);
+
+    // A custom task, not `build`, sweeps the superseded twin.
+    assert!(swept(&h.json(&["run", "churn", "repo"])));
+    assert!(!unit_exists(&profile, "fixture", "bbbbbbbbbbbbbbbb"));
+
+    // Output that appeared outside any wt task is swept by the next task,
+    // whatever it produced; a task after which nothing changed sweeps nothing.
+    twins(&profile);
+    assert!(swept(&h.json(&["run", "quiet", "repo"])));
+    assert!(!unit_exists(&profile, "fixture", "bbbbbbbbbbbbbbbb"));
+    assert!(!swept(&h.json(&["run", "quiet", "repo"])));
+
+    // A task that produced output and failed still sweeps; the notice rides
+    // on the error envelope.
+    twins(&profile);
+    let output = h
+        .wt()
+        .args(["run", "broken", "repo", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "TASK_FAILED");
+    assert!(swept(&envelope), "{envelope}");
+    assert!(!unit_exists(&profile, "fixture", "bbbbbbbbbbbbbbbb"));
 }
