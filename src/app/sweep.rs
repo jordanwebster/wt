@@ -52,6 +52,7 @@ pub(crate) fn sweep_tree(
             continue;
         }
         let pass = match output.kind {
+            Root::Opaque => continue,
             Root::Cargo => cargo_pass(context, root, output, &build_dir, apply),
         };
         passes.push(match pass {
@@ -91,6 +92,9 @@ pub(crate) fn sample(
     let root = Path::new(tree.path.as_str());
     let mut sample = Vec::new();
     for output in &config.outputs {
+        if output.kind == Root::Opaque {
+            continue;
+        }
         let build_dir = root.join(output.path.as_str());
         if !matches!(
             wt_sys::fsx::path_kind(&build_dir)?,

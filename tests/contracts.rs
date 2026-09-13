@@ -4044,6 +4044,43 @@ fn cargo_sets_no_build_directory_and_seeds_a_tree_from_the_canonical_build() {
 }
 
 #[test]
+fn configured_opaque_output_is_rendered_snapshotted_sized_and_never_swept() {
+    let h = Harness::new();
+    let repo = h.repo("repo", "output = [{ path = 'node_modules' }]\n");
+    common::write(&repo.join("node_modules/cache/marker"), "warm\n");
+    h.register(&repo);
+
+    let rendered = h.json(&["config", "repo"]);
+    let output = &rendered["data"]["entries"][0]["value"]["output"][0];
+    assert_eq!(output["path"], "node_modules");
+    assert_eq!(output["kind"], "opaque");
+
+    let created = h.json(&["new", "repo/work", "--no-sync", "--no-build"]);
+    let tree = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            std::fs::read_to_string(tree.join("node_modules/cache/marker")).unwrap(),
+            "warm\n"
+        );
+        let listed = h.json(&["list", "repo", "--disk"]);
+        let work = listed["data"]["trees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["target"] == "repo/work")
+            .unwrap();
+        assert!(work["build_kb"].as_u64().unwrap() > 0);
+    }
+
+    let pruned = h.json(&["prune", "repo"]);
+    assert!(pruned["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["action"] != "sweep"));
+}
+
+#[test]
 fn sync_rechecks_tracked_render_paths_even_when_they_have_records() {
     let h = Harness::new();
     let repo = h.repo(

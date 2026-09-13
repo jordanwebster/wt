@@ -238,6 +238,7 @@ pub fn contribution(hits: &[AdapterHit]) -> Result<AdapterContribution, CoreErro
                 } else {
                     format!("{}/{}", hit.dir.trim_end_matches('/'), spec.path)
                 })?,
+                adapter: true,
             };
             append_unique(&mut contributed.outputs, std::slice::from_ref(&output));
         }
@@ -615,6 +616,7 @@ mod tests {
                 kind: crate::config::OutputKind::Cargo,
                 workspace: ".".to_owned(),
                 path: RelPath::new("target").unwrap(),
+                adapter: true,
             }]
         );
         assert!(!contributed
@@ -631,10 +633,17 @@ mod tests {
             .outputs
             .iter()
             .any(|output| output.path.as_str() == "target"));
-        // Output roots are the adapter's to declare, never the configuration's.
-        assert!(
-            crate::config::parse("output = [{ path = 'target', kind = 'cargo' }]", "repo").is_err()
-        );
+        let configured =
+            crate::config::parse("output = [{ path = 'node_modules' }]", "repo").unwrap();
+        assert_eq!(configured.outputs[0].kind, crate::config::OutputKind::Opaque);
+        assert!(!configured.outputs[0].adapter);
+        assert!(crate::config::parse(
+            "output = [{ path = 'target', kind = 'cargo' }]",
+            "repo"
+        )
+        .unwrap_err()
+        .message
+        .contains("adapter-owned"));
         assert!(crate::config::parse("seed = ['target']", "repo").is_err());
         // Under a configured scope the output follows the scope.
         let scoped = contribution(&[AdapterHit {

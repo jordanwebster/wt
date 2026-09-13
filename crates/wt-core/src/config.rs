@@ -315,32 +315,45 @@ pub struct Config {
     pub locks: IndexMap<String, LockCfg>,
     pub dirs: IndexMap<String, Scope>,
     pub sync_inputs: Vec<RelPath>,
-    /// Adapter-declared build output roots: what a new tree's snapshot of
-    /// the canonical clones (§11.8) and what wt sweeps after every task and
-    /// in `prune` (§11.9). Not a configuration key: the layers cannot set it.
-    #[serde(skip)]
+    /// Output roots cloned from the canonical into a new tree. Configured
+    /// roots are opaque; adapter roots may additionally carry a sweep
+    /// strategy that understands their ecosystem.
+    #[serde(rename = "output", default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<Output>,
     pub detect: Detect,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<BranchTemplates>,
 }
 
-/// One build output root an adapter declares (§6.1): cloned whole into a
-/// new tree's snapshot (§11.8) and swept by the strategy that knows its
-/// layout (§11.9).
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// One output root cloned whole into a new tree's snapshot (§11.8).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Output {
+    #[serde(default)]
     pub kind: OutputKind,
     /// The scope the tool was detected in, `.` at the root: where the
     /// strategy asks the tool about the workspace, and what relative
     /// paths in build output resolve against.
+    #[serde(default = "default_output_workspace", skip_serializing)]
     pub workspace: String,
     /// The output root, relative to the tree root.
     pub path: RelPath,
+    /// Adapter contributions may select a sweep strategy; configuration
+    /// roots may not claim ecosystem knowledge.
+    #[serde(skip)]
+    pub adapter: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+fn default_output_workspace() -> String {
+    ".".to_owned()
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OutputKind {
+    /// User-declared output: clone and size it, but never inspect or sweep it.
+    #[default]
+    Opaque,
     /// Cargo's `target/` layout: units under `.fingerprint`, `deps`,
     /// `build` and `incremental` per profile directory.
     Cargo,
@@ -498,6 +511,13 @@ pub fn validate(config: &Config) -> Result<(), CoreError> {
     let mut ports = BTreeSet::new();
     if config.ports.iter().any(|port| !ports.insert(port)) {
         return Err(invalid("port names must be unique"));
+    }
+    for output in &config.outputs {
+        if !output.adapter && output.kind != OutputKind::Opaque {
+            return Err(invalid(
+                "configured output kind must be `opaque`; sweep strategies are adapter-owned",
+            ));
+        }
     }
     for (name, lock) in &config.locks {
         LockName::new(name)?;

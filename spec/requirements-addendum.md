@@ -1427,9 +1427,10 @@ multi-gigabyte creation A53 retired. Whether cloning `incremental/` speeds
 the rebuild of the workspace crates or merely occupies space is a
 measurement not yet made; it stays in the list until it is.
 
-`seed` is the adapter's to declare and not a configuration key, so the
-unknown-key rule still refuses `seed` in a repository or user layer: the
-mechanism is per-ecosystem knowledge, which is where A46 put it. The cache
+`seed` is no longer a key at all. The unified `output` key may be declared by
+an adapter, repository, or user layer. A configured root defaults to kind
+`opaque`: wt snapshots and sizes the whole directory but never sweeps it,
+because a safe sweep remains per-ecosystem knowledge. The cache
 root, `CACHE_ORPHAN`, the prune `delete-cache` action, `CACHE_DELETE_FAILED`,
 `cache_deleted` and `cache_kb` are gone; `list --disk` reports `build_kb`,
 the size of the top-level directories holding the seeded paths. A
