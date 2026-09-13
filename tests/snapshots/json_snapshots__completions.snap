@@ -1,6 +1,5 @@
 ---
 source: tests/json_snapshots.rs
-assertion_line: 128
 expression: "normalize(value, &h.root)"
 ---
 {

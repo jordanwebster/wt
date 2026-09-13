@@ -64,7 +64,7 @@ fn valid_label(value: &str) -> bool {
 fn valid_tree_name(value: &str) -> bool {
     common_id(value, 64) && value != "canonical"
 }
-fn valid_task_id(value: &str) -> bool {
+fn valid_resource_id(value: &str) -> bool {
     let mut chars = value.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
         && value.len() <= 64
@@ -82,16 +82,11 @@ fn valid_env_key(value: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !value.starts_with("WT_")
 }
-fn valid_lock_name(value: &str) -> bool {
-    valid_task_id(value)
-}
-
 identifier!(Label, valid_label, "label");
 identifier!(TreeName, valid_tree_name, "tree name");
-identifier!(TaskId, valid_task_id, "task id");
+identifier!(ResourceId, valid_resource_id, "resource id");
 identifier!(PortName, valid_port_name, "port name");
 identifier!(EnvKey, valid_env_key, "environment key");
-identifier!(LockName, valid_lock_name, "lock name");
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct Target {
@@ -733,7 +728,7 @@ mod tests {
         assert!(Label::new("a.b-c_1").is_ok());
         assert!(Label::new(".").is_err());
         assert!(TreeName::new("canonical").is_err());
-        assert!(TaskId::new("Build").is_err());
+        assert!(ResourceId::new("Build").is_err());
         assert!(EnvKey::new("WT_BAD").is_err());
         assert_eq!(name_snake(" Feature//One "), "feature_one");
         let target = Target::parse("repo/work").unwrap();

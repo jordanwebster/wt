@@ -9,13 +9,11 @@ use crate::{model, template, CoreError, ExitClass};
 pub struct EntryView {
     pub phase: DerivedPhase,
     pub source_identical: bool,
-    pub verify_pending: bool,
     pub has_resource_records: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
-    pub verify: bool,
     pub name_shadows_label: bool,
     pub path_occupied: bool,
 }
@@ -34,9 +32,6 @@ pub enum Decision {
         start: StartAt,
     },
     AlreadyReady,
-    Verify {
-        resumed: bool,
-    },
     Resume {
         start: StartAt,
     },
@@ -129,7 +124,7 @@ pub fn decide(entry: Option<&EntryView>, request: &Request) -> Decision {
                 remedy: "re-run `wt register` or `wt adopt` for this path",
             };
         }
-        DerivedPhase::Verifying | DerivedPhase::Removing | DerivedPhase::RemoveInterrupted => {
+        DerivedPhase::Removing | DerivedPhase::RemoveInterrupted => {
             return Decision::Refuse {
                 code: "TREE_BUSY",
                 remedy: "wait for or resume the active lifecycle operation",
@@ -144,8 +139,6 @@ pub fn decide(entry: Option<&EntryView>, request: &Request) -> Decision {
         };
     }
     match entry.phase {
-        DerivedPhase::Ready if entry.verify_pending => Decision::Verify { resumed: true },
-        DerivedPhase::Ready if request.verify => Decision::Verify { resumed: false },
         DerivedPhase::Ready => Decision::AlreadyReady,
         DerivedPhase::Missing if entry.has_resource_records => Decision::Refuse {
             code: "TREE_MISSING_PENDING",
@@ -168,7 +161,6 @@ pub fn decide(entry: Option<&EntryView>, request: &Request) -> Decision {
         DerivedPhase::Replaced
         | DerivedPhase::InitInterrupted
         | DerivedPhase::Initialising
-        | DerivedPhase::Verifying
         | DerivedPhase::Removing
         | DerivedPhase::RemoveInterrupted => unreachable!("handled above"),
         DerivedPhase::Unmanaged | DerivedPhase::StaleGit => Decision::Refuse {
@@ -190,21 +182,21 @@ mod tests {
         ];
         let ticketed = BTreeMap::from([("ticket".to_owned(), "ABC-42".to_owned())]);
         assert_eq!(
-            branch_from_templates(&candidates, "apollo", "fix-scroll", &ticketed).unwrap(),
+            branch_from_templates(&candidates, "fixture", "fix-scroll", &ticketed).unwrap(),
             Some("ABC-42_fix-scroll".to_owned())
         );
         assert_eq!(
-            branch_from_templates(&candidates, "apollo", "poke", &BTreeMap::new()).unwrap(),
+            branch_from_templates(&candidates, "fixture", "poke", &BTreeMap::new()).unwrap(),
             Some("wip/poke".to_owned())
         );
         // An unset key and a key set to nothing are the same absence.
         let blank = BTreeMap::from([("ticket".to_owned(), String::new())]);
         assert_eq!(
-            branch_from_templates(&candidates[..1], "apollo", "poke", &blank).unwrap(),
+            branch_from_templates(&candidates[..1], "fixture", "poke", &blank).unwrap(),
             None
         );
         assert_eq!(
-            branch_from_templates(&[], "apollo", "poke", &ticketed).unwrap(),
+            branch_from_templates(&[], "fixture", "poke", &ticketed).unwrap(),
             None
         );
     }
@@ -213,7 +205,7 @@ mod tests {
     fn a_rendered_branch_git_would_reject_is_refused_before_any_git_call() {
         let candidates = ["{{meta.ticket}}_{{name()}}".to_owned()];
         let meta = BTreeMap::from([("ticket".to_owned(), "ABC 42".to_owned())]);
-        let error = branch_from_templates(&candidates, "apollo", "fix", &meta).unwrap_err();
+        let error = branch_from_templates(&candidates, "fixture", "fix", &meta).unwrap_err();
         assert_eq!(error.code.0, "BRANCH_INVALID");
         assert!(error.message.contains("ABC 42_fix"), "{}", error.message);
         assert!(error.remedy.contains("--branch"), "{}", error.remedy);
@@ -221,7 +213,6 @@ mod tests {
 
     fn request() -> Request {
         Request {
-            verify: false,
             name_shadows_label: false,
             path_occupied: false,
         }
@@ -231,7 +222,6 @@ mod tests {
         EntryView {
             phase,
             source_identical: true,
-            verify_pending: false,
             has_resource_records: false,
         }
     }
@@ -302,20 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn decision_table_covers_verify_conflicts_and_every_resume_point() {
-        let mut verify_request = request();
-        verify_request.verify = true;
-        assert_eq!(
-            decide(Some(&entry(DerivedPhase::Ready)), &verify_request),
-            Decision::Verify { resumed: false }
-        );
-        let mut pending = entry(DerivedPhase::Ready);
-        pending.verify_pending = true;
-        assert_eq!(
-            decide(Some(&pending), &request()),
-            Decision::Verify { resumed: true }
-        );
-
+    fn decision_table_covers_conflicts_and_every_resume_point() {
         let mut different = entry(DerivedPhase::Ready);
         different.source_identical = false;
         assert!(matches!(
@@ -344,7 +321,6 @@ mod tests {
             (DerivedPhase::Replaced, "TREE_REPLACED"),
             (DerivedPhase::Initialising, "INIT_INTERRUPTED"),
             (DerivedPhase::InitInterrupted, "INIT_INTERRUPTED"),
-            (DerivedPhase::Verifying, "TREE_BUSY"),
             (DerivedPhase::Removing, "TREE_BUSY"),
             (DerivedPhase::RemoveInterrupted, "TREE_BUSY"),
         ] {

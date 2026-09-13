@@ -110,7 +110,7 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
                 }
                 destroyed.push(DestroyedReport {
                     scope: key.scope.to_string(),
-                    task: key.task,
+                    resource: key.resource,
                     state: result.state,
                     child: result.child,
                 });
@@ -119,7 +119,7 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
                 teardown_errors.push(error);
                 destroyed.push(DestroyedReport {
                     scope: key.scope.to_string(),
-                    task: key.task,
+                    resource: key.resource,
                     state: "orphaned".to_owned(),
                     child: None,
                 });
@@ -141,7 +141,7 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
                 }
                 destroyed.push(DestroyedReport {
                     scope: key.scope.to_string(),
-                    task: key.task,
+                    resource: key.resource,
                     state: result.state,
                     child: result.child,
                 });
@@ -150,7 +150,7 @@ pub(crate) fn run(context: &mut Context, args: Unregister) -> Result<Output, Cor
                 teardown_errors.push(error);
                 destroyed.push(DestroyedReport {
                     scope: key.scope.to_string(),
-                    task: key.task,
+                    resource: key.resource,
                     state: "orphaned".to_owned(),
                     child: None,
                 });

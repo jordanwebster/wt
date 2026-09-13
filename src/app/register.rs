@@ -424,7 +424,7 @@ fn move_existing(
         &context.git_lock_path(&prior_label.gitdir_id),
         &holder,
         super::context::duration(
-            context.settings.locks.repo_git.as_deref(),
+            context.settings.waits.repo_git.as_deref(),
             std::time::Duration::from_secs(60),
         ),
     )?;
@@ -529,13 +529,13 @@ fn finish_with_door(
         executor::refresh_all_declarations(context, &door)?;
     }
     let config = door.config.clone();
-    let catalog = context.task_catalog(&tree, &config)?;
+    let catalog = context.resource_catalog(&tree, &config)?;
     let mut resources = catalog
         .values()
         .filter(|node| node.destroy.is_some())
         .map(|node| DeclaredResourceReport {
             scope: node.scope.to_string(),
-            task: node.id.clone(),
+            resource: node.id.clone(),
             tied_to: match node.tied_to.unwrap_or(TiedTo::Tree) {
                 TiedTo::Tree => "tree",
                 TiedTo::Repo => "repo",
@@ -545,13 +545,8 @@ fn finish_with_door(
             snapshot_keys: node.snapshot_env.clone(),
         })
         .collect::<Vec<_>>();
-    resources.sort_by(|left, right| (&left.scope, &left.task).cmp(&(&right.scope, &right.task)));
-    let mut tasks = catalog
-        .keys()
-        .filter(|id| !id.starts_with('@'))
-        .cloned()
-        .collect::<Vec<_>>();
-    tasks.sort();
+    resources
+        .sort_by(|left, right| (&left.scope, &left.resource).cmp(&(&right.scope, &right.resource)));
     let data = RegisterData {
         label: tree.label.to_string(),
         path: tree.path.as_str().to_owned(),
@@ -560,7 +555,6 @@ fn finish_with_door(
         resumed: false,
         tree: list::tree_report(context, &tree, false, false, false)?,
         declared: DeclaredReport {
-            tasks,
             resources,
             env: config.root.env.keys().cloned().collect(),
             files: config.root.files.keys().cloned().collect(),
@@ -600,7 +594,6 @@ fn invalid_config_report(
         resumed: false,
         tree: list::tree_report(context, &tree, false, false, false)?,
         declared: DeclaredReport {
-            tasks: Vec::new(),
             resources: Vec::new(),
             env: Vec::new(),
             files: Vec::new(),
@@ -635,7 +628,7 @@ pub(crate) fn new_state(
         }
     };
     Ok(TreeState {
-        schema: 1,
+        schema: 2,
         tree_id: tree_id.to_owned(),
         label: target.label.clone(),
         name: target.name.clone(),
@@ -645,9 +638,7 @@ pub(crate) fn new_state(
             pid: std::process::id(),
             started: now.to_owned(),
         }),
-        verify_pending: false,
         sync: None,
-        verify: None,
         build: None,
         resources: BTreeMap::new(),
         materialized: Vec::new(),
@@ -674,7 +665,7 @@ pub(crate) fn declared_branch(
     }
     let repo_path = path.join(".wt.toml");
     Ok(wt_sys::fsx::read_string(&repo_path)?
-        .map(|source| config::parse(&source, &repo_path.to_string_lossy()))
+        .map(|source| config::parse_current(&source, &repo_path.to_string_lossy()))
         .transpose()?
         .and_then(|repo| repo.branch))
 }
@@ -686,7 +677,7 @@ pub(crate) fn initial_config(
 ) -> Result<config::Config, CoreError> {
     let repo_path = path.join(".wt.toml");
     let repo = wt_sys::fsx::read_string(&repo_path)?
-        .map(|source| config::parse(&source, &repo_path.to_string_lossy()))
+        .map(|source| config::parse_current(&source, &repo_path.to_string_lossy()))
         .transpose()?
         .unwrap_or_default();
     let user = context

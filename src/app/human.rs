@@ -1,9 +1,9 @@
 use serde_json::Value;
 use wt_core::doctor::Severity;
 use wt_core::report::{
-    AdoptData, AnchorData, CloneData, ConfigData, DoctorData, ForgetData, ListData, LocksData,
-    NewData, Notice, PruneData, RegisterData, RemoveData, ResourceActionData, SessionsData,
-    StatusData, SyncData, TasksData, UnregisterData, WhichData,
+    AdoptData, AnchorData, CloneData, ConfigData, DoctorData, ForgetData, ListData, NewData,
+    Notice, PruneData, RegisterData, RemoveData, ResourceActionData, SessionsData, StatusData,
+    SyncData, UnregisterData, WhichData,
 };
 
 use crate::cli::Command;
@@ -20,7 +20,7 @@ pub(crate) enum HumanKind {
     Status,
     Meta,
     Path,
-    Run,
+    Operation,
     Sync,
     Anchor,
     Exec,
@@ -35,16 +35,16 @@ pub(crate) enum HumanKind {
     Destroy,
     Refresh,
     Doctor,
-    Tasks,
     Config,
     Which,
-    Locks,
+    Leases,
     Script,
 }
 
 impl From<&Command> for HumanKind {
     fn from(command: &Command) -> Self {
         match command {
+            Command::Hook(_) => Self::Operation,
             Command::Setup(_) => Self::Setup,
             Command::Register(_) => Self::Register,
             Command::Unregister(_) => Self::Unregister,
@@ -55,11 +55,7 @@ impl From<&Command> for HumanKind {
             Command::Status(_) => Self::Status,
             Command::Meta(_) => Self::Meta,
             Command::Path(_) => Self::Path,
-            Command::Run(_)
-            | Command::Test(_)
-            | Command::Lint(_)
-            | Command::Fmt(_)
-            | Command::Build(_) => Self::Run,
+            Command::With(_) => Self::Operation,
             Command::Sync(_) => Self::Sync,
             Command::Anchor(_) => Self::Anchor,
             Command::Exec(_) => Self::Exec,
@@ -74,10 +70,9 @@ impl From<&Command> for HumanKind {
             Command::Destroy(_) => Self::Destroy,
             Command::Refresh(_) => Self::Refresh,
             Command::Doctor(_) => Self::Doctor,
-            Command::Tasks(_) => Self::Tasks,
             Command::Config(_) => Self::Config,
             Command::Which(_) => Self::Which,
-            Command::Locks(_) => Self::Locks,
+            Command::Leases(_) => Self::Leases,
             Command::ShellInit(_) | Command::Completions(_) => Self::Script,
         }
     }
@@ -101,12 +96,11 @@ impl HumanKind {
             Self::Destroy => render_resource("Resource destroyed", value, notices),
             Self::Refresh => render_resource("Resource refreshed", value, notices),
             Self::Doctor => render_doctor(decode(value), notices),
-            Self::Tasks => render_tasks(decode(value), notices),
             Self::Config => render_config(decode(value), notices),
             Self::Which => decode::<WhichData>(value)
                 .path
                 .unwrap_or_else(|| "not found".to_owned()),
-            Self::Run => render_run(value, notices),
+            Self::Operation => render_operation(value, notices),
             Self::Path
             | Self::Meta
             | Self::Exec
@@ -118,7 +112,7 @@ impl HumanKind {
             | Self::Setup
             | Self::Script => String::new(),
             Self::Forget => render_forget(decode(value), notices),
-            Self::Locks => render_locks(decode(value), notices),
+            Self::Leases => render_leases(value),
         }
     }
 }
@@ -136,7 +130,6 @@ fn render_register(data: RegisterData, notices: &[Notice]) -> String {
         format!("{} is registered", data.label)
     };
     let declared = [
-        ("tasks", data.declared.tasks.len()),
         ("resources", data.declared.resources.len()),
         ("files", data.declared.files.len()),
         ("bins", data.declared.bin.len()),
@@ -225,14 +218,7 @@ fn render_new(data: NewData, notices: &[Notice]) -> String {
         .sync
         .as_ref()
         .map_or_else(|| "skipped".to_owned(), |steps| format_steps(steps));
-    let verify = data.verify.as_ref().map(|verify| {
-        if verify.ok {
-            format!("passed ({})", format_steps(&verify.steps))
-        } else {
-            "failed".to_owned()
-        }
-    });
-    let mut facts = vec![
+    let facts = vec![
         ("path", data.tree.path),
         (
             "branch",
@@ -240,9 +226,6 @@ fn render_new(data: NewData, notices: &[Notice]) -> String {
         ),
         ("sync", sync),
     ];
-    if let Some(verify) = verify {
-        facts.push(("verify", verify));
-    }
     block(headline, facts, notices)
 }
 
@@ -280,8 +263,11 @@ fn render_status(data: StatusData, notices: &[Notice]) -> String {
             format!("{} modified, {} untracked", dirty.modified, dirty.untracked),
         ));
     }
-    if let Some(build) = data.tree.build {
-        facts.push(("build", format!("{} (log {})", build.state, build.log)));
+    if let Some(after_new) = data.tree.after_new {
+        facts.push((
+            "after_new",
+            format!("{} (log {})", after_new.state, after_new.log),
+        ));
     }
     if !data.tree.meta.is_empty() {
         facts.push((
@@ -306,16 +292,16 @@ fn render_status(data: StatusData, notices: &[Notice]) -> String {
         ));
     }
     if !data.tree.resources.is_empty() {
-        let held =
-            data.tree
-                .resources
-                .iter()
-                .filter_map(|resource| {
-                    resource.holder.as_ref().map(|holder| {
-                        format!("{}={} (holder {holder})", resource.task, resource.state)
-                    })
+        let held = data
+            .tree
+            .resources
+            .iter()
+            .filter_map(|resource| {
+                resource.holder.as_ref().map(|holder| {
+                    format!("{}={} (holder {holder})", resource.resource, resource.state)
                 })
-                .collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
         facts.push((
             "resources",
             if held.is_empty() {
@@ -324,9 +310,6 @@ fn render_status(data: StatusData, notices: &[Notice]) -> String {
                 held.join(", ")
             },
         ));
-    }
-    if !data.tasks.is_empty() {
-        facts.push(("tasks", data.tasks.len().to_string()));
     }
     for error in data.config_errors {
         facts.push(("config", format!("{}: {}", error.path, error.message)));
@@ -364,7 +347,7 @@ fn render_list_with_meta(data: ListData, meta_key: Option<&str>) -> String {
                         resource
                             .holder
                             .as_ref()
-                            .map(|holder| format!("{}:{holder}", resource.task))
+                            .map(|holder| format!("{}:{holder}", resource.resource))
                     })
                     .collect::<Vec<_>>()
                     .join(",");
@@ -486,10 +469,10 @@ fn render_anchor(data: AnchorData, notices: &[Notice]) -> String {
         ));
     }
     facts.push((
-        "build",
-        match data.build.as_str() {
+        "warm",
+        match data.warm.as_str() {
             "fresh" => "already current".to_owned(),
-            "none" => "no build task".to_owned(),
+            "none" => "no warm hook".to_owned(),
             other => other.to_owned(),
         },
     ));
@@ -609,7 +592,7 @@ fn render_resource(headline: &str, value: &Value, notices: &[Notice]) -> String 
         return block("Resource unchanged", Vec::new(), notices);
     };
     block(
-        format!("{headline}: {}", data.task),
+        format!("{headline}: {}", data.resource),
         vec![
             ("target", data.target),
             ("scope", data.scope),
@@ -649,27 +632,6 @@ fn render_doctor(data: DoctorData, notices: &[Notice]) -> String {
     block(headline, facts, notices)
 }
 
-fn render_tasks(data: TasksData, _notices: &[Notice]) -> String {
-    let rows = data
-        .tasks
-        .into_iter()
-        .map(|task| {
-            vec![
-                task.id,
-                task.scope,
-                task.origin,
-                task.cwd,
-                task.needs.join(","),
-            ]
-        })
-        .collect::<Vec<_>>();
-    table(
-        format!("Effective tasks for {}", data.target),
-        ["task", "scope", "layer", "cwd", "needs"],
-        rows,
-    )
-}
-
 fn render_config(data: ConfigData, _notices: &[Notice]) -> String {
     let mut rows = Vec::new();
     for entry in data.entries {
@@ -698,74 +660,47 @@ fn render_config(data: ConfigData, _notices: &[Notice]) -> String {
     )
 }
 
-fn render_locks(data: LocksData, _notices: &[Notice]) -> String {
-    let rows = data
-        .locks
+fn render_operation(value: &Value, notices: &[Notice]) -> String {
+    let _ = notices;
+    value
+        .get("target")
+        .and_then(Value::as_str)
+        .map_or_else(String::new, |target| format!("Updated {target}"))
+}
+
+fn render_leases(value: &Value) -> String {
+    let rows = value["leases"]
+        .as_array()
         .into_iter()
-        .map(|lock| {
-            let state = lock.slots.map_or_else(
-                || if lock.held { "held" } else { "free" }.to_owned(),
-                |slots| format!("held {}/{slots}", lock.held_slots.unwrap_or(0)),
-            );
-            let holders = if lock.slots.is_some() {
-                lock.holders
-                    .into_iter()
-                    .map(|slot| {
-                        slot.holder.map_or_else(
-                            || format!("{}:unknown", slot.slot),
-                            |holder| format!("{}:{} {}", slot.slot, holder.pid, holder.verb),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            } else if lock.held {
-                lock.holder
-                    .map(|holder| format!("{} {}", holder.pid, holder.verb))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            vec![lock.level.to_string(), lock.name, state, holders, lock.path]
+        .flatten()
+        .map(|lease| {
+            let holder = lease["holder"]
+                .as_object()
+                .map(|holder| {
+                    format!(
+                        "{}:{}",
+                        holder.get("pid").and_then(Value::as_u64).unwrap_or(0),
+                        holder
+                            .get("process_start")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                    )
+                })
+                .unwrap_or_default();
+            vec![
+                lease["pool"].as_str().unwrap_or("").to_owned(),
+                lease["slot"].to_string(),
+                lease["name"].as_str().unwrap_or("").to_owned(),
+                lease["kind"].as_str().unwrap_or("free").to_owned(),
+                holder,
+            ]
         })
         .collect::<Vec<_>>();
     table(
-        "Coordination locks",
-        ["level", "name", "state", "holder", "path"],
+        "Resource leases",
+        ["pool", "slot", "name", "kind", "holder"],
         rows,
     )
-}
-
-fn render_run(value: &Value, notices: &[Notice]) -> String {
-    if value.get("steps").is_some() && value.get("target").is_none() {
-        let task = value["task"].as_str().unwrap_or("task");
-        let args = value["args"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(Value::to_string)
-            .collect::<Vec<_>>();
-        let headline = if args.is_empty() {
-            format!("Plan for {task}")
-        } else {
-            format!("Plan for {task} -- {}", args.join(" "))
-        };
-        let rows = value["steps"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|step| {
-                vec![
-                    step["id"].as_str().unwrap_or("").to_owned(),
-                    step["scope"].as_str().unwrap_or("").to_owned(),
-                    step["origin"].as_str().unwrap_or("").to_owned(),
-                    step["cwd"].as_str().unwrap_or("").to_owned(),
-                ]
-            })
-            .collect::<Vec<_>>();
-        return table(headline, ["task", "scope", "layer", "cwd"], rows);
-    }
-    let _ = notices;
-    String::new()
 }
 
 fn format_sync(sync: &wt_core::report::SyncTreeReport) -> String {

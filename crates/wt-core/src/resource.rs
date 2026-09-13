@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{Command, Exclusive, TiedTo},
+    config::{Arena, Command, TiedTo},
     model::{name_snake, EnvMap, Label, RelDir},
     CoreError, ExitClass,
 };
@@ -13,21 +13,22 @@ pub struct ResourceKey {
     /// Tree-tied resources use the address name; wider scopes use null.
     pub name: Option<String>,
     pub scope: RelDir,
-    pub task: String,
+    #[serde(alias = "task")]
+    pub resource: String,
 }
 
 pub fn default_name_template(key: &ResourceKey) -> String {
-    let scoped_task = if key.scope.as_str() == "." {
-        key.task.clone()
+    let scoped_resource = if key.scope.as_str() == "." {
+        key.resource.clone()
     } else {
-        format!("{}/{}", key.scope, key.task)
+        format!("{}/{}", key.scope, key.resource)
     };
     let prefix = match key.tied_to {
         TiedTo::Tree => "{{name_short()}}",
         TiedTo::Repo => "{{label()}}",
         TiedTo::Machine => "machine",
     };
-    format!("{prefix}_{}", name_snake(&scoped_task))
+    format!("{prefix}_{}", name_snake(&scoped_resource))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -56,13 +57,22 @@ pub struct SnapshotRoots {
 pub struct ResourceSnapshot {
     pub schema: u8,
     pub key: ResourceKey,
+    #[serde(default, alias = "exclusive")]
+    pub arena: Option<Arena>,
     #[serde(default)]
-    pub exclusive: Option<Exclusive>,
+    pub capacity: Option<u16>,
     pub name: String,
     pub cwd_rel: RelDir,
     pub exists: Option<ExpandedCommand>,
     pub destroy: ExpandedCommand,
-    pub run: Option<ExpandedCommand>,
+    #[serde(alias = "run")]
+    pub create: Option<ExpandedCommand>,
+    #[serde(default)]
+    pub acquire: Option<ExpandedCommand>,
+    #[serde(default)]
+    pub keep: Option<String>,
+    #[serde(default)]
+    pub idle: Option<String>,
     pub env: EnvMap,
     pub bin_dirs: Vec<String>,
     pub bin_exes: Vec<String>,
@@ -179,6 +189,21 @@ pub struct LastError {
     pub child: Option<ChildStatus>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResourceHold {
+    #[default]
+    Free,
+    Kept {
+        tree: String,
+        until_millis: u64,
+    },
+    Leased {
+        pid: u32,
+        process_start: String,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResourceRecord {
     pub key: ResourceKey,
@@ -191,6 +216,12 @@ pub struct ResourceRecord {
     pub last_probe: Option<Probe>,
     pub last_error: Option<LastError>,
     pub since: String,
+    #[serde(default)]
+    pub released_at: Option<String>,
+    #[serde(default)]
+    pub released_millis: Option<u64>,
+    #[serde(default)]
+    pub hold: ResourceHold,
 }
 
 impl ResourceRecord {
@@ -206,6 +237,9 @@ impl ResourceRecord {
             undeclared: false,
             last_probe: None,
             last_error: None,
+            released_at: None,
+            released_millis: None,
+            hold: ResourceHold::Free,
         }
     }
 
@@ -232,9 +266,9 @@ pub enum EffectResult {
 pub enum Event {
     Declare(Box<ResourceSnapshot>),
     Probe(Probe),
-    Run {
+    Create {
         probe: Probe,
-        run: Option<EffectResult>,
+        create: Option<EffectResult>,
         confirm: Option<Probe>,
     },
     Destroy {
@@ -247,8 +281,8 @@ pub enum Event {
         probe: Probe,
         destroy: Option<EffectResult>,
         confirm_destroy: Option<Probe>,
-        run: Option<EffectResult>,
-        confirm_run: Option<Probe>,
+        create: Option<EffectResult>,
+        confirm_create: Option<Probe>,
     },
 }
 
@@ -256,7 +290,7 @@ pub enum Event {
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     None,
-    Run,
+    Create,
     Destroy,
     Probe,
     PollReady,
@@ -338,11 +372,11 @@ pub fn step(record: Option<ResourceRecord>, event: Event) -> StepResult {
             StepResult::keep(record)
         }
         Event::Probe(probe) => observe(record, probe),
-        Event::Run {
+        Event::Create {
             probe,
-            run: run_result,
+            create: run_result,
             confirm,
-        } => run(record, probe, run_result, confirm),
+        } => create(record, probe, run_result, confirm),
         Event::Destroy {
             teardown,
             probe,
@@ -353,15 +387,15 @@ pub fn step(record: Option<ResourceRecord>, event: Event) -> StepResult {
             probe,
             destroy,
             confirm_destroy,
-            run: run_result,
-            confirm_run,
+            create: run_result,
+            confirm_create,
         } => refresh(
             record,
             probe,
             destroy,
             confirm_destroy,
             run_result,
-            confirm_run,
+            confirm_create,
         ),
     }
 }
@@ -416,7 +450,7 @@ fn observe(mut record: ResourceRecord, probe: Probe) -> StepResult {
     }
 }
 
-fn run(
+fn create(
     mut record: ResourceRecord,
     probe: Probe,
     run_result: Option<EffectResult>,
@@ -426,7 +460,7 @@ fn run(
         return StepResult::error(
             record,
             "RESOURCE_ORPHANED",
-            "orphaned resource cannot be run",
+            "orphaned resource cannot be create",
         );
     }
 
@@ -451,18 +485,18 @@ fn run(
             if was_present {
                 notices.push("RESOURCE_GONE".to_owned());
             }
-            if record.declaration.run.is_none() {
+            if record.declaration.create.is_none() {
                 notices.push("RESOURCE_DECLARED_EXTERNAL".to_owned());
                 let mut result = StepResult::keep(record);
                 result.notices = notices;
                 return result;
             }
 
-            // This record must be committed before the executor performs Run.
+            // This record must be committed before the executor performs Create.
             record.instance = Some(record.declaration.clone());
             let Some(run_result) = run_result else {
                 let mut result = StepResult::keep(record);
-                result.action = Action::Run;
+                result.action = Action::Create;
                 result.notices = notices;
                 return result;
             };
@@ -472,12 +506,12 @@ fn run(
                 } => {
                     record.last_error = Some(LastError {
                         at,
-                        event: "run".to_owned(),
+                        event: "create".to_owned(),
                         message,
                         child,
                     });
                     let mut result =
-                        StepResult::error(record, "TASK_FAILED", "resource creation failed");
+                        StepResult::error(record, "CREATE_FAILED", "resource creation failed");
                     result.notices = notices;
                     result
                 }
@@ -502,7 +536,7 @@ fn run(
                             clear_absent(&mut record);
                             record.last_error = Some(LastError {
                                 at: confirm.at,
-                                event: "run".to_owned(),
+                                event: "create".to_owned(),
                                 message: "absent_after_run".to_owned(),
                                 child: None,
                             });
@@ -517,7 +551,7 @@ fn run(
                         ProbeResult::Failed { failure } => {
                             record.last_error = Some(LastError {
                                 at: confirm.at,
-                                event: "run".to_owned(),
+                                event: "create".to_owned(),
                                 message: failure.message(),
                                 child: None,
                             });
@@ -648,7 +682,7 @@ fn refresh(
     destroy_result: Option<EffectResult>,
     confirm_destroy: Option<Probe>,
     run_result: Option<EffectResult>,
-    confirm_run: Option<Probe>,
+    confirm_create: Option<Probe>,
 ) -> StepResult {
     if record.state == ResourceState::Orphaned {
         return StepResult::error(
@@ -664,7 +698,7 @@ fn refresh(
     let Some(record) = after_destroy.record else {
         return after_destroy;
     };
-    if record.declaration.run.is_none() {
+    if record.declaration.create.is_none() {
         return StepResult::keep(record);
     }
     let at = record
@@ -672,14 +706,14 @@ fn refresh(
         .as_ref()
         .map(|probe| probe.at.clone())
         .unwrap_or_else(|| record.since.clone());
-    run(record, Probe::absent(at), run_result, confirm_run)
+    create(record, Probe::absent(at), run_result, confirm_create)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn snapshot(with_run: bool) -> ResourceSnapshot {
+    fn snapshot(with_create: bool) -> ResourceSnapshot {
         ResourceSnapshot {
             schema: 1,
             key: ResourceKey {
@@ -687,9 +721,10 @@ mod tests {
                 tied_to: TiedTo::Tree,
                 name: Some("work".to_owned()),
                 scope: RelDir::new(".").unwrap(),
-                task: "db".to_owned(),
+                resource: "db".to_owned(),
             },
-            exclusive: None,
+            arena: None,
+            capacity: None,
             name: "repo_db".to_owned(),
             cwd_rel: RelDir::new(".").unwrap(),
             exists: Some(ExpandedCommand::Shell {
@@ -698,9 +733,12 @@ mod tests {
             destroy: ExpandedCommand::Shell {
                 shell: "drop".to_owned(),
             },
-            run: with_run.then(|| ExpandedCommand::Shell {
+            create: with_create.then(|| ExpandedCommand::Shell {
                 shell: "create".to_owned(),
             }),
+            acquire: None,
+            keep: None,
+            idle: None,
             env: EnvMap::new(),
             bin_dirs: Vec::new(),
             bin_exes: Vec::new(),
@@ -713,8 +751,8 @@ mod tests {
         }
     }
 
-    fn record(state: ResourceState, with_run: bool) -> ResourceRecord {
-        let mut record = ResourceRecord::declared(snapshot(with_run));
+    fn record(state: ResourceState, with_create: bool) -> ResourceRecord {
+        let mut record = ResourceRecord::declared(snapshot(with_create));
         record.state = state;
         if state != ResourceState::Declared {
             record.instance = Some(record.declaration.clone());
@@ -749,7 +787,7 @@ mod tests {
         struct Case {
             name: &'static str,
             state: ResourceState,
-            with_run: bool,
+            with_create: bool,
             initial_instance: Option<bool>,
             undeclared: bool,
             event: Event,
@@ -765,14 +803,14 @@ mod tests {
         }
         let cases = vec![
             Case {
-                name: "declared/run/present-freezes-external",
+                name: "declared/create/present-freezes-external",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::present("1"),
-                    run: None,
+                    create: None,
                     confirm: None,
                 },
                 expected: Some(ResourceState::Present),
@@ -786,19 +824,19 @@ mod tests {
                 last_error: None,
             },
             Case {
-                name: "declared/run/absent-freezes-before-effect",
+                name: "declared/create/absent-freezes-before-effect",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::absent("1"),
-                    run: None,
+                    create: None,
                     confirm: None,
                 },
                 expected: Some(ResourceState::Declared),
                 error: None,
-                action: Action::Run,
+                action: Action::Create,
                 instance: true,
                 external: false,
                 reason: None,
@@ -807,18 +845,18 @@ mod tests {
                 last_error: None,
             },
             Case {
-                name: "declared/run/run-fail",
+                name: "declared/create/create-fail",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::absent("1"),
-                    run: Some(failed("2", "run_failed")),
+                    create: Some(failed("2", "run_failed")),
                     confirm: None,
                 },
                 expected: Some(ResourceState::Declared),
-                error: Some("TASK_FAILED"),
+                error: Some("CREATE_FAILED"),
                 action: Action::None,
                 instance: true,
                 external: false,
@@ -828,14 +866,14 @@ mod tests {
                 last_error: Some("run_failed"),
             },
             Case {
-                name: "declared/run/run-ok-polls",
+                name: "declared/create/create-ok-polls",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::absent("1"),
-                    run: Some(ok("2")),
+                    create: Some(ok("2")),
                     confirm: None,
                 },
                 expected: Some(ResourceState::Declared),
@@ -849,14 +887,14 @@ mod tests {
                 last_error: None,
             },
             Case {
-                name: "declared/run/run-ok-present",
+                name: "declared/create/create-ok-present",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::absent("1"),
-                    run: Some(ok("2")),
+                    create: Some(ok("2")),
                     confirm: Some(Probe::present("3")),
                 },
                 expected: Some(ResourceState::Present),
@@ -870,14 +908,14 @@ mod tests {
                 last_error: None,
             },
             Case {
-                name: "declared/run/absent-after-run",
+                name: "declared/create/absent-after-create",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::absent("1"),
-                    run: Some(ok("2")),
+                    create: Some(ok("2")),
                     confirm: Some(Probe::absent("3")),
                 },
                 expected: Some(ResourceState::Declared),
@@ -891,14 +929,14 @@ mod tests {
                 last_error: Some("absent_after_run"),
             },
             Case {
-                name: "declared/run/confirm-failed",
+                name: "declared/create/confirm-failed",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::absent("1"),
-                    run: Some(ok("2")),
+                    create: Some(ok("2")),
                     confirm: Some(Probe::failed_exit("3", 2).unwrap()),
                 },
                 expected: Some(ResourceState::Declared),
@@ -912,14 +950,14 @@ mod tests {
                 last_error: Some("probe exited 2"),
             },
             Case {
-                name: "declared/run/no-run-external",
+                name: "declared/create/no-create-external",
                 state: ResourceState::Declared,
-                with_run: false,
+                with_create: false,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::absent("1"),
-                    run: None,
+                    create: None,
                     confirm: None,
                 },
                 expected: Some(ResourceState::Declared),
@@ -933,14 +971,14 @@ mod tests {
                 last_error: None,
             },
             Case {
-                name: "declared/run/probe-failed",
+                name: "declared/create/probe-failed",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::failed_exit("1", 2).unwrap(),
-                    run: Some(ok("2")),
+                    create: Some(ok("2")),
                     confirm: None,
                 },
                 expected: Some(ResourceState::Declared),
@@ -956,7 +994,7 @@ mod tests {
             Case {
                 name: "declared/probe/present",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Probe(Probe::present("1")),
@@ -973,7 +1011,7 @@ mod tests {
             Case {
                 name: "declared/probe/absent-clears-stale-instance-without-notice",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: Some(true),
                 undeclared: false,
                 event: Event::Probe(Probe::absent("1")),
@@ -990,7 +1028,7 @@ mod tests {
             Case {
                 name: "declared/probe/failed-finding",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Probe(Probe::failed_exit("1", 2).unwrap()),
@@ -1007,7 +1045,7 @@ mod tests {
             Case {
                 name: "declared/destroy/absent-stays",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: true,
                 event: Event::Destroy {
@@ -1029,7 +1067,7 @@ mod tests {
             Case {
                 name: "declared/destroy/teardown-drop",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Destroy {
@@ -1051,7 +1089,7 @@ mod tests {
             Case {
                 name: "declared/destroy/failed-probe-teardown-orphans",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Destroy {
@@ -1073,7 +1111,7 @@ mod tests {
             Case {
                 name: "declared/destroy/failed-probe-nonteardown-errors",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Destroy {
@@ -1093,17 +1131,17 @@ mod tests {
                 last_error: Some("probe exited 2"),
             },
             Case {
-                name: "declared/refresh/destroy-then-run",
+                name: "declared/refresh/destroy-then-create",
                 state: ResourceState::Declared,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Refresh {
                     probe: Probe::absent("1"),
                     destroy: None,
                     confirm_destroy: None,
-                    run: Some(ok("2")),
-                    confirm_run: Some(Probe::present("3")),
+                    create: Some(ok("2")),
+                    confirm_create: Some(Probe::present("3")),
                 },
                 expected: Some(ResourceState::Present),
                 error: None,
@@ -1116,14 +1154,14 @@ mod tests {
                 last_error: None,
             },
             Case {
-                name: "present/run/present",
+                name: "present/create/present",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::present("1"),
-                    run: None,
+                    create: None,
                     confirm: None,
                 },
                 expected: Some(ResourceState::Present),
@@ -1137,14 +1175,14 @@ mod tests {
                 last_error: None,
             },
             Case {
-                name: "present/run/absent-recreates-with-gone-notice",
+                name: "present/create/absent-recreates-with-gone-notice",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::absent("1"),
-                    run: Some(ok("2")),
+                    create: Some(ok("2")),
                     confirm: Some(Probe::present("3")),
                 },
                 expected: Some(ResourceState::Present),
@@ -1158,14 +1196,14 @@ mod tests {
                 last_error: None,
             },
             Case {
-                name: "present/run/failed-probe",
+                name: "present/create/failed-probe",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::failed_exit("1", 2).unwrap(),
-                    run: Some(ok("2")),
+                    create: Some(ok("2")),
                     confirm: None,
                 },
                 expected: Some(ResourceState::Present),
@@ -1181,7 +1219,7 @@ mod tests {
             Case {
                 name: "present/probe/absent",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Probe(Probe::absent("1")),
@@ -1198,7 +1236,7 @@ mod tests {
             Case {
                 name: "present/destroy/action",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Destroy {
@@ -1220,7 +1258,7 @@ mod tests {
             Case {
                 name: "present/destroy/destroy-fail",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Destroy {
@@ -1242,7 +1280,7 @@ mod tests {
             Case {
                 name: "present/destroy/destroy-ok-awaits-confirm",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Destroy {
@@ -1264,7 +1302,7 @@ mod tests {
             Case {
                 name: "present/destroy/confirmed-absent-stays-declared",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Destroy {
@@ -1286,7 +1324,7 @@ mod tests {
             Case {
                 name: "present/destroy/teardown-drop",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Destroy {
@@ -1308,7 +1346,7 @@ mod tests {
             Case {
                 name: "present/destroy/undeclared-drop",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: true,
                 event: Event::Destroy {
@@ -1330,7 +1368,7 @@ mod tests {
             Case {
                 name: "present/destroy/still-present",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Destroy {
@@ -1352,7 +1390,7 @@ mod tests {
             Case {
                 name: "present/destroy/confirm-failed",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Destroy {
@@ -1372,17 +1410,17 @@ mod tests {
                 last_error: Some("probe exited 2"),
             },
             Case {
-                name: "present/refresh/destroy-then-run",
+                name: "present/refresh/destroy-then-create",
                 state: ResourceState::Present,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Refresh {
                     probe: Probe::present("1"),
                     destroy: Some(ok("2")),
                     confirm_destroy: Some(Probe::absent("3")),
-                    run: Some(ok("4")),
-                    confirm_run: Some(Probe::present("5")),
+                    create: Some(ok("4")),
+                    confirm_create: Some(Probe::present("5")),
                 },
                 expected: Some(ResourceState::Present),
                 error: None,
@@ -1395,14 +1433,14 @@ mod tests {
                 last_error: None,
             },
             Case {
-                name: "orphaned/run/refused",
+                name: "orphaned/create/refused",
                 state: ResourceState::Orphaned,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
-                event: Event::Run {
+                event: Event::Create {
                     probe: Probe::present("1"),
-                    run: None,
+                    create: None,
                     confirm: None,
                 },
                 expected: Some(ResourceState::Orphaned),
@@ -1418,7 +1456,7 @@ mod tests {
             Case {
                 name: "orphaned/probe/present-stays-orphaned",
                 state: ResourceState::Orphaned,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Probe(Probe::present("1")),
@@ -1435,7 +1473,7 @@ mod tests {
             Case {
                 name: "orphaned/probe/absent-recovers",
                 state: ResourceState::Orphaned,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Probe(Probe::absent("1")),
@@ -1452,7 +1490,7 @@ mod tests {
             Case {
                 name: "orphaned/probe/failed",
                 state: ResourceState::Orphaned,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Probe(Probe::failed_exit("1", 2).unwrap()),
@@ -1469,7 +1507,7 @@ mod tests {
             Case {
                 name: "orphaned/destroy/retry-fails",
                 state: ResourceState::Orphaned,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Destroy {
@@ -1491,7 +1529,7 @@ mod tests {
             Case {
                 name: "orphaned/destroy/retry-drops",
                 state: ResourceState::Orphaned,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Destroy {
@@ -1513,15 +1551,15 @@ mod tests {
             Case {
                 name: "orphaned/refresh/refused",
                 state: ResourceState::Orphaned,
-                with_run: true,
+                with_create: true,
                 initial_instance: None,
                 undeclared: false,
                 event: Event::Refresh {
                     probe: Probe::present("1"),
                     destroy: None,
                     confirm_destroy: None,
-                    run: None,
-                    confirm_run: None,
+                    create: None,
+                    confirm_create: None,
                 },
                 expected: Some(ResourceState::Orphaned),
                 error: Some("RESOURCE_ORPHANED"),
@@ -1535,7 +1573,7 @@ mod tests {
             },
         ];
         for case in cases {
-            let mut initial = record(case.state, case.with_run);
+            let mut initial = record(case.state, case.with_create);
             if let Some(has_instance) = case.initial_instance {
                 initial.instance = has_instance.then(|| initial.declaration.clone());
             }
@@ -1615,13 +1653,13 @@ mod tests {
         );
         let freeze = step(
             Some(record(ResourceState::Declared, true)),
-            Event::Run {
+            Event::Create {
                 probe: Probe::absent("1"),
-                run: None,
+                create: None,
                 confirm: None,
             },
         );
-        assert_eq!(freeze.action, Action::Run);
+        assert_eq!(freeze.action, Action::Create);
         assert!(freeze.record.unwrap().instance.is_some());
 
         let failed = step(
@@ -1640,12 +1678,12 @@ mod tests {
     }
 
     #[test]
-    fn no_run_resource_stays_declared_with_the_external_notice() {
+    fn resource_without_create_stays_declared_with_the_external_notice() {
         let result = step(
             Some(record(ResourceState::Declared, false)),
-            Event::Run {
+            Event::Create {
                 probe: Probe::absent("1"),
-                run: None,
+                create: None,
                 confirm: None,
             },
         );

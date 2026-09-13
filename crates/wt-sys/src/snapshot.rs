@@ -6,7 +6,7 @@ use std::time::Duration;
 use wt_core::config::TiedTo;
 use wt_core::model::{duration_millis, EnvMap};
 use wt_core::resource::{ExpandedCommand, Probe, ResourceSnapshot};
-use wt_core::settings::TaskDefaults;
+use wt_core::settings::RecipeDefaults;
 use wt_core::snapshot::{missing_tree_verdict, MissingTreeVerdict};
 use wt_core::{CoreError, ExitClass};
 
@@ -19,35 +19,36 @@ pub use wt_core::snapshot::minimise_env;
 pub enum Action {
     Exists,
     Destroy,
-    Run,
+    Create,
+    Acquire,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Deadlines {
     pub probe: Duration,
     pub destroy: Duration,
-    pub run: Option<Duration>,
+    pub effect: Option<Duration>,
 }
 
 impl Default for Deadlines {
     fn default() -> Self {
-        Self::from_settings(&TaskDefaults::default())
-            .expect("wt-core's built-in task deadlines are valid")
+        Self::from_settings(&RecipeDefaults::default())
+            .expect("wt-core's built-in recipe deadlines are valid")
     }
 }
 
 impl Deadlines {
-    pub fn from_settings(settings: &TaskDefaults) -> Result<Self> {
+    pub fn from_settings(settings: &RecipeDefaults) -> Result<Self> {
         Ok(Self {
-            probe: resolved_duration(settings.probe_timeout.as_deref(), "task.probe_timeout")?,
+            probe: resolved_duration(settings.probe_timeout.as_deref(), "recipes.probe_timeout")?,
             destroy: resolved_duration(
                 settings.destroy_timeout.as_deref(),
-                "task.destroy_timeout",
+                "recipes.destroy_timeout",
             )?,
-            run: settings
+            effect: settings
                 .timeout
                 .as_deref()
-                .map(|value| resolved_duration(Some(value), "task.timeout"))
+                .map(|value| resolved_duration(Some(value), "recipes.timeout"))
                 .transpose()?,
         })
     }
@@ -174,9 +175,9 @@ pub fn execute_observed(
             }
             Ok(ExecuteResult::Child(output))
         }
-        Action::Run => {
+        Action::Create | Action::Acquire => {
             crate::failpoint::resource_frozen()?;
-            proc::run(&request, options.log, options.deadlines.run, options.tee)
+            proc::run(&request, options.log, options.deadlines.effect, options.tee)
                 .map(ExecuteResult::Child)
         }
     }
@@ -221,14 +222,15 @@ fn command_for(snapshot: &ResourceSnapshot, action: Action) -> Result<&ExpandedC
     let command = match action {
         Action::Exists => snapshot.exists.as_ref(),
         Action::Destroy => Some(&snapshot.destroy),
-        Action::Run => snapshot.run.as_ref(),
+        Action::Create => snapshot.create.as_ref(),
+        Action::Acquire => snapshot.acquire.as_ref(),
     };
     command.ok_or_else(|| {
         CoreError::new(
             ExitClass::State,
             "CONFIG_INVALID",
             format!("snapshot has no {:?} recipe", action),
-            "refresh the resource declaration from a valid task",
+            "refresh the resource declaration from a valid resource configuration",
         )
     })
 }
@@ -310,14 +312,18 @@ mod tests {
                 tied_to: TiedTo::Tree,
                 name: Some("tree".into()),
                 scope: RelPath::new(".").unwrap(),
-                task: "daemon".into(),
+                resource: "daemon".into(),
             },
-            exclusive: None,
+            arena: None,
+            capacity: None,
             name: "repo_tree_daemon".into(),
             cwd_rel: RelPath::new(".").unwrap(),
             exists: Some(command.clone()),
             destroy: command.clone(),
-            run: Some(command),
+            create: Some(command),
+            acquire: None,
+            keep: None,
+            idle: None,
             env: BTreeMap::new(),
             bin_dirs: vec![tree.join("bin").to_string_lossy().into_owned()],
             bin_exes: vec!["tree-tool".into()],
@@ -396,7 +402,7 @@ mod tests {
         assert!(matches!(
             execute(
                 &value,
-                Action::Run,
+                Action::Create,
                 &invoker,
                 dir.path(),
                 None,
@@ -489,7 +495,7 @@ mod tests {
                 shell: "true".into(),
             },
         );
-        value.run = Some(ExpandedCommand::Shell {
+        value.create = Some(ExpandedCommand::Shell {
             shell: "tree-tool start".into(),
         });
         assert!(matches!(
@@ -507,7 +513,7 @@ mod tests {
         assert!(matches!(
             execute(
                 &value,
-                Action::Run,
+                Action::Create,
                 &capture_env(),
                 dir.path(),
                 None,

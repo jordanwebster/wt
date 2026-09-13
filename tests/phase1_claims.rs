@@ -11,8 +11,8 @@ const OWNED_CONFIG: &str = r#"
 bin = ["target/debug"]
 commands = ["orbit"]
 
-[task.build]
-run = "mkdir -p target/debug && ln -sfn ../../fixture/orbit target/debug/orbit"
+[hooks]
+after_new = "mkdir -p target/debug && ln -sfn ../../fixture/orbit target/debug/orbit"
 "#;
 
 fn owned_fixture(harness: &Harness) -> PathBuf {
@@ -106,7 +106,7 @@ fn owned_command_refuses_then_executes_and_unclaimed_names_resolve_normally() {
     assert!(refusal.contains("COMMAND_NOT_BUILT"));
     assert!(refusal.contains("tree `repo`"));
     assert!(refusal.contains(&repo.join("target/debug").to_string_lossy().to_string()));
-    assert!(refusal.contains("wt build repo"));
+    assert!(refusal.contains("repository's build command"));
     assert!(refusal.contains(&harness.shims.join("orbit").to_string_lossy().to_string()));
     assert!(!harness.shim_state.join("installed.log").exists());
 
@@ -141,7 +141,12 @@ fn owned_command_refuses_then_executes_and_unclaimed_names_resolve_normally() {
         "GALAXY untouched\n"
     );
 
-    harness.json(&["build", "repo"]);
+    let hook = harness
+        .wt()
+        .args(["__hook", "after-new", "repo", "--json"])
+        .output()
+        .unwrap();
+    assert!(hook.status.success());
     let built = capture_program("orbit", &["second", "argument"], env);
     assert_eq!(built.child.code, Some(0));
     let built_text = String::from_utf8_lossy(&built.stdout);
@@ -278,7 +283,7 @@ fn one_interactive_shell_reaches_the_build_without_rehashing() {
         request
             .env
             .insert("PROMPT".to_owned(), "wt-proof> ".to_owned());
-        let input = b"printf '__FIRST__\\n'\norbit before\nprintf '__BUILD__\\n'\nwt build repo\nprintf '__SECOND__\\n'\norbit after\nprintf '__DONE__\\n'\nexit\n";
+        let input = b"printf '__FIRST__\\n'\norbit before\nprintf '__BUILD__\\n'\nmkdir -p \"$WT_ROOT/target/debug\" && ln -sfn \"$WT_ROOT/fixture/orbit\" \"$WT_ROOT/target/debug/orbit\"\nprintf '__SECOND__\\n'\norbit after\nprintf '__DONE__\\n'\nexit\n";
         let output = proc::pty_capture(&request, input, Duration::from_secs(20)).unwrap();
         assert_eq!(
             output.child.code,
@@ -401,7 +406,7 @@ fn environment_claim_overrides_restores_and_keeps_ports_out_of_children() {
         harness.json(&["list"])["data"]["trees"][0]["ports"][0]["port"],
         30000
     );
-    for verb in ["env", "exec", "shell", "run"] {
+    for verb in ["env", "exec", "shell", "with"] {
         let help = harness.wt().args([verb, "--help"]).output().unwrap();
         assert!(help.status.success());
         assert!(!String::from_utf8_lossy(&help.stdout).contains("force-env"));
@@ -551,7 +556,12 @@ fn shim_fast_path_has_no_door_effects_and_is_well_below_the_door_budget() {
         "[ports]\nbase=46100\nstride=1\n[session]\nbackend='none'\n",
     );
     let repo = owned_fixture(&harness);
-    harness.json(&["build", "repo"]);
+    let hook = harness
+        .wt()
+        .args(["__hook", "after-new", "repo", "--json"])
+        .output()
+        .unwrap();
+    assert!(hook.status.success());
     let created = harness.json(&["new", "repo/work", "--no-sync"]);
     let work = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
     let mut env = assembled(&harness, "repo");
@@ -614,8 +624,8 @@ fn shim_fast_path_has_no_door_effects_and_is_well_below_the_door_budget() {
         assert_eq!(output.child.code, Some(5));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("COMMAND_NOT_BUILT"));
-        assert!(stderr.contains("build is in progress"));
-        assert!(stderr.contains("wt build repo/work"));
+        assert!(stderr.contains("after_new hook is in progress"));
+        assert!(stderr.contains("repository's build command"));
     }
     let refusal_elapsed = refusal_started.elapsed();
     let refusal_mean_ms = refusal_elapsed.as_secs_f64() * 1000.0 / f64::from(iterations);

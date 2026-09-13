@@ -6,9 +6,9 @@ use wt_core::address::LiveTree;
 use wt_core::config::{self, Config, Layer};
 use wt_core::lifecycle::{DerivedPhase, StateView, TreeObs, TreeState};
 use wt_core::model::{Registry, Target, Tombstone, TreeIdentity, TreeRec};
+use wt_core::recipe_plan::{Node, Origin};
 use wt_core::report::Notice;
 use wt_core::settings::{self, Settings};
-use wt_core::task::{Node, Origin};
 use wt_core::{CoreError, ExitClass};
 use wt_sys::fsx::{self, PathKind};
 use wt_sys::git::{Deadlines as GitDeadlines, Git};
@@ -28,9 +28,6 @@ pub(crate) struct Context {
     pub verbose: bool,
     pub tty: wt_sys::snapshot::Tty,
     pub pending_notices: Vec<Notice>,
-    /// What the sweep after the most recent task run reclaimed, for the
-    /// verbs that report it (`anchor`).
-    pub last_sweep: Option<wt_core::report::SweepReport>,
 }
 
 impl Context {
@@ -68,7 +65,7 @@ impl Context {
                 "change to an existing directory and retry",
             )
         })?)?;
-        Ok(Self {
+        let context = Self {
             home,
             cwd,
             registry,
@@ -80,8 +77,39 @@ impl Context {
             verbose: cli.verbose,
             tty: wt_sys::snapshot::tty(),
             pending_notices: Vec::new(),
-            last_sweep: None,
-        })
+        };
+        context.migrate_state_schema()?;
+        Ok(context)
+    }
+
+    fn migrate_state_schema(&self) -> Result<(), CoreError> {
+        for tree in &self.registry.trees {
+            let path = self
+                .home
+                .join(wt_core::model::tree_state_path(&target_of(tree)));
+            if let Some(mut state) = fsx::read_json::<TreeState>(&path, "STATE_CORRUPT")? {
+                if state.schema < 2 {
+                    state.schema = 2;
+                    fsx::write_json(&path, &state)?;
+                }
+            }
+        }
+        for label in self.registry.labels.keys() {
+            self.migrate_shared_state(&self.home.join(wt_core::model::repo_state_path(label)))?;
+        }
+        self.migrate_shared_state(&self.home.join(wt_core::model::machine_state_path()))
+    }
+
+    fn migrate_shared_state(&self, path: &Path) -> Result<(), CoreError> {
+        if let Some(mut state) =
+            fsx::read_json::<wt_core::lifecycle::RepoState>(path, "STATE_CORRUPT")?
+        {
+            if state.schema < 2 {
+                state.schema = 2;
+                fsx::write_json(path, &state)?;
+            }
+        }
+        Ok(())
     }
 
     fn check_format(home: &Path) -> Result<(), CoreError> {
@@ -137,12 +165,12 @@ impl Context {
     }
 
     pub fn rmw_wait(&self) -> Duration {
-        duration(self.settings.locks.rmw.as_deref(), Duration::from_secs(5))
+        duration(self.settings.waits.rmw.as_deref(), Duration::from_secs(5))
     }
 
     pub fn tree_wait(&self, override_value: Option<&str>) -> Duration {
         duration(
-            override_value.or(self.settings.locks.tree_exclusive.as_deref()),
+            override_value.or(self.settings.waits.tree.as_deref()),
             Duration::from_secs(30),
         )
     }
@@ -195,7 +223,14 @@ impl Context {
     /// Root under which adapters key per-tree build caches.
     pub fn read_state(&self, target: &Target) -> Result<Option<TreeState>, CoreError> {
         fsx::trace_budget("state_read", Some(&self.state_path(target)))?;
-        fsx::read_json(&self.state_path(target), "STATE_CORRUPT")
+        Ok(
+            fsx::read_json(&self.state_path(target), "STATE_CORRUPT")?.map(
+                |mut state: TreeState| {
+                    state.schema = 2;
+                    state
+                },
+            ),
+        )
     }
 
     pub fn write_state(
@@ -205,7 +240,9 @@ impl Context {
         holder: &Holder,
     ) -> Result<(), CoreError> {
         let _lock = lock::state_rmw(&self.state_lock_path(target), holder, self.rmw_wait())?;
-        fsx::write_json(&self.state_path(target), state)
+        let mut state = state.clone();
+        state.schema = 2;
+        fsx::write_json(&self.state_path(target), &state)
     }
 
     pub fn mutate_state<T>(
@@ -218,6 +255,7 @@ impl Context {
         let mut state = fsx::read_json::<TreeState>(&self.state_path(target), "STATE_CORRUPT")?
             .ok_or_else(|| state_missing(target))?;
         let output = mutate(&mut state)?;
+        state.schema = 2;
         fsx::write_json(&self.state_path(target), &state)?;
         Ok(output)
     }
@@ -232,7 +270,10 @@ impl Context {
                     label: tree.label.clone(),
                     name: tree.name.clone(),
                 },
-                root: tree.path.as_str().to_owned(),
+                root: fsx::canonicalize(Path::new(tree.path.as_str()))
+                    .unwrap_or_else(|_| PathBuf::from(tree.path.as_str()))
+                    .to_string_lossy()
+                    .into_owned(),
             })
             .collect::<Vec<_>>();
         let labels = self
@@ -309,7 +350,6 @@ impl Context {
         let state_view = state.map(|state| StateView {
             phase: state.phase,
             op: state.op.as_ref().map(|operation| operation.verb),
-            verify_pending: state.verify_pending,
             has_records: !state.resources.is_empty(),
         });
         let consult_lock = state_view.as_ref().is_some_and(|state| {
@@ -360,7 +400,7 @@ impl Context {
     pub fn load_config(&self, tree: &TreeRec) -> Result<Config, CoreError> {
         let repo_path = Path::new(tree.path.as_str()).join(".wt.toml");
         let repo = fsx::read_string(&repo_path)?
-            .map(|source| config::parse(&source, &repo_path.to_string_lossy()))
+            .map(|source| config::parse_current(&source, &repo_path.to_string_lossy()))
             .transpose()?
             .unwrap_or_default();
         let user = self
@@ -371,7 +411,7 @@ impl Context {
             .unwrap_or_default();
         let overlay_path = Path::new(tree.path.as_str()).join(".wt/config.toml");
         let overlay = fsx::read_string(&overlay_path)?
-            .map(|source| config::parse(&source, &overlay_path.to_string_lossy()))
+            .map(|source| config::parse_current(&source, &overlay_path.to_string_lossy()))
             .transpose()?
             .unwrap_or_default();
         let preliminary = config::merge(&[
@@ -399,17 +439,123 @@ impl Context {
             &mut adapter,
             &wt_core::adapters::contribution(&hits)?,
         )?;
-        let merged = config::merge(&[
+        let mut merged = config::merge(&[
             (Layer::Adapter, adapter),
             (Layer::Repo, repo),
             (Layer::User, user),
             (Layer::Tree, overlay),
         ]);
+        for scope in std::iter::once(&mut merged.root).chain(merged.dirs.values_mut()) {
+            for (name, declared) in &mut scope.resource {
+                let Some(resource) = declared.value_mut() else {
+                    continue;
+                };
+                if resource.tied_to != Some(wt_core::config::TiedTo::Machine) {
+                    continue;
+                }
+                if let Some(sizing) = self.settings.resources.get(name) {
+                    if sizing.count.is_some() {
+                        resource.count = sizing.count;
+                    }
+                    if sizing.keep.is_some() {
+                        resource.keep.clone_from(&sizing.keep);
+                    }
+                    if sizing.idle.is_some() {
+                        resource.idle.clone_from(&sizing.idle);
+                    }
+                    if sizing.wait.is_some() {
+                        resource.wait.clone_from(&sizing.wait);
+                    }
+                }
+            }
+        }
+        self.validate_machine_resources(&tree.label, &merged)?;
         config::validate_resolved(&merged, tree.geometry.stride)?;
         Ok(merged)
     }
 
-    pub fn task_catalog(
+    fn validate_machine_resources(
+        &self,
+        current_label: &wt_core::model::Label,
+        current: &Config,
+    ) -> Result<(), CoreError> {
+        let current_resources = machine_resources(current);
+        if current_resources.is_empty() {
+            return Ok(());
+        }
+        for (other_label, record) in &self.registry.labels {
+            if other_label == current_label {
+                continue;
+            }
+            let path = Path::new(record.path.as_str()).join(".wt.toml");
+            let repo = fsx::read_string(&path)?
+                .map(|source| config::parse_current(&source, &path.to_string_lossy()))
+                .transpose()?
+                .unwrap_or_default();
+            let user = self
+                .settings
+                .repos
+                .get(other_label)
+                .cloned()
+                .unwrap_or_default();
+            let other = config::merge(&[(Layer::Repo, repo), (Layer::User, user)]);
+            for (name, left) in &current_resources {
+                let Some(right) = machine_resources(&other).remove(name) else {
+                    continue;
+                };
+                let lifecycle_agrees = left.name == right.name
+                    && left.exists == right.exists
+                    && left.create == right.create
+                    && left.destroy == right.destroy
+                    && left.acquire == right.acquire;
+                if !lifecycle_agrees {
+                    return Err(machine_conflict(
+                        current_label,
+                        other_label,
+                        name,
+                        "lifecycle recipes",
+                        false,
+                    ));
+                }
+                let override_ = self.settings.resources.get(name);
+                for (key, agrees, overridden) in [
+                    (
+                        "count",
+                        left.count == right.count,
+                        override_.is_some_and(|value| value.count.is_some()),
+                    ),
+                    (
+                        "keep",
+                        left.keep == right.keep,
+                        override_.is_some_and(|value| value.keep.is_some()),
+                    ),
+                    (
+                        "idle",
+                        left.idle == right.idle,
+                        override_.is_some_and(|value| value.idle.is_some()),
+                    ),
+                    (
+                        "wait",
+                        left.wait == right.wait,
+                        override_.is_some_and(|value| value.wait.is_some()),
+                    ),
+                ] {
+                    if !agrees && !overridden {
+                        return Err(machine_conflict(
+                            current_label,
+                            other_label,
+                            name,
+                            key,
+                            true,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn resource_catalog(
         &self,
         tree: &TreeRec,
         config: &Config,
@@ -439,20 +585,36 @@ impl Context {
                 scripts.insert(scope.to_owned(), declared);
             }
         }
-        let mut tasks = BTreeMap::new();
-        for (scope, values) in std::iter::once((".", &config.root.task)).chain(
+        let mut recipes = BTreeMap::new();
+        for (scope, values) in std::iter::once((".", &config.root.resource)).chain(
             config
                 .dirs
                 .iter()
-                .map(|(scope, values)| (scope.as_str(), &values.task)),
+                .map(|(scope, values)| (scope.as_str(), &values.resource)),
         ) {
-            for (id, task) in values {
-                if let Some(task) = task.value() {
-                    tasks.insert((scope.to_owned(), id.clone()), (Origin::Repo, task.clone()));
+            for (id, resource) in values {
+                if let Some(resource) = resource.value() {
+                    if let Some(count) = resource.count.filter(|_| !resource.token_pool()) {
+                        for index in 1..=count {
+                            let mut recipe = resource.as_recipe();
+                            if let Some(name) = &mut recipe.name {
+                                *name = name.replace("{{index()}}", &index.to_string());
+                            }
+                            recipes.insert(
+                                (scope.to_owned(), format!("{id}#{index}")),
+                                (Origin::Repo, recipe),
+                            );
+                        }
+                    } else if !resource.token_pool() {
+                        recipes.insert(
+                            (scope.to_owned(), id.clone()),
+                            (Origin::Repo, resource.as_recipe()),
+                        );
+                    }
                 }
             }
         }
-        wt_core::adapters::compose(&hits, &tasks, &scripts)
+        wt_core::adapters::compose(&hits, &recipes, &scripts)
     }
 
     pub fn confirm(&self, action: &str) -> Result<bool, CoreError> {
@@ -592,6 +754,54 @@ impl Context {
         })?
         .coordinates)
     }
+}
+
+fn machine_resources(config: &Config) -> BTreeMap<String, wt_core::config::Resource> {
+    let mut resources = BTreeMap::new();
+    for (scope, declarations) in std::iter::once((".", &config.root.resource)).chain(
+        config
+            .dirs
+            .iter()
+            .map(|(scope, values)| (scope.as_str(), &values.resource)),
+    ) {
+        for (name, declaration) in declarations {
+            let Some(resource) = declaration.value() else {
+                continue;
+            };
+            if resource.tied_to == Some(wt_core::config::TiedTo::Machine) {
+                resources.insert(
+                    if scope == "." {
+                        name.clone()
+                    } else {
+                        format!("{scope}/{name}")
+                    },
+                    resource.clone(),
+                );
+            }
+        }
+    }
+    resources
+}
+
+fn machine_conflict(
+    left: &wt_core::model::Label,
+    right: &wt_core::model::Label,
+    resource: &str,
+    field: &str,
+    sizing: bool,
+) -> CoreError {
+    CoreError::new(
+        ExitClass::State,
+        "CONFIG_INVALID",
+        format!(
+            "repositories `{left}` and `{right}` disagree on machine resource `{resource}` {field}"
+        ),
+        if sizing {
+            format!("set resources.{resource}.{field} once in `$WT_HOME/config.toml`")
+        } else {
+            "make both repository lifecycle declarations identical".to_owned()
+        },
+    )
 }
 
 pub(crate) fn target_of(tree: &TreeRec) -> Target {

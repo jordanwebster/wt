@@ -1,6 +1,6 @@
 ---
 source: tests/human_transcripts.rs
-expression: "normalize(h, &output.stdout)"
+expression: normalized
 ---
 repo is registered
   path      <ROOT>/repos/repo

@@ -46,37 +46,35 @@ pub struct GitSettings {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct TaskDefaults {
+pub struct RecipeDefaults {
     pub probe_timeout: Option<String>,
     pub destroy_timeout: Option<String>,
     pub timeout: Option<String>,
-    pub lock_wait: Option<String>,
 }
 
-impl Default for TaskDefaults {
+impl Default for RecipeDefaults {
     fn default() -> Self {
         Self {
             probe_timeout: Some("10s".to_owned()),
             destroy_timeout: Some("60s".to_owned()),
             timeout: None,
-            lock_wait: Some("0s".to_owned()),
         }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct LockWaits {
-    pub tree_exclusive: Option<String>,
+pub struct WaitSettings {
+    pub tree: Option<String>,
     pub repo_git: Option<String>,
     pub resource: Option<String>,
     pub rmw: Option<String>,
 }
 
-impl Default for LockWaits {
+impl Default for WaitSettings {
     fn default() -> Self {
         Self {
-            tree_exclusive: Some("30s".to_owned()),
+            tree: Some("30s".to_owned()),
             repo_git: Some("60s".to_owned()),
             resource: Some("120s".to_owned()),
             rmw: Some("5s".to_owned()),
@@ -145,6 +143,15 @@ pub struct ShellSettings {
     pub program: Option<AbsPath>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResourceSizing {
+    pub count: Option<u16>,
+    pub keep: Option<String>,
+    pub idle: Option<String>,
+    pub wait: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
@@ -154,11 +161,13 @@ pub struct Settings {
     pub agents: BTreeMap<String, Agent>,
     pub ports: PortSettings,
     pub git: GitSettings,
-    pub task: TaskDefaults,
-    pub locks: LockWaits,
+    pub recipes: RecipeDefaults,
+    pub waits: WaitSettings,
     pub session: SessionSettings,
     pub logs: LogSettings,
     pub shell: ShellSettings,
+    /// Machine-wide sizing overrides for shared pools.
+    pub resources: BTreeMap<String, ResourceSizing>,
     pub repos: BTreeMap<Label, Config>,
 }
 
@@ -198,17 +207,86 @@ impl Default for Settings {
             ]),
             ports: PortSettings::default(),
             git: GitSettings::default(),
-            task: TaskDefaults::default(),
-            locks: LockWaits::default(),
+            recipes: RecipeDefaults::default(),
+            waits: WaitSettings::default(),
             session: SessionSettings::default(),
             logs: LogSettings::default(),
             shell: ShellSettings::default(),
+            resources: BTreeMap::new(),
             repos: BTreeMap::new(),
         }
     }
 }
 
 pub fn parse(source: &str) -> Result<Settings, CoreError> {
+    if let Ok(table) = source.parse::<toml::Table>() {
+        let old_task_settings = table
+            .get("task")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|values| {
+                values.iter().all(|(key, value)| {
+                    matches!(
+                        key.as_str(),
+                        "probe_timeout" | "destroy_timeout" | "timeout" | "lock_wait"
+                    ) && !value.is_table()
+                })
+            });
+        if old_task_settings {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "CONFIG_INVALID",
+                "settings `[task]` was replaced by `[recipes]`",
+                "move recipe timeouts under `[recipes]`",
+            ));
+        }
+        let old_wait_settings = table
+            .get("locks")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|values| {
+                values.iter().all(|(key, value)| {
+                    matches!(
+                        key.as_str(),
+                        "tree_exclusive" | "repo_git" | "resource" | "rmw"
+                    ) && !value.is_table()
+                })
+            });
+        if old_wait_settings {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "CONFIG_INVALID",
+                "settings `[locks]` was replaced by `[waits]`",
+                "move internal coordination waits under `[waits]`",
+            ));
+        }
+        if let Some(message) = crate::config::removed_surface(&table) {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "CONFIG_INVALID",
+                message,
+                "move repository configuration under `[repos.<label>]` and use the replacement",
+            ));
+        }
+        if let Some((label, message)) = table
+            .get("repos")
+            .and_then(toml::Value::as_table)
+            .into_iter()
+            .flat_map(|repos| repos.iter())
+            .filter_map(|(label, value)| {
+                value
+                    .as_table()
+                    .and_then(crate::config::removed_surface)
+                    .map(|message| (label, message))
+            })
+            .next()
+        {
+            return Err(CoreError::new(
+                ExitClass::State,
+                "CONFIG_INVALID",
+                format!("repository `{label}`: {message}"),
+                "replace the removed repository configuration",
+            ));
+        }
+    }
     let mut settings: Settings = toml::from_str(source).map_err(|error| {
         // A misplaced repo key parses as an unknown settings field, so serde
         // reports it against the settings schema and lists alternatives that
@@ -253,14 +331,13 @@ pub fn validate_settings(settings: &Settings) -> Result<(), CoreError> {
             settings.git.timeouts.clone.as_deref(),
             settings.git.timeouts.worktree.as_deref(),
             settings.git.timeouts.submodule.as_deref(),
-            settings.task.probe_timeout.as_deref(),
-            settings.task.destroy_timeout.as_deref(),
-            settings.task.timeout.as_deref(),
-            settings.task.lock_wait.as_deref(),
-            settings.locks.tree_exclusive.as_deref(),
-            settings.locks.repo_git.as_deref(),
-            settings.locks.resource.as_deref(),
-            settings.locks.rmw.as_deref(),
+            settings.recipes.probe_timeout.as_deref(),
+            settings.recipes.destroy_timeout.as_deref(),
+            settings.recipes.timeout.as_deref(),
+            settings.waits.tree.as_deref(),
+            settings.waits.repo_git.as_deref(),
+            settings.waits.resource.as_deref(),
+            settings.waits.rmw.as_deref(),
         ]
         .into_iter()
         .flatten(),
@@ -270,6 +347,26 @@ pub fn validate_settings(settings: &Settings) -> Result<(), CoreError> {
         .any(|duration| !valid_duration(duration))
     {
         return Err(settings_error("settings contain an invalid duration"));
+    }
+    for (name, sizing) in &settings.resources {
+        if sizing.count == Some(0) {
+            return Err(settings_error(&format!(
+                "resources.{name}.count must be at least 1"
+            )));
+        }
+        if [
+            sizing.keep.as_deref(),
+            sizing.idle.as_deref(),
+            sizing.wait.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|duration| !valid_duration(duration))
+        {
+            return Err(settings_error(&format!(
+                "resources.{name} contains an invalid duration"
+            )));
+        }
     }
     if let Some(agent) = &settings.session.agent {
         if !settings.agents.contains_key(agent) {
@@ -335,18 +432,12 @@ fn misplaced_repo_key(source: &str) -> Option<String> {
                 .is_some_and(toml::Value::is_array)
                 .then(|| "ports".to_owned())
         })
+        .or_else(|| repo_map_key(&table, "waits", &["tree", "repo_git", "resource", "rmw"]))
         .or_else(|| {
             repo_map_key(
                 &table,
-                "locks",
-                &["tree_exclusive", "repo_git", "resource", "rmw"],
-            )
-        })
-        .or_else(|| {
-            repo_map_key(
-                &table,
-                "task",
-                &["probe_timeout", "destroy_timeout", "timeout", "lock_wait"],
+                "recipes",
+                &["probe_timeout", "destroy_timeout", "timeout"],
             )
         })
 }
@@ -550,8 +641,8 @@ mod tests {
         );
         assert_eq!(settings.logs.keep, 20);
         assert_eq!(settings.git.timeouts.query.as_deref(), Some("30s"));
-        assert_eq!(settings.task.probe_timeout.as_deref(), Some("10s"));
-        assert_eq!(settings.locks.rmw.as_deref(), Some("5s"));
+        assert_eq!(settings.recipes.probe_timeout.as_deref(), Some("10s"));
+        assert_eq!(settings.waits.rmw.as_deref(), Some("5s"));
         assert!(parse("mystery=true").is_err());
         let removed = parse("default_agent='codex'").unwrap_err();
         assert_eq!(removed.code.0, "SETTINGS_INVALID");
@@ -588,26 +679,26 @@ mod tests {
         );
         assert!(error.remedy.contains("[repos.<label>]"));
         assert!(error.remedy.contains("$WT_HOME/config.toml"));
-        for (source, key) in [
-            ("ports=['http']", "ports"),
-            ("[locks.integration]\nslots=2", "locks.integration"),
-            ("[task.test]\nrun='cargo test'", "task.test"),
-        ] {
-            let error = parse(source).unwrap_err();
-            assert_eq!(
-                error.message,
-                format!("`{key}` is a repo-scope key, not a settings key"),
-                "{source}"
-            );
-        }
-        // A settings-shaped mistake keeps serde's own account of it.
-        let error = parse("[locks]\ntree_exclusive=5").unwrap_err();
-        assert!(
-            error.message.contains("tree_exclusive"),
-            "{}",
-            error.message
+        let error = parse("ports=['http']").unwrap_err();
+        assert_eq!(
+            error.message,
+            "`ports` is a repo-scope key, not a settings key"
         );
-        assert_eq!(error.remedy, "fix `$WT_HOME/config.toml`");
+        let error = parse("[locks.integration]\nslots=2").unwrap_err();
+        assert_eq!(error.code.0, "CONFIG_INVALID");
+        assert!(error.message.contains("token pools"));
+        let error = parse("[task.test]\nrun='cargo test'").unwrap_err();
+        assert_eq!(error.code.0, "CONFIG_INVALID");
+        assert!(error.message.contains("repository task runner"));
+        // Removed settings table names point to their replacements.
+        let error = parse("[locks]\ntree=5").unwrap_err();
+        assert!(error.message.contains("token pools"), "{}", error.message);
+        let error = parse("[locks]\ntree_exclusive='5s'").unwrap_err();
+        assert!(error.message.contains("[waits]"), "{}", error.message);
+        assert_eq!(
+            error.remedy,
+            "move internal coordination waits under `[waits]`"
+        );
     }
 
     #[test]
@@ -741,7 +832,7 @@ pub fn unset(source: &str, table: Option<&str>, key: &str) -> Result<String, Cor
 /// Replaces or deletes the line declaring `key` inside `table`.
 ///
 /// Line-based rather than a parse-and-serialise round trip, which would
-/// discard every comment and reorder the file.
+/// drop every comment and reorder the file.
 fn rewrite(
     source: &str,
     table: Option<&str>,

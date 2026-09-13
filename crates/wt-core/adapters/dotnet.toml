@@ -5,14 +5,4 @@ default_tool = "dotnet"
 [tools.dotnet]
 requires = "dotnet"
 sync_inputs = ["*.csproj", "packages.lock.json", "Directory.Packages.props"]
-
-[tools.dotnet.task.sync]
-run = "dotnet restore"
-[tools.dotnet.task.build]
-run = "dotnet build --no-restore"
-[tools.dotnet.task.test]
-run = '''if [ "$#" -gt 0 ]; then dotnet test "$@"; else dotnet test; fi'''
-[tools.dotnet.task.lint]
-run = "dotnet format --verify-no-changes"
-[tools.dotnet.task.fmt]
-run = "dotnet format"
+sync = "dotnet restore"

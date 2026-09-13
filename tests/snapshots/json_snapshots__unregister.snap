@@ -17,9 +17,9 @@ expression: "normalize(value, &h.root)"
           "code": 0,
           "signal": null
         },
+        "resource": "service",
         "scope": ".",
-        "state": "dropped",
-        "task": "service"
+        "state": "dropped"
       }
     ],
     "label": "repo",

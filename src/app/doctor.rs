@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use wt_core::doctor::{Finding, Severity};
+use wt_core::lifecycle::RepoState;
 use wt_core::report::DoctorData;
 use wt_core::resource::{ProbeResult, ResourceState};
 use wt_core::CoreError;
@@ -37,6 +38,7 @@ pub(crate) fn run(context: &mut Context, args: Doctor) -> Result<Output, CoreErr
         ));
     }
     state_orphan_findings(context, args.label.as_deref(), &mut findings)?;
+    dead_lease_findings(context, &mut findings)?;
     for (label, record) in context.registry.labels.clone() {
         if args
             .label
@@ -76,8 +78,189 @@ pub(crate) fn run(context: &mut Context, args: Doctor) -> Result<Output, CoreErr
     for tree in trees {
         tree_findings(context, &tree, args.probe, &env, &mut findings)?;
     }
+    shared_resource_findings(context, args.label.as_deref(), &mut findings)?;
     let counts = wt_core::doctor::sort_and_count(&mut findings);
     Output::data(DoctorData { findings, counts })
+}
+
+fn shared_resource_findings(
+    context: &Context,
+    label_filter: Option<&str>,
+    findings: &mut Vec<Finding>,
+) -> Result<(), CoreError> {
+    let mut stores = context
+        .registry
+        .labels
+        .keys()
+        .filter(|label| label_filter.is_none_or(|filter| label.as_str() == filter))
+        .map(|label| {
+            (
+                label.to_string(),
+                context.home.join(wt_core::model::repo_state_path(label)),
+            )
+        })
+        .collect::<Vec<_>>();
+    if label_filter.is_none() {
+        stores.push((
+            "machine".to_owned(),
+            context.home.join(wt_core::model::machine_state_path()),
+        ));
+    }
+    for (store, path) in stores {
+        let Some(state) = wt_sys::fsx::read_json::<RepoState>(&path, "STATE_CORRUPT")? else {
+            continue;
+        };
+        for record in state.resources.values().filter(|record| record.undeclared) {
+            findings.push(finding(
+                Severity::Warn,
+                "RESOURCE_UNDECLARED",
+                format!("{store}:{}:{}", record.key.scope, record.key.resource),
+                "resource record is no longer declared",
+                "run `wt prune --yes` to destroy it from its frozen snapshot",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn dead_lease_findings(
+    context: &mut Context,
+    findings: &mut Vec<Finding>,
+) -> Result<(), CoreError> {
+    let root = context.home.join("leases");
+    let mut pending = vec![root];
+    while let Some(dir) = pending.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(CoreError::new(
+                    wt_core::ExitClass::Internal,
+                    "IO_FAILED",
+                    error.to_string(),
+                    "inspect the lease directory permissions",
+                ))
+            }
+        };
+        for entry in entries {
+            let path = entry
+                .map_err(|error| {
+                    CoreError::new(
+                        wt_core::ExitClass::Internal,
+                        "IO_FAILED",
+                        error.to_string(),
+                        "inspect the lease directory permissions",
+                    )
+                })?
+                .path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("lock")
+                && !wt_sys::lock::is_held(&path)?
+            {
+                if let Some(holder) = wt_sys::lock::read_holder(&path)? {
+                    if !wt_sys::proc::process_matches(holder.pid, &holder.process_start) {
+                        findings.push(finding(
+                            Severity::Warn,
+                            "LEASE_HOLDER_DEAD",
+                            path.display().to_string(),
+                            format!(
+                                "lease holder pid {} no longer names the recorded process",
+                                holder.pid
+                            ),
+                            "the slot was treated as released; inspect the child log if needed",
+                        ));
+                        recover_dead_instance(context, &path, &holder)?;
+                        wt_sys::fsx::write_store(&path, b"")?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn recover_dead_instance(
+    context: &mut Context,
+    lock_path: &Path,
+    holder: &wt_sys::lock::Holder,
+) -> Result<(), CoreError> {
+    let Ok(target) = wt_core::model::Target::parse(&holder.target) else {
+        return Ok(());
+    };
+    let tree = context.tree(&target)?;
+    let mut entered = door::enter(context, Some(&holder.target), "doctor")?;
+    let scope = wt_core::config::effective_scope(&entered.config, ".")?;
+    let Some((name, pool)) = scope.resources.iter().find(|(name, pool)| {
+        pool.count.is_some()
+            && super::with_resources::lease_dir(context, &entered, name, pool.tied_to)
+                == lock_path.parent().unwrap_or(Path::new(""))
+    }) else {
+        entered.release_gate();
+        return Ok(());
+    };
+    if pool.token_pool() {
+        entered.release_gate();
+        return Ok(());
+    }
+    let Some(slot) = lock_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.parse::<u16>().ok())
+    else {
+        entered.release_gate();
+        return Ok(());
+    };
+    let id = format!("{name}#{}", slot + 1);
+    let plan = executor::plan(context, &entered, &id)?;
+    let Some(key) = plan
+        .nodes
+        .iter()
+        .find(|node| node.id == id)
+        .and_then(|node| node.resource.as_ref())
+    else {
+        entered.release_gate();
+        return Ok(());
+    };
+    if executor::load_record(context, &entered, key).is_ok() {
+        let keep = pool
+            .keep
+            .as_deref()
+            .and_then(wt_core::model::duration_millis)
+            .unwrap_or(0);
+        if keep > 0 {
+            let until_millis = super::leases::now_millis().saturating_add(keep);
+            super::leases::write_keep(
+                &super::leases::keep_path(
+                    &super::with_resources::lease_dir(context, &entered, name, pool.tied_to),
+                    slot,
+                ),
+                &super::leases::Keep {
+                    tree: super::context::target_of(&tree).to_string(),
+                    until_millis,
+                    resource: key.clone(),
+                },
+            )?;
+            executor::release_instance(
+                context,
+                &entered,
+                key,
+                wt_core::resource::ResourceHold::Kept {
+                    tree: super::context::target_of(&tree).to_string(),
+                    until_millis,
+                },
+            )?;
+        } else {
+            executor::release_instance(
+                context,
+                &entered,
+                key,
+                wt_core::resource::ResourceHold::Free,
+            )?;
+        }
+    }
+    entered.release_gate();
+    Ok(())
 }
 
 /// Doctor observes only what its findings consume: phase, build, session,
@@ -97,10 +280,26 @@ fn tree_findings(
         wt_sys::fsx::path_kind(Path::new(tree.path.as_str()))?,
         wt_sys::fsx::PathKind::Directory
     );
-    if probe && dir_exists && context.identity_ok(tree)? {
+    if dir_exists && context.identity_ok(tree)? {
+        // A door repairs owned-command shims. Observe them before entering so
+        // doctor reports damage instead of erasing the evidence it diagnoses.
+        let config = context.load_config(tree)?;
+        let effective = wt_core::config::effective_scope(&config, ".")?;
+        shim_findings(context, tree, &effective, findings)?;
         let mut entered = door::enter(context, Some(&subject), "probe")?;
+        if let Err(error) = super::with_resources::destroy_idle_declared(context, &entered) {
+            findings.push(finding(
+                Severity::Warn,
+                "RESOURCE_IDLE_DESTROY_FAILED",
+                &subject,
+                error.message,
+                "repair the frozen destroy recipe and retry",
+            ));
+        }
         executor::refresh_all_declarations(context, &entered)?;
-        executor::probe_all_resources(context, &entered)?;
+        if probe {
+            executor::probe_all_resources(context, &entered)?;
+        }
         entered.release_gate();
     }
     let state = context.read_state(&target)?;
@@ -123,15 +322,6 @@ fn tree_findings(
             &remedy,
         ));
     }
-    if state.as_ref().is_some_and(|state| state.verify_pending) {
-        findings.push(finding(
-            Severity::Warn,
-            "VERIFY_PENDING",
-            &subject,
-            "verification is pending",
-            "re-run `wt new --verify` for this tree",
-        ));
-    }
     if tree.canonical
         && phase == wt_core::lifecycle::DerivedPhase::Ready
         && super::anchor::is_cold(context, tree)?
@@ -140,7 +330,7 @@ fn tree_findings(
             Severity::Info,
             "ANCHOR_COLD",
             &subject,
-            "the canonical has no build of its current commit, so new trees are seeded cold",
+            "the canonical has no warm output snapshot for its current commit",
             format!("run `wt anchor {}`", tree.label),
         ));
     }
@@ -148,45 +338,42 @@ fn tree_findings(
         match build.state.as_str() {
             "running" => findings.push(finding(
                 Severity::Info,
-                "BUILD_RUNNING",
+                "AFTER_NEW_RUNNING",
                 &subject,
-                format!("automatic build is running; log: {}", build.log),
-                "wait for completion or inspect the build log",
+                format!("the after_new hook is running; log: {}", build.log),
+                "wait for completion or inspect the hook log",
             )),
             "abandoned" => findings.push(finding(
                 Severity::Warn,
-                "BUILD_ABANDONED",
+                "AFTER_NEW_ABANDONED",
                 &subject,
-                format!("automatic build was abandoned; log: {}", build.log),
-                format!("inspect the log and run `wt build {}` to retry", subject),
+                format!("the after_new hook was abandoned; log: {}", build.log),
+                "inspect the log and create the tree again to retry",
             )),
             "failed" => findings.push(finding(
                 Severity::Warn,
-                "BUILD_FAILED",
+                "AFTER_NEW_FAILED",
                 &subject,
-                format!("automatic build failed; log: {}", build.log),
-                "inspect the log and run `wt build` to retry",
+                format!("the after_new hook failed; log: {}", build.log),
+                "inspect the hook log and correct the recipe",
             )),
             "unknown" => findings.push(finding(
                 Severity::Warn,
-                "BUILD_STATUS_MISSING",
+                "AFTER_NEW_STATUS_MISSING",
                 &subject,
-                format!("automatic build status is unavailable; log: {}", build.log),
-                "inspect the log and run `wt build` to establish a fresh status",
+                format!("after_new hook status is unavailable; log: {}", build.log),
+                "inspect the hook log and create the tree again",
             )),
             "ok" => {}
             value => findings.push(finding(
                 Severity::Warn,
-                "BUILD_STATUS_UNKNOWN",
+                "AFTER_NEW_STATUS_UNKNOWN",
                 &subject,
                 format!(
-                    "automatic build has unrecognised status `{value}`; log: {}",
+                    "after_new hook has unrecognised status `{value}`; log: {}",
                     build.log
                 ),
-                format!(
-                    "inspect the log and run `wt build {}` to establish a fresh status",
-                    subject
-                ),
+                "inspect the hook log and create the tree again",
             )),
         }
     }
@@ -221,7 +408,7 @@ fn tree_findings(
         .into_iter()
         .flat_map(|state| state.resources.values())
     {
-        let subject = format!("{}:{}", subject, record.key.task);
+        let subject = format!("{}:{}", subject, record.key.resource);
         if record.state == ResourceState::Orphaned {
             findings.push(finding(
                 Severity::Warn,
@@ -263,7 +450,7 @@ fn tree_findings(
                 "RESOURCE_GONE",
                 &subject,
                 "previously instantiated resource is absent",
-                "run its task to recreate it or remove the stale record",
+                "use `wt with` to recreate it or remove the stale record",
             ));
         }
     }
@@ -308,7 +495,9 @@ fn tree_findings(
             "wait for the holder or stop the process",
         ));
     }
-    let running_task = holders.iter().any(|holder| holder.verb == "run");
+    let running_command = holders
+        .iter()
+        .any(|holder| matches!(holder.verb.as_str(), "with" | "exec"));
     let session = env.session_state(tree);
     let mut ports = tree
         .ports
@@ -327,7 +516,7 @@ fn tree_findings(
     for (name, port) in &ports {
         if wt_sys::net::squat_probe(*port, Duration::from_millis(50)).unwrap_or(false) {
             any_bound = true;
-            if session != "yes" && !running_task {
+            if session != "yes" && !running_command {
                 findings.push(finding(
                     Severity::Warn,
                     "PORT_SQUATTED",
@@ -345,7 +534,7 @@ fn tree_findings(
             ));
         }
     }
-    if any_bound && session != "yes" && !running_task {
+    if any_bound && session != "yes" && !running_command {
         findings.push(finding(
             Severity::Info,
             "SLOT_SQUATTED",
@@ -370,12 +559,18 @@ fn tree_findings(
         .flat_map(|state| state.resources.values())
     {
         let effective = wt_core::config::effective_scope(&config, record.key.scope.as_str())?;
+        let base = record
+            .key
+            .resource
+            .split('#')
+            .next()
+            .unwrap_or(&record.key.resource);
         let template = effective
-            .tasks
-            .get(&record.key.task)
-            .and_then(|task| task.name.as_deref());
+            .resources
+            .get(base)
+            .and_then(|resource| resource.name.as_deref());
         findings.extend(wt_core::doctor::resource_name_findings(
-            &format!("{}:{}", subject, record.key.task),
+            &format!("{}:{}", subject, record.key.resource),
             template,
             record.name(),
         )?);
@@ -446,9 +641,9 @@ fn config_findings(
         .any(|value| value.value().is_some());
     let has_resources = config
         .root
-        .task
+        .resource
         .values()
-        .any(|task| task.value().is_some_and(|task| task.is_resource()));
+        .any(|value| value.value().is_some());
     if tree.canonical {
         if let Some(finding) = wt_core::doctor::no_coordination(
             tree.label.as_str(),
@@ -461,7 +656,6 @@ fn config_findings(
     }
     let root = Path::new(tree.path.as_str());
     let effective = wt_core::config::effective_scope(config, ".")?;
-    shim_findings(context, tree, &effective, findings)?;
     let mut has_existing_bin = false;
     for bin in &effective.bin {
         let path = root.join(bin.as_str());
@@ -474,7 +668,7 @@ fn config_findings(
                 "BIN_DIR_MISSING",
                 &subject,
                 format!("declared bin directory {} is missing", path.display()),
-                "create the directory by running the build task",
+                "create the directory with the repository's build command",
             ));
         } else {
             has_existing_bin = true;
@@ -493,20 +687,6 @@ fn config_findings(
             &subject,
             "this door's prefix is not first on PATH; a shell startup file displaced it",
             "install the shell-init guard with `wt setup`, or move the PATH edit above it",
-        ));
-    }
-    if config
-        .root
-        .task
-        .get("verify")
-        .is_none_or(|task| task.value().is_none())
-    {
-        findings.push(finding(
-            Severity::Info,
-            "NO_VERIFY",
-            &subject,
-            "no verify task is declared",
-            "declare task.verify when lifecycle verification is desired",
         ));
     }
     let snapshot = wt_sys::fsx::capture_dir_snapshot(
@@ -544,7 +724,7 @@ fn config_findings(
             "NO_ADAPTER",
             &subject,
             "no built-in adapter matched this checkout",
-            "configure tasks explicitly or add a supported project manifest",
+            "configure hooks and resources explicitly or add a supported project manifest",
         ));
     } else {
         let contribution = wt_core::adapters::contribution(&hits)?;
@@ -881,7 +1061,6 @@ fn phase_finding(
         }
         DerivedPhase::Claimed => Some((Severity::Warn, "TREE_CLAIMED", "re-run `wt new`")),
         DerivedPhase::Ready => None,
-        DerivedPhase::Verifying => None,
         DerivedPhase::Initialising | DerivedPhase::Bootstrapping | DerivedPhase::Removing => None,
         DerivedPhase::Failed => None,
         DerivedPhase::Creating => None,

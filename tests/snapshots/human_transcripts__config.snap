@@ -1,6 +1,6 @@
 ---
 source: tests/human_transcripts.rs
-expression: "normalize(h, &output.stdout)"
+expression: normalized
 ---
 Effective config for repo/work
   key          scope  layer   value
@@ -12,7 +12,8 @@ Effective config for repo/work
   dirs         .      merged  -
   env          .      merged  -
   files        .      merged  -
+  hooks        .      merged  after_new, warm
   ports        .      merged  -
+  resource     .      merged  service
   sync_inputs  .      merged  README.md
-  task         .      merged  build, fmt, hello, lint, service, sync, test
   vars         .      merged  -

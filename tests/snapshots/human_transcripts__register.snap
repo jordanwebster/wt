@@ -1,10 +1,10 @@
 ---
 source: tests/human_transcripts.rs
-expression: "normalize(h, &output.stdout)"
+expression: normalized
 ---
 sessions: tmux 3.4 (set session.backend to change)
 Registered repo
   path      <ROOT>/repos/repo
   phase     ready
   branch    main
-  declared  8 tasks, 1 resources, 1 bins
+  declared  1 resources, 1 bins

@@ -729,10 +729,10 @@ pub fn remove_exclude(path: &Path) -> Result<ExcludeWrite> {
     })
 }
 
-/// Before a new log is created, retains at most `keep - 1` existing logs for its task.
-pub fn retain_logs(log_dir: &Path, scope: &str, task: &str, keep: u16) -> Result<Vec<PathBuf>> {
+/// Before a new log is created, retains at most `keep - 1` existing logs for its recipe.
+pub fn retain_logs(log_dir: &Path, scope: &str, recipe: &str, keep: u16) -> Result<Vec<PathBuf>> {
     let encoded_scope = scope_enc(&RelPath::new(scope)?);
-    let prefix = format!("{encoded_scope}-{task}-");
+    let prefix = format!("{encoded_scope}-{recipe}-");
     let mut matches = match std::fs::read_dir(log_dir) {
         Ok(entries) => entries
             .filter_map(std::result::Result::ok)
@@ -758,7 +758,7 @@ pub fn retain_logs(log_dir: &Path, scope: &str, task: &str, keep: u16) -> Result
         .map(|(_, path)| path)
         .collect::<Vec<_>>();
     for path in &removed {
-        std::fs::remove_file(path).map_err(fs_error("remove old task log", path))?;
+        std::fs::remove_file(path).map_err(fs_error("remove old recipe log", path))?;
     }
     Ok(removed)
 }
@@ -1411,9 +1411,9 @@ mod tests {
         assert_eq!(removed.len(), 3);
         assert_eq!(std::fs::read_dir(&logs).unwrap().count(), 1);
 
-        for task in ["build", "build-fast", "build-20260103"] {
+        for recipe in ["build", "build-fast", "build-20260103"] {
             for day in 1..=3 {
-                std::fs::write(logs.join(format!(".-{task}-2026010{day}.log")), []).unwrap();
+                std::fs::write(logs.join(format!(".-{recipe}-2026010{day}.log")), []).unwrap();
             }
         }
         let removed = retain_logs(&logs, ".", "build", 2).unwrap();

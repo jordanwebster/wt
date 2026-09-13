@@ -7,20 +7,11 @@ use common::Harness;
 const HUMAN_FIXTURE: &str = r#"
 bin = ["bin"]
 sync_inputs = ["README.md"]
-[task.sync]
-run = "true"
-[task.build]
-run = "true"
-[task.test]
-run = "true"
-[task.lint]
-run = "true"
-[task.fmt]
-run = "true"
-[task.hello]
-run = "true"
-[task.service]
-run = "touch \"$WT_ROOT/.service\""
+[hooks]
+after_new = "true"
+warm = "true"
+[resource.service]
+create = "touch \"$WT_ROOT/.service\""
 exists = "test -f \"$WT_ROOT/.service\""
 destroy = "rm -f \"$WT_ROOT/.service\""
 tied_to = "tree"
@@ -33,16 +24,15 @@ fn human_command_transcripts() {
 
     transcript(&h, "register", &["register", repo.to_str().unwrap()]);
     transcript(&h, "new", &["new", "repo/work", "--no-sync"]);
-    wait_for_build(&h, "repo/work");
+    wait_for_after_new(&h, "repo/work");
     transcript(&h, "list", &["list"]);
     transcript(&h, "status", &["status", "repo/work"]);
     transcript(&h, "doctor", &["doctor", "repo"]);
     transcript(&h, "sync", &["sync", "repo/work"]);
     transcript(&h, "anchor", &["anchor", "repo"]);
-    transcript(&h, "tasks", &["tasks", "repo/work"]);
     transcript(&h, "config", &["config", "repo/work", "--origin"]);
     transcript(&h, "which", &["which", "repo/work", "git"]);
-    transcript(&h, "locks", &["locks", "repo"]);
+    transcript(&h, "leases", &["leases", "repo"]);
     transcript(&h, "remove", &["remove", "repo/work", "--yes"]);
     transcript_failure(&h, "remove_refused", &["remove", "repo", "--yes"], 2);
 }
@@ -55,9 +45,8 @@ fn redirected_output_matches_the_terminal_text() {
 
     for args in [
         vec!["status", "repo"],
-        vec!["tasks", "repo"],
         vec!["config", "repo", "--origin"],
-        vec!["locks", "repo"],
+        vec!["leases", "repo"],
     ] {
         let terminal = h.pty_output(&args, b"");
         assert_eq!(terminal.child.code, Some(0));
@@ -102,7 +91,7 @@ fn missing_bin_guidance_is_exclusive_to_doctor() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(!text.contains("wt: BIN_DIR_MISSING"));
     assert!(!text.contains("  next"));
-    assert!(!text.contains("wt build repo/work"));
+    assert!(!text.contains("run the repository's build command"));
     let doctor = h.json(&["doctor", "repo"]);
     let finding = doctor["data"]["findings"]
         .as_array()
@@ -125,33 +114,6 @@ fn missing_bin_guidance_is_exclusive_to_doctor() {
             "<ROOT>",
         )
         .replace(&h.root.to_string_lossy().to_string(), "<ROOT>"),
-    );
-}
-
-#[test]
-fn new_calls_skipped_sync_nodes_skipped() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        "[task.sync]\nrun='true'\nneeds=['noop']\n[task.noop]\nrun='true'\nexists='true'\n",
-    );
-    h.register(&repo);
-    let output = h.wt().args(["new", "repo/work"]).output().unwrap();
-    assert!(output.status.success());
-    let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("1 passed, 1 skipped"), "{text}");
-    assert!(!text.contains("1/2 passed"), "{text}");
-    common::proof_capture(
-        "G2",
-        text.trim_end()
-            .replace(
-                &std::fs::canonicalize(&h.root)
-                    .unwrap_or_else(|_| h.root.clone())
-                    .to_string_lossy()
-                    .to_string(),
-                "<ROOT>",
-            )
-            .replace(&h.root.to_string_lossy().to_string(), "<ROOT>"),
     );
 }
 
@@ -190,26 +152,19 @@ fn every_successful_verb_uses_intentional_human_text() {
         vec!["list"],
         vec!["status", "repo"],
         vec!["path", "repo"],
-        vec!["tasks", "repo"],
         vec!["config", "repo", "--origin"],
         vec!["which", "repo", "git"],
-        vec!["locks", "repo"],
+        vec!["leases", "repo"],
         vec!["doctor", "repo"],
         vec!["env", "repo"],
-        vec!["run", "hello", "repo"],
-        vec!["run", "hello", "repo", "--dry-run"],
-        vec!["test", "repo"],
-        vec!["lint", "repo"],
-        vec!["fmt", "repo"],
-        vec!["build", "repo"],
         vec!["sync", "repo"],
     ] {
         human(&h, &args, b"");
     }
 
-    human(&h, &["run", "service", "repo"], b"");
+    human_at(&h, &["with", "service"], b"", &repo);
     human(&h, &["destroy", "service", "repo", "--yes"], b"");
-    human(&h, &["run", "service", "repo"], b"");
+    human_at(&h, &["with", "service"], b"", &repo);
     human(&h, &["refresh", "service", "repo", "--yes"], b"");
     human(
         &h,
@@ -272,15 +227,15 @@ fn every_successful_verb_uses_intentional_human_text() {
 /// The automatic build detaches from `new`, so a transcript taken right
 /// after it would describe whichever moment the supervisor happened to be
 /// at; the transcripts that follow describe a settled tree.
-fn wait_for_build(h: &Harness, target: &str) {
+fn wait_for_after_new(h: &Harness, target: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        if h.json(&["status", target])["data"]["build"]["state"] != "running" {
+        if h.json(&["status", target])["data"]["after_new"]["state"] != "running" {
             return;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "build of {target} never settled"
+            "after_new hook for {target} never settled"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -309,6 +264,18 @@ fn transcript_failure(h: &Harness, name: &str, args: &[&str], code: i32) {
 
 fn human(h: &Harness, args: &[&str], input: &[u8]) {
     let output = h.pty_output(args, input);
+    assert_human(h, args, output);
+}
+
+fn human_at(h: &Harness, args: &[&str], input: &[u8], cwd: &Path) {
+    let mut request = h.pty_request(args);
+    request.cwd = Some(cwd.to_path_buf());
+    let output =
+        wt_sys::proc::pty_capture(&request, input, std::time::Duration::from_secs(10)).unwrap();
+    assert_human(h, args, output);
+}
+
+fn assert_human(h: &Harness, args: &[&str], output: wt_sys::proc::ProcessOutput) {
     assert_eq!(
         output.child.code,
         Some(0),

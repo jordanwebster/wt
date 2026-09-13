@@ -939,9 +939,9 @@ fn backend_none_never_invokes_tmux_for_truth_or_teardown() {
 }
 
 #[test]
-fn new_starts_detached_build_and_shims_report_progress_and_failure() {
+fn new_starts_detached_hook_and_shims_report_progress_and_failure() {
     let Some(private) = PrivateTmux::new(false, false) else {
-        eprintln!("skipping private-tmux build test: tmux is not installed");
+        eprintln!("skipping private-tmux hook test: tmux is not installed");
         return;
     };
     let worker = private.harness.shims.join("build-worker");
@@ -969,15 +969,9 @@ exit 9
         r#"
 bin = ["bin"]
 commands = ["orbit"]
-[task.prepare]
-run = ["{}", "prepare", "{}", "{}"]
-[task.build]
-needs = ["prepare"]
-run = ["{}", "build", "{}", "{}"]
+[hooks]
+after_new = ["{}", "build", "{}", "{}"]
 "#,
-        worker.display(),
-        events.display(),
-        release.display(),
         worker.display(),
         events.display(),
         release.display(),
@@ -1006,7 +1000,7 @@ run = ["{}", "build", "{}", "{}"]
             .unwrap()
             .unwrap_or_default();
         if observed.contains("build-start") {
-            assert_eq!(observed, "prepare\nbuild-start\n");
+            assert_eq!(observed, "build-start\n");
             break;
         }
         assert!(Instant::now() < deadline, "build never started: {observed}");
@@ -1022,15 +1016,11 @@ run = ["{}", "build", "{}", "{}"]
     assert_eq!(progress.status.code(), Some(5));
     let progress_text = String::from_utf8_lossy(&progress.stderr);
     assert!(
-        progress_text.contains("build is in progress"),
+        progress_text.contains("hook is in progress"),
         "{progress_text}"
     );
     assert!(!progress_text.contains("wt:setup"), "{progress_text}");
     assert!(progress_text.contains("wt-setup.log"), "{progress_text}");
-    assert!(
-        progress_text.contains("wt build repo/work"),
-        "{progress_text}"
-    );
     assert!(
         progress_text.contains(
             &private
@@ -1064,7 +1054,6 @@ run = ["{}", "build", "{}", "{}"]
         .unwrap();
     assert_eq!(failed.status.code(), Some(5));
     let failed_text = String::from_utf8_lossy(&failed.stderr);
-    assert!(failed_text.contains("wt build repo/work"), "{failed_text}");
     assert!(
         failed_text.contains(
             &private

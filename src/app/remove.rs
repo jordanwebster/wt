@@ -10,7 +10,7 @@ use wt_sys::lock::{self, Mode};
 
 use crate::cli::Remove;
 
-use super::{door, executor, Context, Output};
+use super::{door, executor, leases, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreError> {
     let target = match context.resolve(Some(&args.target)) {
@@ -144,6 +144,7 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
     } else {
         None
     };
+    leases::release_tree(context, &target.to_string())?;
 
     let mut destroyed = Vec::new();
     let mut errors = Vec::new();
@@ -162,7 +163,7 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
             &executor::resource_lock_path(context, &key),
             &resource_holder,
             super::context::duration(
-                context.settings.locks.resource.as_deref(),
+                context.settings.waits.resource.as_deref(),
                 Duration::from_secs(120),
             ),
         )?;
@@ -178,7 +179,7 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
                 }
                 destroyed.push(DestroyedReport {
                     scope: key.scope.to_string(),
-                    task: key.task,
+                    resource: key.resource,
                     state: result.state,
                     child: result.child,
                 });
@@ -187,7 +188,7 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
                 errors.push(error);
                 destroyed.push(DestroyedReport {
                     scope: key.scope.to_string(),
-                    task: key.task,
+                    resource: key.resource,
                     state: "orphaned".to_owned(),
                     child: None,
                 });
@@ -216,7 +217,7 @@ pub(crate) fn run(context: &mut Context, args: Remove) -> Result<Output, CoreErr
         &context.git_lock_path(&context.registry.labels[&tree.label].gitdir_id),
         &git_holder,
         super::context::duration(
-            context.settings.locks.repo_git.as_deref(),
+            context.settings.waits.repo_git.as_deref(),
             Duration::from_secs(60),
         ),
     )?;

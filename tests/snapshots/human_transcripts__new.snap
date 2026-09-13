@@ -6,4 +6,4 @@ Created repo/work
   path    <ROOT>/wt-home/trees/repo/work
   branch  work
   sync    skipped
-build started  <ROOT>/wt-home/trees/repo/work/.wt/logs/wt-setup.log
+after_new started  <ROOT>/wt-home/trees/repo/work/.wt/logs/wt-setup.log

@@ -100,8 +100,7 @@ fn ignored_activation(parent: &EnvMap) -> Deactivation {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct TaskContext {
-    pub id: String,
+pub struct RecipeContext {
     pub env: BTreeMap<String, String>,
     pub resource_name: Option<String>,
 }
@@ -112,7 +111,7 @@ pub struct EnvInputs<'a> {
     pub tree: &'a TreeIdentity,
     pub home: &'a str,
     pub contributed: Vec<(ResourceKey, EnvMap)>,
-    pub task: Option<TaskContext>,
+    pub recipe: Option<RecipeContext>,
     pub parent: &'a EnvMap,
     pub existing_dirs: &'a BTreeSet<String>,
     pub file_sources: &'a BTreeMap<String, String>,
@@ -324,13 +323,12 @@ pub fn assemble(input: EnvInputs<'_>) -> Result<EnvOutput, CoreError> {
         state.alias(key, value);
     }
 
-    if let Some(task) = input.task {
-        state.set("WT_TASK", task.id);
-        if let Some(name) = task.resource_name {
+    if let Some(recipe) = input.recipe {
+        if let Some(name) = recipe.resource_name {
             let value = template::expand(&name, &template_context)?;
             state.set("WT_SELF", value);
         }
-        for (key, value) in task.env {
+        for (key, value) in recipe.env {
             let value = template::expand(&value, &template_context)?;
             state.set(key, value);
         }
@@ -466,7 +464,7 @@ mod tests {
         }
     }
 
-    fn output(parent: &EnvMap, name: &str, task: Option<TaskContext>) -> EnvOutput {
+    fn output(parent: &EnvMap, name: &str, recipe: Option<RecipeContext>) -> EnvOutput {
         let mut cfg = EffectiveScope::default();
         cfg.env
             .insert("PORT".to_owned(), "{{ports.http}}".to_owned());
@@ -477,7 +475,7 @@ mod tests {
             tree: &tree,
             home: "/home",
             contributed: Vec::new(),
-            task,
+            recipe,
             parent,
             existing_dirs: &BTreeSet::new(),
             file_sources: &BTreeMap::new(),
@@ -491,18 +489,17 @@ mod tests {
             path in proptest::option::of(prop_oneof![Just("".to_owned()), "[a-z/:]{0,30}"]),
             preset_target in proptest::option::of("[a-z]{0,8}"),
             preset_alias in proptest::option::of("[0-9]{1,5}"),
-            task_door in any::<bool>(),
+            recipe_door in any::<bool>(),
         ) {
             let mut parent = EnvMap::new();
             if let Some(path) = path { parent.insert("PATH".to_owned(), path); }
             if let Some(value) = preset_target { parent.insert("WT_TARGET".to_owned(), value); }
             if let Some(value) = preset_alias { parent.insert("PORT".to_owned(), value); }
-            let task = task_door.then(|| TaskContext {
-                id: "test".to_owned(),
-                env: BTreeMap::from([("TASK_KEY".to_owned(), "owned".to_owned())]),
+            let recipe = recipe_door.then(|| RecipeContext {
+                env: BTreeMap::from([("RECIPE_KEY".to_owned(), "owned".to_owned())]),
                 resource_name: None,
             });
-            let activated = output(&parent, "a", task);
+            let activated = output(&parent, "a", recipe);
             prop_assert_eq!(deactivate(&activated.env).unwrap().clean, parent);
         }
 
@@ -511,21 +508,20 @@ mod tests {
             parent_path in proptest::option::of("[a-z/:]{0,30}"),
             preset_alias in proptest::option::of("[0-9]{1,5}"),
             preset_coordinate in proptest::option::of("[a-z]{0,8}"),
-            task_door in any::<bool>(),
+            recipe_door in any::<bool>(),
         ) {
             let mut parent = EnvMap::new();
             if let Some(path) = parent_path { parent.insert("PATH".to_owned(), path); }
             if let Some(alias) = preset_alias { parent.insert("PORT".to_owned(), alias); }
             if let Some(coordinate) = preset_coordinate { parent.insert("WT_TARGET".to_owned(), coordinate); }
-            let task = task_door.then(|| TaskContext {
-                id: "test".to_owned(),
-                env: BTreeMap::from([("TASK_KEY".to_owned(), "owned".to_owned())]),
+            let recipe = recipe_door.then(|| RecipeContext {
+                env: BTreeMap::from([("RECIPE_KEY".to_owned(), "owned".to_owned())]),
                 resource_name: None,
             });
-            let first = output(&parent, "a", task.clone());
+            let first = output(&parent, "a", recipe.clone());
             prop_assert_eq!(
-                output(&first.env, "b", task.clone()).env,
-                output(&parent, "b", task).env
+                output(&first.env, "b", recipe.clone()).env,
+                output(&parent, "b", recipe).env
             );
         }
 
@@ -578,19 +574,18 @@ mod tests {
 
     #[test]
     fn user_edits_to_tool_owned_keys_are_replaced_by_the_next_door() {
-        let task = TaskContext {
-            id: "test".to_owned(),
-            env: BTreeMap::from([("TASK_KEY".to_owned(), "owned".to_owned())]),
+        let recipe = RecipeContext {
+            env: BTreeMap::from([("RECIPE_KEY".to_owned(), "owned".to_owned())]),
             resource_name: None,
         };
-        let mut activated = output(&EnvMap::new(), "a", Some(task.clone())).env;
+        let mut activated = output(&EnvMap::new(), "a", Some(recipe.clone())).env;
         activated.insert("WT_TARGET".to_owned(), "edited".to_owned());
-        activated.insert("TASK_KEY".to_owned(), "edited".to_owned());
-        let next = output(&activated, "b", Some(task));
+        activated.insert("RECIPE_KEY".to_owned(), "edited".to_owned());
+        let next = output(&activated, "b", Some(recipe));
         assert_eq!(next.env["WT_TARGET"], "repo/b");
-        assert_eq!(next.env["TASK_KEY"], "owned");
+        assert_eq!(next.env["RECIPE_KEY"], "owned");
         assert!(next.report.restored.contains(&"WT_TARGET".to_owned()));
-        assert!(next.report.restored.contains(&"TASK_KEY".to_owned()));
+        assert!(next.report.restored.contains(&"RECIPE_KEY".to_owned()));
     }
 
     #[test]
@@ -613,7 +608,7 @@ mod tests {
             tied_to: TiedTo::Tree,
             name: Some("a".to_owned()),
             scope: RelPath::new(".").unwrap(),
-            task: "db".to_owned(),
+            resource: "db".to_owned(),
         };
         let output = assemble(EnvInputs {
             cfg: &cfg,
@@ -623,7 +618,7 @@ mod tests {
                 key,
                 EnvMap::from([("PATH".to_owned(), "/hijack".to_owned())]),
             )],
-            task: None,
+            recipe: None,
             parent: &EnvMap::from([("PATH".to_owned(), "/usr/bin".to_owned())]),
             existing_dirs: &BTreeSet::new(),
             file_sources: &BTreeMap::new(),
@@ -641,7 +636,7 @@ mod tests {
             tree: &tree,
             home: "/home",
             contributed: Vec::new(),
-            task: None,
+            recipe: None,
             parent: &EnvMap::new(),
             existing_dirs: &BTreeSet::new(),
             file_sources: &BTreeMap::new(),
@@ -675,7 +670,7 @@ mod tests {
             tree: &tree("a", 20_016),
             home: "/home",
             contributed: Vec::new(),
-            task: None,
+            recipe: None,
             parent: &EnvMap::from([("VALUE".to_owned(), "production".to_owned())]),
             existing_dirs: &BTreeSet::new(),
             file_sources: &BTreeMap::new(),
@@ -706,7 +701,7 @@ mod tests {
             tree: &tree("feature-x", 20_016),
             home: "/home",
             contributed: Vec::new(),
-            task: None,
+            recipe: None,
             parent: &EnvMap::new(),
             existing_dirs: &BTreeSet::new(),
             file_sources: &BTreeMap::new(),

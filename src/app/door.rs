@@ -73,7 +73,6 @@ pub(crate) fn enter(
     let state_view = state.as_ref().map(|state| wt_core::lifecycle::StateView {
         phase: state.phase,
         op: state.op.as_ref().map(|operation| operation.verb),
-        verify_pending: state.verify_pending,
         has_records: !state.resources.is_empty(),
     });
     let consult_lock = state_view.as_ref().is_some_and(|state| {
@@ -243,7 +242,7 @@ fn prepare(
         tree: &identity,
         home: &context.home.to_string_lossy(),
         contributed,
-        task: None,
+        recipe: None,
         parent: &context.parent_env,
         existing_dirs: &existing_dirs,
         file_sources: &file_sources,

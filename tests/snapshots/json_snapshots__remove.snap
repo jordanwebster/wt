@@ -10,9 +10,9 @@ expression: "normalize(value, &h.root)"
     "destroyed": [
       {
         "child": null,
+        "resource": "service",
         "scope": ".",
-        "state": "dropped",
-        "task": "service"
+        "state": "dropped"
       }
     ],
     "orphans_kept": [],

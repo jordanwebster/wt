@@ -1,6 +1,5 @@
 ---
 source: tests/human_transcripts.rs
-assertion_line: 282
 expression: normalized
 ---
 Doctor found 1 error, 0 warnings, 1 note

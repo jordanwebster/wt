@@ -1390,7 +1390,7 @@ tracks, is the failure this addendum exists to end.
 ## A79. A tree's build lives in its own `target/` and is seeded from the canonical by clone
 
 The per-tree build directory under `$WT_HOME/cache` (A64) was measured in
-production against the trees it served: one active amux tree held 39 GB
+production against the trees it served: one active mobile-tool tree held 39 GB
 after a day of agent work, and removing it took 78 seconds. The size was not
 the directory's fault — cargo keeps one artifact set per build configuration
 and never deletes a superseded one — but the directory had lost its reason to
@@ -1659,7 +1659,8 @@ declared one (`target/embed`) is already swept as part of it.
 ## A83. wt owns resources and leases, hooks warm trees, and the task runner is removed
 
 The task surface had grown around a distinction the repositories did not
-make. Every task in the measured amux configuration delegated to `just`, while
+make. Every work command in the measured mobile-tool fixture delegated to its
+repository runner, while
 wt supplied environment, coordination, logging, and lifecycle around the
 child. The task graph, aggregates, task-to-task `needs`, aliases for `test`,
 `lint`, `fmt`, and `build`, and trailing-argument rules therefore duplicated a
@@ -1678,19 +1679,27 @@ instances, or pure capacity. `create` names the idempotent creation recipe;
 `needs` connects resources only; and `arena` plus `capacity` describe the slot
 an existing resource occupies. `count` makes indexed instances with independent
 frozen destroy snapshots and permits `{{index()}}` in `name`. A declaration
-with only `count` and lease sizing is a token pool: it has no material instance
-and refuses instance recipes. Every lease runs `acquire`; after release a live
-instance remains warm for `keep`, then `park` runs, and `prune` may destroy a
-parked instance after `discard`. Selection prefers the most recently released
-unused live instance, then a parked instance, then an uncreated instance, and
-only then waits up to the pool's `wait`. No state records which tree last used
-an instance because cleaning happens on every lease. `wt lease` and `wt
-release` create and remove tree holders; arena occupancy creates resource
-holders; `wt with ... -- <command>` creates process holders. Process identity
-is the pid plus its start time and a live flock. `--take` may evict a tree or
-resource holder through its frozen snapshot, but never a running process.
-`wt leases` reports instances, slots, holders, process identity, liveness, and
-release times.
+with only `count` and `wait` is a token pool: it has no material instance and
+refuses instance recipes, `keep`, and `idle`. Every lease runs `acquire`.
+
+When a leased child exits, `keep` creates a short, hard reservation for that
+tree. Its next command takes the same instance without queueing, while another
+tree waits for the reservation to expire. Selection is the instance kept for
+the requesting tree, then any free present instance, then a new instance when
+fewer than `count` exist, and only then a wait bounded by the pool's generous
+default `wait`. A free present instance older than `idle` is destroyed from its
+frozen snapshot; wt has no dormant state. Instance state is only
+present or absent plus one hold: free, kept by a tree until a deadline, or
+leased by a process identified by pid and process start time. Arena occupancy
+is a resource hold and ends only when that resource is destroyed.
+
+A running command and a keep end on their own, so contention waits for either;
+`LEASE_HELD` says whether work or a reservation blocked it and names a keeping
+tree. A resource-held arena slot does not end on its own, so it is refused
+immediately and `--take` may evict it through its frozen snapshot. Nobody may
+take a running command. `wt rm` ends keeps owned by that tree. `wt leases`
+reports every instance's hold, process identity, release time, and keep expiry.
+There are no explicit tree-lease commands.
 
 Scope still decides lifetime. Tree resources are destroyed by `wt rm`, repo
 resources by unregistering the repository, and machine resources only by
@@ -1698,14 +1707,14 @@ request or after their declaration disappears. Repo and machine instance
 records preserve the frozen recipes needed to destroy state after the current
 configuration changes. Machine pools are shared by name rather than label, so
 all declaring repositories must agree on lifecycle recipes. Their sizing keys
-(`count`, `keep`, `discard`, and `wait`) come from a machine-level user
+(`count`, `keep`, `idle`, and `wait`) come from a machine-level user
 declaration when present; otherwise repository declarations must agree and a
 conflict tells the user to set the machine value once.
 
 The lifecycle conventions formerly hidden in task names are explicit hooks.
 `hooks.after_new` runs detached in the new tree, is logged, and supplies the
-status claimed-command shims use as their build gate. `hooks.warm` is what the
-anchor runs in the canonical after `new`, `rm`, and `sync`. Adapters may
+status claimed-command shims use as their readiness gate. `hooks.warm` is what
+the anchor runs in the canonical after `new`, `rm`, and `sync`. Adapters may
 provide hook defaults but no longer contribute tasks. A configured `output`
 root is also accepted in repository and user layers. It defaults to the opaque
 kind, is cloned as a whole directory during `new`, is included in `ls --disk`
@@ -1723,10 +1732,12 @@ schema migration, and exclusive holders become arena holders. This addendum
 supersedes A57–A61.
 
 The observations that fixed the shape were concrete. Simulator state leaked
-between two recipes in the same tree, so cleaning on a change of tree would
-not suffice and `acquire` runs for every lease. A released simulator is cheap
-on disk but expensive in RAM, which requires separate `keep` and `park`
-transitions rather than destruction on release. The apollo repository needs a
+between two device recipes in the same tree, so cleaning on a change of tree would
+not suffice and `acquire` runs for every lease. Consecutive commands from one
+tree must not queue behind a newcomer, so keeping is an implicit reservation
+rather than a cooperative command or a soft preference. The measured resources
+create in under a minute, so a separate dormant state buys nothing: `idle`
+destroys unused instances, while a cheap resume belongs inside `acquire`. The monolith fixture needs a
 four-slot process semaphore with no lifecycle recipes, establishing token
 pools as accounting rather than pretend resources. Its shared database and
 port-80 service also showed that durable resources, resource-held arena slots,
@@ -1739,7 +1750,13 @@ Where this design leaves a detail open, the implementation chooses the
 smallest model: pool names are normalized once for environment-variable export;
 one named pool contributes one lease and duplicate names are errors; indexed
 instances use one-based external indices to match `{{index()}}` and the target
-configurations; and lazy parking is best-effort on ordinary invocations but is
-awaited by `doctor` and `prune`, where its result is part of the command's
-truth. No run history, derived budget, recipe overlay, alternate task-runner
-verb, per-lease clean flag, or last-tree record is introduced.
+configurations; an omitted pool wait is thirty minutes; omitted `keep` means no
+reservation and omitted `idle` means no automatic destruction; keep deadlines
+are stored as Unix milliseconds; and lazy idle teardown is best-effort and
+detached on ordinary invocations but awaited by `doctor` and `prune`, where its
+result is part of the command's truth. The only tree identity stored on an
+instance is the owner and deadline of its current keep. To avoid retaining the
+removed table names for unrelated tuning, settings recipe timeouts live under
+`[recipes]` and internal coordination waits under `[waits]`. No run history, derived
+budget, recipe overlay, alternate task-runner verb, per-lease clean flag, or
+previous-user record is introduced.

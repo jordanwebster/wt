@@ -40,11 +40,7 @@ expression: envelope
       "changed": [],
       "drift": []
     },
-    "verify": {
-      "ok": true,
-      "at": "TIME"
-    },
-    "build": null,
+    "after_new": null,
     "session": "no",
     "session_name": "session",
     "agent": null,
@@ -54,7 +50,7 @@ expression: envelope
     "resources": [
       {
         "scope": ".",
-        "task": "db",
+        "resource": "db",
         "tied_to": "tree",
         "name": "repo_db",
         "state": "declared",
@@ -83,21 +79,6 @@ expression: envelope
     ],
     "disk_kb": null,
     "build_kb": null,
-    "tasks": [
-      {
-        "id": "test",
-        "scope": ".",
-        "origin": "repo",
-        "cwd": ".",
-        "needs": [
-          "build"
-        ],
-        "resource": false,
-        "tied_to": null,
-        "lock": "tests",
-        "description": "run tests"
-      }
-    ],
     "config_errors": [
       {
         "path": ".wt.toml",

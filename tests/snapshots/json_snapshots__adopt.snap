@@ -8,10 +8,10 @@ expression: "normalize(value, &h.root)"
     "adopted": true,
     "resumed": false,
     "tree": {
+      "after_new": null,
       "agent": null,
       "behind_default": 0,
       "branch": "adopted",
-      "build": null,
       "build_kb": null,
       "canonical": false,
       "detached_sha": null,
@@ -46,9 +46,9 @@ expression: "normalize(value, &h.root)"
           "last_probe": null,
           "name": "repo_adopted_f54fc4f2_service",
           "reason": null,
+          "resource": "service",
           "scope": ".",
           "state": "declared",
-          "task": "service",
           "tied_to": "tree",
           "undeclared": false
         }
@@ -64,8 +64,7 @@ expression: "normalize(value, &h.root)"
       },
       "target": "repo/adopted",
       "tree_id": "<tree_id>",
-      "upstream": null,
-      "verify": null
+      "upstream": null
     }
   },
   "error": null,

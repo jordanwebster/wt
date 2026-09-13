@@ -1,6 +1,5 @@
 ---
 source: tests/human_transcripts.rs
-assertion_line: 282
 expression: normalized
 ---
 Removed repo/work

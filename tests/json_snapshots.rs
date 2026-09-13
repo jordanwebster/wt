@@ -11,22 +11,11 @@ sync_inputs = ["README.md"]
 APP_PORT = "{{ports.http}}"
 [files.".wt/generated"]
 content = "port={{ports.http}}"
-[task.hello]
-run = "true"
-[task.test]
-run = "true"
-[task.lint]
-run = "true"
-[task.fmt]
-run = "true"
-[task.build]
-run = "true"
-[task.sync]
-run = "true"
-[task.verify]
-run = "true"
-[task.service]
-run = "touch \"$WT_ROOT/.service\""
+[hooks]
+after_new = "true"
+warm = "true"
+[resource.service]
+create = "touch \"$WT_ROOT/.service\""
 exists = "test -f \"$WT_ROOT/.service\""
 destroy = "rm -f \"$WT_ROOT/.service\""
 tied_to = "tree"
@@ -40,28 +29,41 @@ fn every_verb_has_a_normalized_json_contract_snapshot() {
     snapshot(&h, "list", &["list", "--disk"]);
     snapshot(&h, "status", &["status", "repo"]);
     snapshot(&h, "path", &["path", "repo"]);
-    snapshot(&h, "tasks", &["tasks", "repo"]);
     snapshot(&h, "config", &["config", "repo", "--origin"]);
     snapshot(&h, "which", &["which", "repo", "git"]);
-    snapshot(&h, "locks", &["locks", "repo"]);
+    snapshot(&h, "leases", &["leases", "repo"]);
     snapshot(&h, "doctor", &["doctor", "repo"]);
     snapshot(&h, "env", &["env", "repo"]);
-    snapshot(&h, "run", &["run", "hello", "repo"]);
-    snapshot(&h, "test", &["test", "repo"]);
-    snapshot(&h, "lint", &["lint", "repo"]);
-    snapshot(&h, "fmt", &["fmt", "repo"]);
-    snapshot(&h, "build", &["build", "repo"]);
+    snapshot_at(&h, "with", &["with", "service"], &repo);
     snapshot(&h, "sync", &["sync", "repo"]);
     snapshot(&h, "anchor", &["anchor", "repo"]);
 
-    h.json(&["run", "service", "repo"]);
+    assert!(h
+        .wt()
+        .current_dir(&repo)
+        .args(["with", "service", "--json"])
+        .output()
+        .unwrap()
+        .status
+        .success());
     snapshot(&h, "destroy", &["destroy", "service", "repo", "--yes"]);
-    h.json(&["run", "service", "repo"]);
+    assert!(h
+        .wt()
+        .current_dir(&repo)
+        .args(["with", "service", "--json"])
+        .output()
+        .unwrap()
+        .status
+        .success());
     snapshot(&h, "refresh", &["refresh", "service", "repo", "--yes"]);
 
     snapshot(&h, "open", &["open", "repo", "--no-attach"]);
     snapshot(&h, "close", &["close", "repo"]);
-    snapshot(&h, "new", &["new", "repo/work", "--no-sync"]);
+    snapshot(
+        &h,
+        "new",
+        &["new", "repo/work", "--no-sync", "--no-after-new"],
+    );
     snapshot(&h, "meta", &["meta", "repo/work", "ticket=ABC-123"]);
     snapshot(&h, "remove", &["remove", "repo/work", "--yes"]);
     snapshot(&h, "prune", &["prune", "--yes"]);
@@ -120,7 +122,15 @@ fn every_verb_has_a_normalized_json_contract_snapshot() {
 }
 
 fn snapshot(h: &Harness, name: &str, args: &[&str]) {
-    let output = h.wt().arg("--json").args(args).output().unwrap();
+    snapshot_command(h, name, h.wt().arg("--json").args(args));
+}
+
+fn snapshot_at(h: &Harness, name: &str, args: &[&str], cwd: &Path) {
+    snapshot_command(h, name, h.wt().current_dir(cwd).arg("--json").args(args));
+}
+
+fn snapshot_command(h: &Harness, name: &str, command: &mut assert_cmd::Command) {
+    let output = command.output().unwrap();
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
             "{name} emitted invalid JSON ({error}): {}",

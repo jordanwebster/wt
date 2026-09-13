@@ -89,16 +89,14 @@ pub(crate) fn run(context: &mut Context, args: Sync) -> Result<Output, CoreError
                     .map(|input| (input.path.clone(), input.hash.clone()))
                     .collect()
     });
-    let (ran, steps) = if unchanged && !args.force {
+    let has_work = plan
+        .nodes
+        .iter()
+        .any(|node| node.command.is_some() || node.resource.is_some());
+    let (ran, steps) = if !has_work || (unchanged && !args.force) {
         (false, Vec::new())
     } else {
-        match executor::execute_plan(
-            context,
-            &door,
-            &plan,
-            None,
-            executor::ExecuteOptions::DEFAULT,
-        ) {
+        match executor::execute_plan(context, &door, &plan, executor::ExecuteOptions::DEFAULT) {
             Ok(result) => (true, result.data.steps),
             Err(error) => {
                 fail(context, &target, &holder, &error)?;

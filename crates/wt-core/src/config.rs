@@ -5,7 +5,7 @@ use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     error::CoreError,
-    model::{valid_duration, EnvKey, LockName, PortName, RelDir, RelPath, TaskId},
+    model::{valid_duration, EnvKey, PortName, RelDir, RelPath, ResourceId},
     template, ExitClass,
 };
 
@@ -17,6 +17,13 @@ pub enum ValueOrFalse<T> {
 
 impl<T> ValueOrFalse<T> {
     pub fn value(&self) -> Option<&T> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::False => None,
+        }
+    }
+
+    pub fn value_mut(&mut self) -> Option<&mut T> {
         match self {
             Self::Value(value) => Some(value),
             Self::False => None,
@@ -119,51 +126,132 @@ pub enum TiedTo {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Exclusive {
+pub enum Arena {
     Repo,
     Machine,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Task {
-    pub run: Option<Command>,
+pub struct Resource {
+    pub create: Option<Command>,
     pub exists: Option<Command>,
     pub destroy: Option<Command>,
-    /// Opts `run`, `exists`, and `destroy` out of templating so a recipe can
-    /// carry text owned by another `{{`-using format, such as a Go template
-    /// passed to `docker --format`. `name` and `env` stay templated: they hold
-    /// wt's own values, and they are how such a recipe receives them.
-    #[serde(default = "default_task_template", skip_serializing_if = "is_true")]
+    pub acquire: Option<Command>,
+    #[serde(default = "default_recipe_template", skip_serializing_if = "is_true")]
     pub template: bool,
     #[serde(serialize_with = "serialize_needs")]
     pub needs: Option<Vec<String>>,
-    pub lock: Option<String>,
     pub name: Option<String>,
     pub tied_to: Option<TiedTo>,
-    pub exclusive: Option<Exclusive>,
+    pub arena: Option<Arena>,
+    pub capacity: Option<u16>,
+    pub count: Option<u16>,
+    pub wait: Option<String>,
+    pub keep: Option<String>,
+    pub idle: Option<String>,
     pub env: IndexMap<String, String>,
     pub cwd: Option<RelPath>,
     pub timeout: Option<String>,
     pub description: Option<String>,
     pub ready_within: Option<String>,
     pub snapshot_env: Vec<String>,
-    #[serde(skip)]
+}
+
+impl Default for Resource {
+    fn default() -> Self {
+        Self {
+            create: None,
+            exists: None,
+            destroy: None,
+            acquire: None,
+            template: true,
+            needs: None,
+            name: None,
+            tied_to: None,
+            arena: None,
+            capacity: None,
+            count: None,
+            wait: None,
+            keep: None,
+            idle: None,
+            env: IndexMap::new(),
+            cwd: None,
+            timeout: None,
+            description: None,
+            ready_within: None,
+            snapshot_env: Vec::new(),
+        }
+    }
+}
+
+impl Resource {
+    pub fn token_pool(&self) -> bool {
+        self.count.is_some()
+            && self.exists.is_none()
+            && self.create.is_none()
+            && self.destroy.is_none()
+            && self.acquire.is_none()
+    }
+
+    pub fn as_recipe(&self) -> Recipe {
+        Recipe {
+            command: self.create.clone(),
+            exists: self.exists.clone(),
+            destroy: self.destroy.clone(),
+            template: self.template,
+            needs: self.needs.clone(),
+            name: self.name.clone(),
+            tied_to: self.tied_to,
+            arena: self.arena,
+            capacity: self.capacity,
+            env: self.env.clone(),
+            cwd: self.cwd.clone(),
+            timeout: self.timeout.clone(),
+            description: self.description.clone(),
+            ready_within: self.ready_within.clone(),
+            snapshot_env: self.snapshot_env.clone(),
+            ..Recipe::default()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Recipe {
+    pub command: Option<Command>,
+    pub exists: Option<Command>,
+    pub destroy: Option<Command>,
+    /// Opts lifecycle commands out of templating so a recipe can
+    /// carry text owned by another `{{`-using format, such as a Go template
+    /// passed to `docker --format`. `name` and `env` stay templated: they hold
+    /// wt's own values, and they are how such a recipe receives them.
+    pub template: bool,
+    pub needs: Option<Vec<String>>,
+    pub name: Option<String>,
+    pub tied_to: Option<TiedTo>,
+    pub arena: Option<Arena>,
+    pub capacity: Option<u16>,
+    pub env: IndexMap<String, String>,
+    pub cwd: Option<RelPath>,
+    pub timeout: Option<String>,
+    pub description: Option<String>,
+    pub ready_within: Option<String>,
+    pub snapshot_env: Vec<String>,
     pub sys_locks: Vec<String>,
 }
 
-impl Default for Task {
+impl Default for Recipe {
     fn default() -> Self {
         Self {
-            run: None,
+            command: None,
             exists: None,
             destroy: None,
-            template: default_task_template(),
+            template: default_recipe_template(),
             needs: None,
-            lock: None,
             name: None,
             tied_to: None,
-            exclusive: None,
+            arena: None,
+            capacity: None,
             env: IndexMap::new(),
             cwd: None,
             timeout: None,
@@ -175,26 +263,13 @@ impl Default for Task {
     }
 }
 
-fn default_task_template() -> bool {
+fn default_recipe_template() -> bool {
     true
 }
 
-impl Task {
+impl Recipe {
     pub fn is_resource(&self) -> bool {
         self.destroy.is_some()
-    }
-
-    /// Yields the command fields that wt templates, which is none of them when
-    /// the task has opted out.
-    fn templated_commands(&self) -> impl Iterator<Item = (&'static str, &Command)> {
-        [
-            ("run", self.run.as_ref()),
-            ("exists", self.exists.as_ref()),
-            ("destroy", self.destroy.as_ref()),
-        ]
-        .into_iter()
-        .filter(|_| self.template)
-        .filter_map(|(field, command)| command.map(|command| (field, command)))
     }
 }
 
@@ -226,7 +301,7 @@ pub struct Scope {
     pub env: IndexMap<String, ValueOrFalse<String>>,
     pub copy: Vec<RelPath>,
     pub files: IndexMap<String, ValueOrFalse<FileDef>>,
-    pub task: IndexMap<String, ValueOrFalse<Task>>,
+    pub resource: IndexMap<String, ValueOrFalse<Resource>>,
     pub adapters: IndexMap<String, AdapterChoice>,
     #[serde(skip)]
     pub locations: BTreeMap<String, SourceLocation>,
@@ -289,20 +364,11 @@ pub struct Detect {
     pub ignore: Option<Vec<RelPath>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct LockCfg {
-    pub slots: u16,
-    pub wait: Option<String>,
-}
-
-impl Default for LockCfg {
-    fn default() -> Self {
-        Self {
-            slots: 1,
-            wait: None,
-        }
-    }
+pub struct Hooks {
+    pub after_new: Option<Command>,
+    pub warm: Option<Command>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -311,10 +377,9 @@ pub struct Config {
     #[serde(flatten)]
     pub root: Scope,
     pub ports: Vec<PortName>,
-    #[serde(skip_serializing_if = "IndexMap::is_empty")]
-    pub locks: IndexMap<String, LockCfg>,
     pub dirs: IndexMap<String, Scope>,
     pub sync_inputs: Vec<RelPath>,
+    pub hooks: Hooks,
     /// Output roots cloned from the canonical into a new tree. Configured
     /// roots are opaque; adapter roots may additionally carry a sweep
     /// strategy that understands their ecosystem.
@@ -377,12 +442,17 @@ pub struct EffectiveScope {
     pub env: BTreeMap<String, String>,
     pub copy: Vec<RelPath>,
     pub files: BTreeMap<String, FileDef>,
-    pub tasks: BTreeMap<String, Task>,
+    pub resources: BTreeMap<String, Resource>,
     pub adapters: BTreeMap<String, AdapterChoice>,
     pub locations: BTreeMap<String, SourceLocation>,
 }
 
 pub fn parse(source: &str, path: &str) -> Result<Config, CoreError> {
+    if let Ok(table) = source.parse::<toml::Table>() {
+        if let Some(message) = removed_surface(&table) {
+            return Err(invalid(message));
+        }
+    }
     let mut config: Config = toml::from_str(source).map_err(|error| {
         let span = error.span().unwrap_or(0..0);
         let before = &source[..span.start.min(source.len())];
@@ -398,6 +468,102 @@ pub fn parse(source: &str, path: &str) -> Result<Config, CoreError> {
     record_locations(&mut config, source, path);
     validate(&config)?;
     Ok(config)
+}
+
+pub fn parse_current(source: &str, path: &str) -> Result<Config, CoreError> {
+    parse(source, path)
+}
+
+pub fn removed_surface(table: &toml::Table) -> Option<String> {
+    fn in_scope(table: &toml::Table) -> Option<String> {
+        if let Some(tasks) = table.get("task") {
+            let tasks = tasks.as_table();
+            let selected = tasks.and_then(|tasks| {
+                ["build", "warm"]
+                    .into_iter()
+                    .find_map(|id| tasks.get(id).map(|task| (id, task.as_table())))
+                    .or_else(|| {
+                        ["lock", "needs", "exclusive", "run"]
+                            .into_iter()
+                            .find_map(|key| {
+                                tasks.iter().find_map(|(id, value)| {
+                                    value
+                                        .as_table()
+                                        .filter(|task| task.contains_key(key))
+                                        .map(|task| (id.as_str(), Some(task)))
+                                })
+                            })
+                    })
+                    .or_else(|| {
+                        tasks
+                            .iter()
+                            .next()
+                            .map(|(id, task)| (id.as_str(), task.as_table()))
+                    })
+            });
+            let (id, task) = selected.unwrap_or(("<name>", None));
+            let message = if id == "build" {
+                "`[task.build]` was replaced by `[hooks] after_new`".to_owned()
+            } else if id == "warm" {
+                "`[task.warm]` was replaced by `[hooks] warm`".to_owned()
+            } else if task.is_some_and(|task| task.contains_key("lock")) {
+                format!("task `{id}` key `lock` was replaced by a token pool in `[resource.{id}]`")
+            } else if task.is_some_and(|task| task.contains_key("needs")) {
+                format!("task `{id}` key `needs` was removed; task dependencies belong in the repository task runner and resource dependencies use `[resource.{id}] needs`")
+            } else if task.is_some_and(|task| task.contains_key("exclusive")) {
+                format!(
+                    "task `{id}` key `exclusive` was replaced by resource `arena` and `capacity`"
+                )
+            } else if task.is_some_and(|task| task.contains_key("run")) {
+                format!("task `{id}` key `run` was removed; use the repository task runner, or `[resource.{id}] create` for durable state")
+            } else {
+                format!("`[task.{id}]` was removed; use the repository task runner or `[resource.{id}]`")
+            };
+            return Some(message);
+        }
+        if table.contains_key("locks") {
+            return Some(
+            "`[locks]` was replaced by token pools: declare `[resource.<name>]` with `count` and `wait`".to_owned()
+            );
+        }
+        table
+            .get("resource")
+            .and_then(toml::Value::as_table)
+            .and_then(|resources| {
+                ["run", "reset", "lock", "exclusive"]
+                    .into_iter()
+                    .find_map(|key| {
+                        resources.iter().find_map(|(id, value)| {
+                            value
+                                .as_table()
+                                .filter(|resource| resource.contains_key(key))
+                                .map(|_| {
+                                    let replacement = match key {
+                                        "run" => "`create`",
+                                        "reset" => "`acquire`",
+                                        "lock" => "a token pool in `[resource]`",
+                                        "exclusive" => "`arena` and `capacity`",
+                                        _ => unreachable!(),
+                                    };
+                                    format!(
+                                        "resource `{id}` key `{key}` was replaced by {replacement}"
+                                    )
+                                })
+                        })
+                    })
+            })
+    }
+
+    in_scope(table).or_else(|| {
+        table
+            .get("dirs")
+            .and_then(toml::Value::as_table)
+            .and_then(|dirs| {
+                dirs.values()
+                    .filter_map(toml::Value::as_table)
+                    .find_map(in_scope)
+            })
+    })
 }
 
 fn record_locations(config: &mut Config, source: &str, path: &str) {
@@ -427,14 +593,17 @@ fn record_locations(config: &mut Config, source: &str, path: &str) {
             [kind] if kind == "vars" => Some(format!("var:{key}")),
             [kind] if kind == "env" => Some(format!("env:{key}")),
             [kind, file] if kind == "files" && key == "content" => Some(format!("file:{file}")),
-            [kind, task]
-                if kind == "task"
-                    && matches!(key.as_str(), "name" | "run" | "exists" | "destroy") =>
+            [kind, resource]
+                if kind == "resource"
+                    && matches!(
+                        key.as_str(),
+                        "name" | "create" | "exists" | "destroy" | "acquire"
+                    ) =>
             {
-                Some(format!("task:{task}:{key}"))
+                Some(format!("resource:{resource}:{key}"))
             }
-            [kind, task, env] if kind == "task" && env == "env" => {
-                Some(format!("task:{task}:env:{key}"))
+            [kind, resource, env] if kind == "resource" && env == "env" => {
+                Some(format!("resource:{resource}:env:{key}"))
             }
             _ => None,
         };
@@ -519,21 +688,15 @@ pub fn validate(config: &Config) -> Result<(), CoreError> {
             ));
         }
     }
-    for (name, lock) in &config.locks {
-        LockName::new(name)?;
-        if lock.slots == 0 {
-            return Err(invalid(format!(
-                "locks.\"{name}\".slots must be at least 1"
-            )));
+    for command in [config.hooks.after_new.as_ref(), config.hooks.warm.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if command.texts().is_empty() || command.texts().iter().any(String::is_empty) {
+            return Err(invalid("hook command must not be empty"));
         }
-        if lock
-            .wait
-            .as_deref()
-            .is_some_and(|wait| !valid_duration(wait))
-        {
-            return Err(invalid(format!(
-                "locks.\"{name}\".wait must be digits followed by ms, s, m, or h"
-            )));
+        for value in command.texts() {
+            template::validate(value)?;
         }
     }
     if let Some(branch) = &config.branch {
@@ -584,6 +747,16 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
         let effective = effective_scope(config, dir)?;
         validate_var_graph(&effective.vars, &ports, &effective.locations)?;
         template::resolve_vars(&effective.vars, &functions)?;
+        if dir == "." {
+            for command in [config.hooks.after_new.as_ref(), config.hooks.warm.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                for value in command.texts() {
+                    validate_template_value(value, &effective.vars, &ports, None)?;
+                }
+            }
+        }
         for (key, value) in &effective.env {
             validate_template_value(
                 value,
@@ -604,33 +777,47 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                 }
             }
         }
-        for (task_id, task) in &effective.tasks {
-            if let Some(name) = &task.name {
+        for (resource_id, resource) in &effective.resources {
+            if let Some(name) = &resource.name {
                 validate_template_value(
                     name,
                     &effective.vars,
                     &ports,
-                    effective.locations.get(&format!("task:{task_id}:name")),
+                    effective
+                        .locations
+                        .get(&format!("resource:{resource_id}:name")),
                 )?;
             }
-            for (key, value) in &task.env {
+            for (key, value) in &resource.env {
                 validate_template_value(
                     value,
                     &effective.vars,
                     &ports,
                     effective
                         .locations
-                        .get(&format!("task:{task_id}:env:{key}")),
+                        .get(&format!("resource:{resource_id}:env:{key}")),
                 )?;
             }
-            for (field, command) in task.templated_commands() {
-                for value in command.texts() {
-                    validate_template_value(
-                        value,
-                        &effective.vars,
-                        &ports,
-                        effective.locations.get(&format!("task:{task_id}:{field}")),
-                    )?;
+            for (field, command) in [
+                ("create", resource.create.as_ref()),
+                ("exists", resource.exists.as_ref()),
+                ("destroy", resource.destroy.as_ref()),
+                ("acquire", resource.acquire.as_ref()),
+            ]
+            .into_iter()
+            .filter_map(|(field, command)| command.map(|command| (field, command)))
+            {
+                if resource.template {
+                    for value in command.texts() {
+                        validate_template_value(
+                            value,
+                            &effective.vars,
+                            &ports,
+                            effective
+                                .locations
+                                .get(&format!("resource:{resource_id}:{field}")),
+                        )?;
+                    }
                 }
             }
         }
@@ -641,8 +828,8 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
         {
             return Err(invalid("copy entries may not also be rendered files"));
         }
-        for task in effective.tasks.values() {
-            if matches!(task.tied_to, Some(TiedTo::Repo | TiedTo::Machine)) {
+        for resource in effective.resources.values() {
+            if matches!(resource.tied_to, Some(TiedTo::Repo | TiedTo::Machine)) {
                 let mut calls = BTreeSet::new();
                 let mut shell_references = BTreeSet::new();
                 let mut port_references = BTreeSet::new();
@@ -650,9 +837,10 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                 // references are still evidence of tree specificity; its braces
                 // belong to whatever format owns them and are not wt's to read.
                 for command in [
-                    task.run.as_ref(),
-                    task.exists.as_ref(),
-                    task.destroy.as_ref(),
+                    resource.create.as_ref(),
+                    resource.exists.as_ref(),
+                    resource.destroy.as_ref(),
+                    resource.acquire.as_ref(),
                 ]
                 .into_iter()
                 .flatten()
@@ -661,13 +849,23 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                         shell_references.extend(template::shell_references(shell));
                     }
                 }
-                for (_, command) in task.templated_commands() {
-                    for value in command.texts() {
-                        calls.extend(template::calls(value)?);
-                        port_references.extend(template::port_references(value)?);
+                if resource.template {
+                    for command in [
+                        resource.create.as_ref(),
+                        resource.exists.as_ref(),
+                        resource.destroy.as_ref(),
+                        resource.acquire.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        for value in command.texts() {
+                            calls.extend(template::calls(value)?);
+                            port_references.extend(template::port_references(value)?);
+                        }
                     }
                 }
-                for text in task.name.iter().chain(task.env.values()) {
+                for text in resource.name.iter().chain(resource.env.values()) {
                     calls.extend(template::calls(text)?);
                     port_references.extend(template::port_references(text)?);
                 }
@@ -683,7 +881,7 @@ pub fn validate_resolved(config: &Config, stride: u8) -> Result<(), CoreError> {
                         "WT_ROOT" | "WT_TARGET" | "WT_NAME" | "WT_BRANCH" | "WT_BIN" | "PATH"
                     ) || name.starts_with("WT_PORT_")
                 });
-                let machine = task.tied_to == Some(TiedTo::Machine);
+                let machine = resource.tied_to == Some(TiedTo::Machine);
                 let repo_call = machine
                     && calls
                         .iter()
@@ -871,11 +1069,78 @@ fn validate_scope(scope: &Scope) -> Result<(), CoreError> {
             }
         }
     }
-    for (id, task) in &scope.task {
-        TaskId::new(id)?;
-        if let Some(task) = task.value() {
-            validate_task(id, task, &scope.locations)?;
+    for (id, resource) in &scope.resource {
+        ResourceId::new(id)?;
+        if let Some(resource) = resource.value() {
+            validate_resource(id, resource)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_resource(id: &str, resource: &Resource) -> Result<(), CoreError> {
+    for duration in [
+        resource.timeout.as_deref(),
+        resource.ready_within.as_deref(),
+        resource.wait.as_deref(),
+        resource.keep.as_deref(),
+        resource.idle.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if duration != "forever" && !valid_duration(duration) {
+            return Err(invalid(
+                "duration must be digits followed by ms, s, m, or h",
+            ));
+        }
+    }
+    if resource.count == Some(0) || resource.capacity == Some(0) {
+        return Err(invalid("resource count and capacity must be at least 1"));
+    }
+    if resource.token_pool() {
+        if resource.name.is_some()
+            || !resource.env.is_empty()
+            || resource.keep.is_some()
+            || resource.idle.is_some()
+            || resource.needs.is_some()
+            || resource.arena.is_some()
+            || resource.capacity.is_some()
+            || resource.cwd.is_some()
+            || resource.timeout.is_some()
+            || resource.description.is_some()
+            || resource.ready_within.is_some()
+            || !resource.snapshot_env.is_empty()
+            || !resource.template
+        {
+            return Err(invalid(format!(
+                "token pool `{id}` may not declare instance fields; only tied_to, count, and wait are valid"
+            )));
+        }
+        return Ok(());
+    }
+    if resource.count.is_some()
+        && resource
+            .name
+            .as_deref()
+            .is_none_or(|name| !name.contains("{{index()}}"))
+    {
+        return Err(invalid(format!(
+            "instance pool `{id}` needs a name containing `{{{{index()}}}}`"
+        )));
+    }
+    if resource.destroy.is_none() || resource.exists.is_none() || resource.tied_to.is_none() {
+        return Err(invalid(format!(
+            "resource `{id}` needs exists, destroy, and tied_to"
+        )));
+    }
+    if resource.arena.is_some() && resource.capacity.is_none() {
+        return Err(invalid(format!(
+            "resource `{id}` with arena needs capacity"
+        )));
+    }
+    if resource.capacity.is_some() && resource.arena.is_none() {
+        return Err(invalid(format!("resource `{id}` capacity requires arena")));
     }
     Ok(())
 }
@@ -884,87 +1149,6 @@ fn valid_var_key(key: &str) -> bool {
     let mut chars = key.chars();
     matches!(chars.next(), Some(ch) if ch.is_ascii_lowercase() || ch == '_')
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
-}
-
-fn validate_task(
-    id: &str,
-    task: &Task,
-    locations: &BTreeMap<String, SourceLocation>,
-) -> Result<(), CoreError> {
-    if let Some(lock) = &task.lock {
-        LockName::new(lock)?;
-    }
-    if task.run.is_none() && task.destroy.is_none() && task.needs.is_none() {
-        return Err(invalid("a task needs run, destroy, or needs"));
-    }
-    if task.run.is_none() && task.destroy.is_none() {
-        let inert_key = [
-            (task.lock.is_some(), "lock"),
-            (!task.env.is_empty(), "env"),
-            (task.cwd.is_some(), "cwd"),
-            (task.exists.is_some(), "exists"),
-            (task.timeout.is_some(), "timeout"),
-            (task.ready_within.is_some(), "ready_within"),
-            (task.name.is_some(), "name"),
-            (task.tied_to.is_some(), "tied_to"),
-            (task.exclusive.is_some(), "exclusive"),
-            (!task.snapshot_env.is_empty(), "snapshot_env"),
-        ]
-        .into_iter()
-        .find_map(|(present, key)| present.then_some(key));
-        if let Some(key) = inert_key {
-            return Err(invalid(format!(
-                "aggregate task `{id}` key `{key}` would guard nothing; put `{key}` on a task that runs"
-            )));
-        }
-    }
-    if task.exclusive.is_some()
-        && (task.destroy.is_none() || task.exists.is_none() || task.tied_to != Some(TiedTo::Tree))
-    {
-        return Err(invalid(
-            "exclusive is valid only on a tree-tied resource (destroy + exists + tied_to = \"tree\")",
-        ));
-    }
-    if task.destroy.is_some() && (task.exists.is_none() || task.tied_to.is_none()) {
-        return Err(invalid("a resource needs exists and tied_to"));
-    }
-    if task.ready_within.is_some() && task.exists.is_none() {
-        return Err(invalid("ready_within requires exists"));
-    }
-    for duration in [task.timeout.as_deref(), task.ready_within.as_deref()]
-        .into_iter()
-        .flatten()
-    {
-        if !valid_duration(duration) {
-            return Err(invalid(
-                "duration must be digits followed by ms, s, m, or h",
-            ));
-        }
-    }
-    if let Some(name) = &task.name {
-        template::validate(name)
-            .map_err(|error| located(error, locations.get(&format!("task:{id}:name"))))?;
-    }
-    for key in &task.snapshot_env {
-        EnvKey::new(key)?;
-    }
-    for (key, value) in &task.env {
-        EnvKey::new(key)?;
-        if key == "PATH" {
-            return Err(invalid(
-                "PATH is owned by wt and cannot be task environment",
-            ));
-        }
-        template::validate(value)
-            .map_err(|error| located(error, locations.get(&format!("task:{id}:env:{key}"))))?;
-    }
-    for (field, command) in task.templated_commands() {
-        for text in command.texts() {
-            template::validate(text)
-                .map_err(|error| located(error, locations.get(&format!("task:{id}:{field}"))))?;
-        }
-    }
-    Ok(())
 }
 
 fn validate_materialized_overlap(scope: &Scope) -> Result<(), CoreError> {
@@ -1005,11 +1189,14 @@ pub fn merge(layers: &[(Layer, Config)]) -> Config {
         if !layer.ports.is_empty() {
             output.ports.clone_from(&layer.ports);
         }
-        for (name, lock) in &layer.locks {
-            output.locks.insert(name.clone(), lock.clone());
-        }
         append_unique(&mut output.sync_inputs, &layer.sync_inputs);
         append_unique(&mut output.outputs, &layer.outputs);
+        if layer.hooks.after_new.is_some() {
+            output.hooks.after_new.clone_from(&layer.hooks.after_new);
+        }
+        if layer.hooks.warm.is_some() {
+            output.hooks.warm.clone_from(&layer.hooks.warm);
+        }
         if layer.branch.is_some() {
             output.branch.clone_from(&layer.branch);
         }
@@ -1032,7 +1219,7 @@ fn merge_scope(target: &mut Scope, source: &Scope) {
     merge_deletable(&mut target.vars, &source.vars);
     merge_deletable(&mut target.env, &source.env);
     merge_deletable(&mut target.files, &source.files);
-    merge_deletable(&mut target.task, &source.task);
+    merge_deletable(&mut target.resource, &source.resource);
     for (id, choice) in &source.adapters {
         let current = target.adapters.entry(id.clone()).or_default();
         if choice.tool.is_some() {
@@ -1119,7 +1306,7 @@ pub fn effective_scope(config: &Config, cwd: &str) -> Result<EffectiveScope, Cor
         apply_values(&mut output.vars, &scope.vars);
         apply_values(&mut output.env, &scope.env);
         apply_values(&mut output.files, &scope.files);
-        apply_values(&mut output.tasks, &scope.task);
+        apply_values(&mut output.resources, &scope.resource);
         for (id, choice) in &scope.adapters {
             output.adapters.insert(id.clone(), choice.clone());
         }
@@ -1184,64 +1371,41 @@ mod tests {
 
     #[test]
     fn parses_all_acceptance_files_unchanged() {
-        let orbit = parse(
-            include_str!("../../../spec/acceptance/orbit.wt.toml"),
-            "orbit",
-        )
-        .unwrap();
-        assert_eq!(orbit.root.bin[0].as_str(), "target/debug");
-        assert!(orbit.root.task["daemon"].value().unwrap().is_resource());
-        validate_resolved(&orbit, 16).unwrap();
-
-        let app = parse(
-            include_str!("../../../spec/acceptance/orbitapp.wt.toml"),
-            "orbitapp",
-        )
-        .unwrap();
-        assert_eq!(app.ports[0].as_str(), "metro");
-        assert_eq!(
-            app.root.task["ios"].value().unwrap().needs,
-            Some(vec!["orbit-src".to_owned()])
-        );
-        validate_resolved(&app, 16).unwrap();
-
-        let cloud = parse(
-            include_str!("../../../spec/acceptance/orbitcloud.wt.toml"),
-            "orbitcloud",
-        )
-        .unwrap();
-        assert_eq!(cloud.ports.len(), 7);
-        let pgdata = cloud.root.task["pgdata"].value().unwrap();
-        assert!(pgdata.run.is_none());
-        assert!(pgdata.destroy.is_some());
-        assert!(matches!(
-            pgdata.exists.as_ref(),
-            Some(Command::Shell(command))
-                if command.starts_with("docker info >/dev/null 2>&1 || exit 2;")
-        ));
-        validate_resolved(&cloud, 16).unwrap();
+        for (name, source) in [
+            (
+                "mobile-tools",
+                include_str!("../../../spec/acceptance/mobile-tools.wt.toml"),
+            ),
+            (
+                "cloud-service",
+                include_str!("../../../spec/acceptance/cloud-service.wt.toml"),
+            ),
+            (
+                "rust-tool",
+                include_str!("../../../spec/acceptance/rust-tool.wt.toml"),
+            ),
+            (
+                "mobile-app",
+                include_str!("../../../spec/acceptance/mobile-app.wt.toml"),
+            ),
+            (
+                "monolith",
+                include_str!("../../../spec/acceptance/monolith.wt.toml"),
+            ),
+        ] {
+            let config = parse_current(source, name).unwrap();
+            validate_resolved(&config, 16).unwrap();
+        }
     }
 
     #[test]
     fn merge_deletes_entries_and_scopes_accumulate() {
-        let low = parse(
-            "bin=['root']\n[env]\nA='a'\n[task.test]\nrun='one'\n[dirs.sub.env]\nB='b'",
-            "low",
-        )
-        .unwrap();
-        let high = parse(
-            "bin=['high']\n[env]\nA=false\n[task.test]\nrun='two'",
-            "high",
-        )
-        .unwrap();
+        let low = parse("bin=['root']\n[env]\nA='a'\n[dirs.sub.env]\nB='b'", "low").unwrap();
+        let high = parse("bin=['high']\n[env]\nA=false", "high").unwrap();
         let merged = merge(&[(Layer::Repo, low), (Layer::Tree, high)]);
         let scope = effective_scope(&merged, "sub").unwrap();
         assert!(!scope.env.contains_key("A"));
         assert_eq!(scope.env["B"], "b");
-        assert_eq!(
-            scope.tasks["test"].run,
-            Some(Command::Shell("two".to_owned()))
-        );
         assert_eq!(
             scope.bin.iter().map(RelPath::as_str).collect::<Vec<_>>(),
             ["high", "root"]
@@ -1251,12 +1415,12 @@ mod tests {
     #[test]
     fn nested_scope_deletions_survive_layer_merge_until_scope_resolution() {
         let repo = parse(
-            "[env]\nA='root'\n[files.generated]\ncontent='root'\n[task.test]\nrun='root'",
+            "[env]\nA='root'\n[files.generated]\ncontent='root'\n[resource.cache]\ntied_to='tree'\nexists='true'\ndestroy='true'",
             "repo",
         )
         .unwrap();
         let tree = parse(
-            "[dirs.sub.env]\nA=false\n[dirs.sub.files]\ngenerated=false\n[dirs.sub.task]\ntest=false",
+            "[dirs.sub.env]\nA=false\n[dirs.sub.files]\ngenerated=false\n[dirs.sub.resource]\ncache=false",
             "tree",
         )
         .unwrap();
@@ -1266,45 +1430,11 @@ mod tests {
         let root = effective_scope(&merged, ".").unwrap();
         assert_eq!(root.env["A"], "root");
         assert!(root.files.contains_key("generated"));
-        assert!(root.tasks.contains_key("test"));
+        assert!(root.resources.contains_key("cache"));
         let nested = effective_scope(&merged, "sub").unwrap();
         assert!(!nested.env.contains_key("A"));
         assert!(!nested.files.contains_key("generated"));
-        assert!(!nested.tasks.contains_key("test"));
-    }
-
-    #[test]
-    fn validation_rejects_resource_without_probe_or_scope() {
-        let error = parse("[task.db]\ndestroy='drop'", "x").unwrap_err();
-        assert_eq!(error.code.0, "CONFIG_INVALID");
-    }
-
-    #[test]
-    fn section_5_6_aggregate_validation_accepts_needs_only_and_refuses_inert_keys() {
-        assert!(parse("[task.setup]\nneeds=[]\ndescription='all setup steps'", "x").is_ok());
-        assert!(parse("[task.empty]\ndescription='not enough'", "x")
-            .unwrap_err()
-            .message
-            .contains("run, destroy, or needs"));
-
-        for (key, value) in [
-            ("lock", "'serial'"),
-            ("env", "{ A = 'value' }"),
-            ("cwd", "'sub'"),
-            ("exists", "'true'"),
-            ("timeout", "'1s'"),
-            ("ready_within", "'1s'"),
-            ("name", "'aggregate'"),
-            ("tied_to", "'tree'"),
-            ("snapshot_env", "['TOKEN']"),
-        ] {
-            let source = format!("[task.setup]\nneeds=['leaf']\n{key}={value}");
-            let error = parse(&source, "x").unwrap_err();
-            assert_eq!(error.code.0, "CONFIG_INVALID");
-            assert!(error.message.contains(&format!("key `{key}`")));
-            assert!(error.message.contains("would guard nothing"));
-            assert!(error.message.contains("task that runs"));
-        }
+        assert!(!nested.resources.contains_key("cache"));
     }
 
     #[test]
@@ -1321,7 +1451,7 @@ mod tests {
             "CONFIG_INVALID"
         );
         let repo = parse(
-            "[task.db]\ntied_to='repo'\nexists='test -e $WT_ROOT'\ndestroy='drop'",
+            "[resource.db]\ntied_to='repo'\nexists='test -e $WT_ROOT'\ndestroy='drop'",
             "x",
         )
         .unwrap();
@@ -1331,14 +1461,14 @@ mod tests {
             .contains("tree-specific"));
 
         let opaque = parse(
-            "[task.db]\ntied_to='repo'\nexists='test -e ${root()}'\ndestroy='drop'",
+            "[resource.db]\ntied_to='repo'\nexists='test -e ${root()}'\ndestroy='drop'",
             "x",
         )
         .unwrap();
         assert!(validate_resolved(&opaque, 16).is_ok());
 
         let templated = parse(
-            "[task.db]\ntied_to='repo'\nexists=\"test -e '{{root()}}'\"\ndestroy='drop'",
+            "[resource.db]\ntied_to='repo'\nexists=\"test -e '{{root()}}'\"\ndestroy='drop'",
             "x",
         )
         .unwrap();
@@ -1360,11 +1490,11 @@ mod tests {
         ] {
             let source = if reference.starts_with('$') {
                 format!(
-                    "[task.setup]\ntied_to='machine'\nexists='test -n {reference}'\ndestroy='true'"
+                    "[resource.setup]\ntied_to='machine'\nexists='test -n {reference}'\ndestroy='true'"
                 )
             } else {
                 format!(
-                    "[task.setup]\ntied_to='machine'\nexists='true'\ndestroy='true'\n[task.setup.env]\nVALUE='{reference}'"
+                    "[resource.setup]\ntied_to='machine'\nexists='true'\ndestroy='true'\n[resource.setup.env]\nVALUE='{reference}'"
                 )
             };
             let config = parse(&source, "x").unwrap();
@@ -1380,7 +1510,7 @@ mod tests {
         }
 
         let portable = parse(
-            "[task.setup]\ntied_to='machine'\nexists='test -n $WT_HOME'\ndestroy='true'\n[task.setup.env]\nVALUE='{{home()}}'",
+            "[resource.setup]\ntied_to='machine'\nexists='test -n $WT_HOME'\ndestroy='true'\n[resource.setup.env]\nVALUE='{{home()}}'",
             "x",
         )
         .unwrap();
@@ -1394,21 +1524,11 @@ mod tests {
             .unwrap_err()
             .message
             .contains("only `false` deletes"));
-        assert!(parse("[task.test]\nrun='true'\n[task]\ntest=true", "x").is_err());
+        assert!(parse("[resource.test]\ncreate=true", "x").is_err());
     }
 
     #[test]
     fn resolved_validation_applies_every_scope_sensitive_row() {
-        let task_cycle = parse(
-            "[dirs.sub.task.t]\nrun='true'\n[dirs.sub.task.t.env]\nA='{{missing}}'\nB='one'",
-            "x",
-        )
-        .unwrap();
-        assert_eq!(
-            validate_resolved(&task_cycle, 16).unwrap_err().code.0,
-            "CONFIG_INVALID"
-        );
-
         let alias = parse("[dirs.sub.env]\nA='{{B}}'\nB='one'", "x").unwrap();
         assert_eq!(
             validate_resolved(&alias, 16).unwrap_err().code.0,
@@ -1437,57 +1557,33 @@ mod tests {
     }
 
     #[test]
-    fn section_5_2_named_lock_config_parses_validates_and_defaults() {
-        let config = parse(
-            "locks.\"serial\" = { wait = '250ms' }\n[task.test]\nrun='true'\nlock='serial'",
-            "repo/.wt.toml",
-        )
-        .unwrap();
-        assert_eq!(config.locks["serial"].slots, 1);
-        assert_eq!(config.locks["serial"].wait.as_deref(), Some("250ms"));
-
-        for source in [
-            "locks.serial={slots=0}",
-            "locks.serial={slots=65536}",
-            "locks.serial={wait='later'}",
-            "locks.serial={slots=1,mystery=true}",
-            "locks.'../escape'={slots=1}",
-            "[dirs.sub.locks.serial]\nslots=2",
-            "[task.test]\nrun='true'\nlock='../escape'",
-        ] {
-            assert!(parse(source, "repo/.wt.toml").is_err(), "{source}");
-        }
-    }
-
-    #[test]
-    fn section_5_3_named_lock_entries_merge_by_name_at_root() {
-        let repo = parse(
-            "locks.serial={slots=2,wait='1s'}\nlocks.network={slots=3}",
-            "repo/.wt.toml",
-        )
-        .unwrap();
-        let user = parse("locks.serial={slots=4}", "$WT_HOME/config.toml").unwrap();
-        let merged = merge(&[(Layer::Repo, repo), (Layer::User, user)]);
-        assert_eq!(merged.locks["serial"].slots, 4);
-        assert_eq!(merged.locks["serial"].wait, None);
-        assert_eq!(merged.locks["network"].slots, 3);
-    }
-
-    #[test]
     fn validation_covers_port_mode_duration_and_readiness_rows() {
         assert!(parse("ports=['http','http']", "x").is_err());
         let too_many = parse("ports=['a','b']", "x").unwrap();
         assert!(validate_resolved(&too_many, 1).is_err());
         assert!(parse("[files.generated]\ncontent='x'\nmode='644'", "x").is_err());
-        assert!(parse("[task.t]\nrun='true'\ntimeout='soon'", "x").is_err());
-        assert!(parse("[task.t]\nrun='true'\nready_within='1s'", "x").is_err());
+        assert!(parse(
+            "[resource.t]\ntied_to='tree'\nexists='true'\ndestroy='true'\ntimeout='soon'",
+            "x"
+        )
+        .is_err());
+        assert!(parse(
+            "[resource.t]\ntied_to='tree'\ndestroy='true'\nready_within='1s'",
+            "x"
+        )
+        .is_err());
     }
 
     #[test]
     fn strict_template_validation_covers_shell_commands_and_file_opt_out() {
-        let error = parse("[task.t]\nrun='echo {{ name}}'", "repo/.wt.toml").unwrap_err();
+        let config = parse(
+            "[resource.t]\ntied_to='tree'\nexists='true'\ncreate='echo {{ name}}'\ndestroy='true'",
+            "repo/.wt.toml",
+        )
+        .unwrap();
+        let error = validate_resolved(&config, 16).unwrap_err();
         assert_eq!(error.code.0, "CONFIG_INVALID");
-        assert!(error.message.contains("repo/.wt.toml:2:"));
+        assert!(error.message.contains("repo/.wt.toml:4:"));
         assert!(error.message.contains("whitespace"));
 
         assert!(parse(
@@ -1498,15 +1594,16 @@ mod tests {
     }
 
     #[test]
-    fn an_untemplated_task_carries_foreign_braces_but_still_shows_its_tree_specificity() {
+    fn an_untemplated_resource_carries_foreign_braces_but_still_shows_its_tree_specificity() {
         let serve = |extra: &str, tied_to: &str| {
             format!(
-                "[task.serve]\n{extra}tied_to='{tied_to}'\n\
+                "[resource.serve]\n{extra}tied_to='{tied_to}'\n\
                  exists='docker inspect -f \"{{{{.State.Running}}}}\" \"$WT_ROOT\"'\n\
                  destroy='docker rm -f x'"
             )
         };
-        let templated = parse(&serve("", "tree"), "repo/.wt.toml").unwrap_err();
+        let templated = parse(&serve("", "tree"), "repo/.wt.toml").unwrap();
+        let templated = validate_resolved(&templated, 16).unwrap_err();
         assert_eq!(templated.code.0, "CONFIG_INVALID");
 
         let source = serve("template=false\n", "tree");
@@ -1514,7 +1611,8 @@ mod tests {
         assert!(validate_resolved(&config, 16).is_ok());
 
         // The opt-out covers the recipes, not the values wt supplies to them.
-        let name = parse(&format!("{source}\nname='{{{{ bad }}}}'"), "repo/.wt.toml").unwrap_err();
+        let name = parse(&format!("{source}\nname='{{{{ bad }}}}'"), "repo/.wt.toml").unwrap();
+        let name = validate_resolved(&name, 16).unwrap_err();
         assert_eq!(name.code.0, "CONFIG_INVALID");
         assert!(name.message.contains("whitespace"));
 

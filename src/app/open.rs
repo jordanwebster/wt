@@ -107,7 +107,7 @@ pub(crate) fn provision_new(context: &mut Context, target: &str) -> Result<Vec<N
 pub(crate) fn open_new_after_summary(
     context: &mut Context,
     target: &str,
-    build: bool,
+    after_new: bool,
 ) -> Result<(), CoreError> {
     let target = context.resolve(Some(target))?;
     let tree = context.tree(&target)?;
@@ -120,16 +120,16 @@ pub(crate) fn open_new_after_summary(
             SessionReport::Closed(_) | SessionReport::Failed(_) => None,
         })
         .expect("opening one tree produces one session");
-    if build {
-        match start_build(context, &target.to_string()) {
-            Ok((build, notice)) => {
-                println!("build started  {}", build.log);
+    if after_new {
+        match start_after_new(context, &target.to_string()) {
+            Ok((after_new, notice)) => {
+                println!("after_new started  {}", after_new.log);
                 if let Some(notice) = notice {
                     eprintln!("wt: {} — {}", notice.code, notice.message);
                 }
             }
             Err(error) => eprintln!(
-                "wt: BUILD_START_FAILED — automatic build for {target} did not start: {}; remedy: {}",
+                "wt: AFTER_NEW_START_FAILED — after_new for {target} did not start: {}; remedy: {}",
                 error.message, error.remedy
             ),
         }
@@ -138,7 +138,7 @@ pub(crate) fn open_new_after_summary(
     attach(context, &session.name)
 }
 
-pub(crate) fn start_build(
+pub(crate) fn start_after_new(
     context: &mut Context,
     target: &str,
 ) -> Result<
@@ -158,15 +158,8 @@ pub(crate) fn start_build(
     let pid = super::build::spawn_wt(
         context,
         root,
-        &["build", &target.to_string()],
-        &[
-            ("WT_BUILD_LOG", slot.log.to_string_lossy().into_owned()),
-            ("WT_ROOT", tree.path.as_str().to_owned()),
-            (
-                "WT_BACKGROUND_BUILD_STATUS",
-                slot.status.to_string_lossy().into_owned(),
-            ),
-        ],
+        &["__hook", "after-new", &target.to_string()],
+        &[("WT_ROOT", tree.path.as_str().to_owned())],
         None,
         None,
     )
@@ -179,12 +172,12 @@ pub(crate) fn start_build(
         pid,
         head: super::build::head_of(context, &target),
     };
-    let holder = context.holder(target.to_string(), "build")?;
+    let holder = context.holder(target.to_string(), "after-new")?;
     context.mutate_state(&target, &holder, |state| {
         state.build = Some(build.clone());
         Ok(())
     })?;
-    // The tree's build is under way; now the canonical's, so the next tree
+    // The tree's hook is under way; now warm the canonical, so the next tree
     // is seeded warm (§11.10). Detached and niced: it yields to this one.
     // A refresh that does not start is the caller's notice to carry.
     let notice = super::anchor::spawn_after(context, &tree, false);

@@ -6,8 +6,8 @@ use wt_core::config::TiedTo;
 use wt_core::lifecycle::{DerivedPhase, RepoState};
 use wt_core::model::{Label, TreeRec};
 use wt_core::report::{
-    BuildTreeReport, DirtyReport, LastErrorReport, LastProbeReport, ListData, PortReport,
-    ResourceReport, SyncTreeReport, TreeReport, UpstreamReport, VerifyTreeReport,
+    DirtyReport, HookTreeReport, LastErrorReport, LastProbeReport, ListData, PortReport,
+    ResourceReport, SyncTreeReport, TreeReport, UpstreamReport,
 };
 use wt_core::resource::{ProbeResult, ResourceKey, ResourceRecord, ResourceState};
 use wt_core::CoreError;
@@ -43,37 +43,7 @@ pub(crate) fn run(context: &mut Context, args: List) -> Result<Output, CoreError
         trees.push(report?);
     }
     wt_core::report::sort_trees(&mut trees);
-    let mut locks = Vec::new();
-    for tree in &context.registry.trees {
-        if args
-            .label
-            .as_deref()
-            .is_some_and(|label| tree.label.as_str() != label)
-        {
-            continue;
-        }
-        let target = target_of(tree);
-        for holder in super::remove::door_holders(context, &target)? {
-            locks.push(wt_core::report::ListLockReport {
-                name: target.to_string(),
-                label: tree.label.to_string(),
-                holder: wt_core::report::HolderReport {
-                    pid: holder.pid,
-                    target: target.to_string(),
-                    verb: holder.verb,
-                    since: holder.since,
-                },
-            });
-        }
-    }
-    locks.sort_by(|left, right| {
-        (&left.label, &left.name, left.holder.pid).cmp(&(
-            &right.label,
-            &right.name,
-            right.holder.pid,
-        ))
-    });
-    let data = ListData { trees, locks };
+    let data = ListData { trees };
     if let Some(key) = args.meta.as_deref() {
         let text = super::human::render_list_meta(data.clone(), key);
         Output::text(data, text)
@@ -384,7 +354,7 @@ fn tree_report_with_env(
         (None, None, None, None, None, Vec::new())
     };
     let session = env.session_state(tree);
-    let build = build_report(tree, state.as_ref())?;
+    let after_new = build_report(tree, state.as_ref())?;
     let mut ports = tree
         .ports
         .iter()
@@ -420,7 +390,6 @@ fn tree_report_with_env(
     } else {
         Vec::new()
     };
-    let verify = state.as_ref().and_then(|state| state.verify.as_ref());
     let report = TreeReport {
         target: target.to_string(),
         label: tree.label.to_string(),
@@ -454,11 +423,7 @@ fn tree_report_with_env(
             changed,
             drift,
         },
-        verify: verify.map(|verify| VerifyTreeReport {
-            ok: verify.ok,
-            at: verify.at.clone(),
-        }),
-        build,
+        after_new,
         session,
         session_name: tree.session_name(),
         agent: tree.agent.clone(),
@@ -477,12 +442,12 @@ fn tree_report_with_env(
 pub(crate) fn build_report(
     tree: &wt_core::model::TreeRec,
     state: Option<&wt_core::lifecycle::TreeState>,
-) -> Result<Option<BuildTreeReport>, CoreError> {
+) -> Result<Option<HookTreeReport>, CoreError> {
     state
         .and_then(|state| state.build.as_ref())
         .map(|build| {
             let status = Path::new(tree.path.as_str()).join(".wt/build.status");
-            wt_sys::fsx::read_string(&status).map(|value| BuildTreeReport {
+            wt_sys::fsx::read_string(&status).map(|value| HookTreeReport {
                 state: normalise_build_status(value.as_deref(), build.pid),
                 started: build.started.clone(),
                 log: build.log.clone(),
@@ -652,10 +617,10 @@ fn resource_reports(
     let mut reports = records
         .into_iter()
         .map(|record| {
-            let holder = executor::exclusive_holder_for_record(context, &record)?;
+            let holder = executor::arena_holder_for_record(context, &record)?;
             Ok(ResourceReport {
                 scope: record.key.scope.to_string(),
-                task: record.key.task.clone(),
+                resource: record.key.resource.clone(),
                 tied_to: match record.key.tied_to {
                     TiedTo::Tree => "tree",
                     TiedTo::Repo => "repo",
@@ -697,10 +662,10 @@ fn resource_reports(
             "repo" => 1,
             _ => 2,
         };
-        (order(&left.tied_to), &left.scope, &left.task).cmp(&(
+        (order(&left.tied_to), &left.scope, &left.resource).cmp(&(
             order(&right.tied_to),
             &right.scope,
-            &right.task,
+            &right.resource,
         ))
     });
     Ok(reports)
@@ -709,7 +674,6 @@ fn resource_reports(
 pub(crate) const fn phase_name(phase: DerivedPhase) -> &'static str {
     match phase {
         DerivedPhase::Ready => "ready",
-        DerivedPhase::Verifying => "verifying",
         DerivedPhase::Initialising => "initialising",
         DerivedPhase::InitInterrupted => "init-interrupted",
         DerivedPhase::Bootstrapping => "bootstrapping",

@@ -1,17 +1,11 @@
-//! The build verb's bookkeeping (SPEC §11.2 automatic build, §11.9): the
-//! status file and recorded pid that `status`, `doctor` and the shims read,
-//! the detached supervisor that runs a build after `new` returns, and the
-//! sweep report of the run that follows every build wt launches.
+//! Hook bookkeeping shared by `after_new`, `warm`, status, and command shims.
 
 use std::path::{Path, PathBuf};
 
-use wt_core::lifecycle::BuildState;
 use wt_core::model::Target;
 use wt_core::{CoreError, ExitClass};
 
-use crate::cli::AliasRun;
-
-use super::{run, Context, Output};
+use super::Context;
 
 /// Where one build's status lives and which log it writes: one slot owned
 /// by the most recent build starter (A69).
@@ -28,91 +22,6 @@ impl Slot {
             log: root.join(".wt/logs/wt-setup.log"),
         }
     }
-}
-
-/// `wt build`: the alias run, with status bookkeeping when the tree has a
-/// recorded build slot or a supervisor named one through the environment.
-pub(crate) fn dispatch(context: &mut Context, args: AliasRun) -> Result<Output, CoreError> {
-    let slot = if args.dry_run {
-        None
-    } else {
-        slot_for(context, args.target.as_deref())
-    };
-    run_build(context, args, slot, "build").map(|(output, _)| output)
-}
-
-/// Runs `task` — the effective `build`, or the anchor's `warm` — as
-/// `wt build` does: status `running` then `ok`/`failed`, this process as
-/// the recorded owner, and the sweep of the run afterwards. Without a slot
-/// the run is a plain task run.
-pub(crate) fn run_build(
-    context: &mut Context,
-    args: AliasRun,
-    slot: Option<Slot>,
-    task: &str,
-) -> Result<(Output, Option<wt_core::report::SweepReport>), CoreError> {
-    let target = args.target.clone();
-    if let Some(slot) = &slot {
-        wt_sys::fsx::write_store(&slot.status, b"running\n")?;
-        // The recorded pid otherwise still names the finished supervisor,
-        // and a dead pid beside a `running` status reads as abandoned (A69)
-        // — for the whole foreground run.
-        record_owner(context, target.as_deref(), slot);
-        // The build's log is the slot's, so the record and the tee agree.
-        context.parent_env.insert(
-            "WT_BUILD_LOG".to_owned(),
-            slot.log.to_string_lossy().into_owned(),
-        );
-    }
-    let dry_run = args.dry_run;
-    let result = run::run(context, args.into_run(task));
-    if let Some(slot) = &slot {
-        let status = if result.is_ok() { "ok\n" } else { "failed\n" };
-        let _ = wt_sys::fsx::write_store(&slot.status, status.as_bytes());
-    }
-    if dry_run {
-        return result.map(|output| (output, None));
-    }
-    // The run swept the tree (§11.9); its notices are already on the
-    // output or, for a failed build, on the pending set.
-    let swept = context.last_sweep.take();
-    result.map(|output| (output, swept))
-}
-
-/// The slot a plain `wt build` writes: the one named by a supervisor's
-/// environment, else the tree's own when a build was recorded before.
-fn slot_for(context: &Context, target: Option<&str>) -> Option<Slot> {
-    let target = context.resolve(target).ok()?;
-    let tree = context.tree(&target).ok()?;
-    let slot = Slot::for_tree(&tree);
-    if let Some(path) = std::env::var_os("WT_BACKGROUND_BUILD_STATUS").map(PathBuf::from) {
-        return (path == slot.status).then_some(slot);
-    }
-    context.read_state(&target).ok()??.build.as_ref()?;
-    Some(slot)
-}
-
-/// Records this process as the build's owner, at the tree's current commit.
-fn record_owner(context: &Context, target: Option<&str>, slot: &Slot) {
-    let Ok(target) = context.resolve(target) else {
-        return;
-    };
-    let Ok(holder) = context.holder(target.to_string(), "build") else {
-        return;
-    };
-    let head = head_of(context, &target);
-    let _ = context.mutate_state(&target, &holder, |state| {
-        let build = state.build.get_or_insert_with(|| BuildState {
-            started: String::new(),
-            log: slot.log.to_string_lossy().into_owned(),
-            pid: 0,
-            head: None,
-        });
-        build.pid = std::process::id();
-        build.started = wt_sys::fsx::timestamp()?;
-        build.head = head.clone();
-        Ok(())
-    });
 }
 
 pub(crate) fn head_of(context: &Context, target: &Target) -> Option<String> {

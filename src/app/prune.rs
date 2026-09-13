@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use wt_core::lifecycle::{DerivedPhase, RepoState};
 use wt_core::report::{Notice, NoticeLevel, PruneData, PruneItemReport};
-use wt_core::resource::ResourceState;
+use wt_core::resource::{ResourceRecord, ResourceState};
 use wt_core::{CoreError, ExitClass};
 use wt_sys::lock;
 
@@ -13,6 +13,32 @@ use crate::cli::{Prune, Remove};
 use super::{door, executor, remove, sweep, Context, Output};
 
 pub(crate) fn run(context: &mut Context, args: Prune) -> Result<Output, CoreError> {
+    let mut idle_notices = Vec::new();
+    for tree in context.registry.trees.clone() {
+        if !matches!(
+            wt_sys::fsx::path_kind(Path::new(tree.path.as_str()))?,
+            wt_sys::fsx::PathKind::Directory
+        ) || !context.identity_ok(&tree)?
+        {
+            continue;
+        }
+        let mut entered = door::enter(
+            context,
+            Some(&super::context::target_of(&tree).to_string()),
+            "prune",
+        )?;
+        if let Err(error) = executor::refresh_all_declarations(context, &entered)
+            .and_then(|()| super::with_resources::destroy_idle_declared(context, &entered))
+        {
+            idle_notices.push(Notice {
+                level: NoticeLevel::Warn,
+                code: "RESOURCE_IDLE_DESTROY_FAILED".to_owned(),
+                subject: Some(super::context::target_of(&tree).to_string()),
+                message: error.message,
+            });
+        }
+        entered.release_gate();
+    }
     let (mut items, plan_notices) = plan(context, &args)?;
     let should_apply = if context.yes {
         true
@@ -35,7 +61,7 @@ pub(crate) fn run(context: &mut Context, args: Prune) -> Result<Output, CoreErro
             subject: None,
             message: "prune plan was reported but not applied; re-run with --yes".to_owned(),
         });
-        return Ok(output.with_notices(plan_notices));
+        return Ok(output.with_notices(idle_notices).with_notices(plan_notices));
     }
 
     let original_yes = context.yes;
@@ -47,6 +73,7 @@ pub(crate) fn run(context: &mut Context, args: Prune) -> Result<Output, CoreErro
         applied: true,
         items,
     })?
+    .with_notices(idle_notices)
     .with_notices(plan_notices)
     .with_notices(notices))
 }
@@ -221,13 +248,24 @@ fn plan(context: &Context, args: &Prune) -> Result<(Vec<PruneItemReport>, Vec<No
             },
         );
     }
-    for entry in stale_exclusive_entries(context, args.label.as_deref())? {
+    for resource in prunable_resources(context, args.label.as_deref())? {
+        planned.insert(
+            resource.display.clone(),
+            PruneItemReport {
+                target: resource.display,
+                reasons: vec![resource.reason],
+                action: "destroy-resource".to_owned(),
+                result: None,
+            },
+        );
+    }
+    for entry in stale_arena_entries(context, args.label.as_deref())? {
         planned.insert(
             entry.target.clone(),
             PruneItemReport {
                 target: entry.target,
-                reasons: vec!["stale-exclusive-holder".to_owned()],
-                action: "delete-exclusive".to_owned(),
+                reasons: vec!["stale-arena-holder".to_owned()],
+                action: "delete-arena-holder".to_owned(),
                 result: None,
             },
         );
@@ -262,7 +300,7 @@ fn apply(
                 &executor::resource_lock_path(context, &record.key),
                 &holder,
                 super::context::duration(
-                    context.settings.locks.resource.as_deref(),
+                    context.settings.waits.resource.as_deref(),
                     Duration::from_secs(120),
                 ),
             )?;
@@ -282,7 +320,7 @@ fn apply(
             &context.git_lock_path(&label.gitdir_id),
             &git_holder,
             super::context::duration(
-                context.settings.locks.repo_git.as_deref(),
+                context.settings.waits.repo_git.as_deref(),
                 Duration::from_secs(60),
             ),
         )?;
@@ -296,9 +334,13 @@ fn apply(
         return Ok(notices);
     }
 
-    let exclusive_entries = stale_exclusive_entries(context, args.label.as_deref())?
+    let arena_entries = stale_arena_entries(context, args.label.as_deref())?
         .into_iter()
         .map(|entry| (entry.target.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let prunable = prunable_resources(context, args.label.as_deref())?
+        .into_iter()
+        .map(|resource| (resource.display.clone(), resource))
         .collect::<BTreeMap<_, _>>();
     for item in items.iter_mut() {
         match item.action.as_str() {
@@ -361,13 +403,36 @@ fn apply(
                     "kb": total.kb,
                 }));
             }
-            "delete-exclusive" => {
-                let deleted = if let Some(entry) = exclusive_entries.get(&item.target) {
-                    collect_stale_exclusive(context, entry)?
+            "delete-arena-holder" => {
+                let deleted = if let Some(entry) = arena_entries.get(&item.target) {
+                    collect_stale_arena(context, entry)?
                 } else {
                     false
                 };
                 item.result = Some(serde_json::json!({"deleted": deleted}));
+            }
+            "destroy-resource" => {
+                let resource = prunable.get(&item.target).ok_or_else(|| {
+                    CoreError::new(
+                        ExitClass::State,
+                        "RESOURCE_CHANGED",
+                        format!("{} is no longer eligible for pruning", item.target),
+                        "inspect `wt prune` again",
+                    )
+                })?;
+                let arenas = executor::arena_snapshot(context, &resource.owner.label)?;
+                let result = executor::destroy_stored_resource(
+                    context,
+                    &resource.owner,
+                    resource.record.clone(),
+                    false,
+                    &arenas,
+                )?;
+                if let Some(notice) = result.notice {
+                    notices.push(notice);
+                }
+                item.result =
+                    Some(serde_json::json!({"state": result.state, "child": result.child}));
             }
             "keep" => item.result = Some(serde_json::json!({"kept": true})),
             "collect" => {}
@@ -393,7 +458,7 @@ fn apply(
             &context.git_lock_path(&record.gitdir_id),
             &holder,
             super::context::duration(
-                context.settings.locks.repo_git.as_deref(),
+                context.settings.waits.repo_git.as_deref(),
                 Duration::from_secs(60),
             ),
         )?;
@@ -443,17 +508,108 @@ fn apply(
 }
 
 #[derive(Clone)]
-struct StaleExclusiveEntry {
+struct PrunableResource {
+    display: String,
+    reason: String,
+    owner: wt_core::model::Target,
+    record: ResourceRecord,
+}
+
+fn prunable_resources(
+    context: &Context,
+    label_filter: Option<&str>,
+) -> Result<Vec<PrunableResource>, CoreError> {
+    let mut found = BTreeMap::<String, PrunableResource>::new();
+    for tree in &context.registry.trees {
+        if label_filter.is_some_and(|label| tree.label.as_str() != label) {
+            continue;
+        }
+        let owner = super::context::target_of(tree);
+        if let Some(state) = context.read_state(&owner)? {
+            for record in state.resources.into_values() {
+                insert_prunable(&mut found, owner.clone(), record);
+            }
+        }
+    }
+    for (label, repo) in &context.registry.labels {
+        if label_filter.is_some_and(|filter| label.as_str() != filter) {
+            continue;
+        }
+        let Some(owner) = context
+            .registry
+            .trees
+            .iter()
+            .find(|tree| tree.label == *label && tree.canonical)
+            .map(super::context::target_of)
+        else {
+            continue;
+        };
+        if let Some(state) = wt_sys::fsx::read_json::<RepoState>(
+            &context.home.join(wt_core::model::repo_state_path(label)),
+            "STATE_CORRUPT",
+        )? {
+            for record in state.resources.into_values() {
+                insert_prunable(&mut found, owner.clone(), record);
+            }
+        }
+        let _ = repo;
+    }
+    if label_filter.is_none() {
+        if let (Some(owner), Some(state)) = (
+            context
+                .registry
+                .trees
+                .iter()
+                .find(|tree| tree.canonical)
+                .map(super::context::target_of),
+            wt_sys::fsx::read_json::<RepoState>(
+                &context.home.join(wt_core::model::machine_state_path()),
+                "STATE_CORRUPT",
+            )?,
+        ) {
+            for record in state.resources.into_values() {
+                insert_prunable(&mut found, owner.clone(), record);
+            }
+        }
+    }
+    Ok(found.into_values().collect())
+}
+
+fn insert_prunable(
+    found: &mut BTreeMap<String, PrunableResource>,
+    owner: wt_core::model::Target,
+    record: ResourceRecord,
+) {
+    let reason = if record.undeclared {
+        Some("undeclared-resource")
+    } else {
+        None
+    };
+    let Some(reason) = reason else { return };
+    let display = format!("{}:{}:{}", owner, record.key.scope, record.key.resource);
+    found.insert(
+        display.clone(),
+        PrunableResource {
+            display,
+            reason: reason.to_owned(),
+            owner,
+            record,
+        },
+    );
+}
+
+#[derive(Clone)]
+struct StaleArenaEntry {
     target: String,
     path: PathBuf,
     lock_path: PathBuf,
     key: String,
 }
 
-fn stale_exclusive_entries(
+fn stale_arena_entries(
     context: &Context,
     label_filter: Option<&str>,
-) -> Result<Vec<StaleExclusiveEntry>, CoreError> {
+) -> Result<Vec<StaleArenaEntry>, CoreError> {
     let mut stores = context
         .registry
         .labels
@@ -478,10 +634,10 @@ fn stale_exclusive_entries(
         let Some(state) = wt_sys::fsx::read_json::<RepoState>(&path, "STATE_CORRUPT")? else {
             continue;
         };
-        for (key, holder) in state.exclusive {
+        for (key, holder) in state.arenas {
             if !arena_holder_is_live(context, &holder.holder) {
-                entries.push(StaleExclusiveEntry {
-                    target: format!("{store}:exclusive.{key}"),
+                entries.push(StaleArenaEntry {
+                    target: format!("{store}:arenas.{key}"),
                     path: path.clone(),
                     lock_path: lock_path.clone(),
                     key,
@@ -493,23 +649,20 @@ fn stale_exclusive_entries(
     Ok(entries)
 }
 
-fn collect_stale_exclusive(
-    context: &Context,
-    entry: &StaleExclusiveEntry,
-) -> Result<bool, CoreError> {
+fn collect_stale_arena(context: &Context, entry: &StaleArenaEntry) -> Result<bool, CoreError> {
     let holder = context.holder(entry.target.clone(), "prune")?;
     let _lock = lock::state_rmw(&entry.lock_path, &holder, context.rmw_wait())?;
     let Some(mut state) = wt_sys::fsx::read_json::<RepoState>(&entry.path, "STATE_CORRUPT")? else {
         return Ok(false);
     };
     let stale = state
-        .exclusive
+        .arenas
         .get(&entry.key)
         .is_some_and(|holder| !arena_holder_is_live(context, &holder.holder));
     if !stale {
         return Ok(false);
     }
-    state.exclusive.remove(&entry.key);
+    state.arenas.remove(&entry.key);
     wt_sys::fsx::write_json(&entry.path, &state)?;
     Ok(true)
 }

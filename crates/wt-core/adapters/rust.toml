@@ -5,6 +5,9 @@ default_tool = "cargo"
 [tools.cargo]
 requires = "cargo"
 sync_inputs = ["Cargo.lock", "Cargo.toml"]
+after_new = "cargo build"
+warm = "cargo build"
+sync = "cargo fetch"
 
 # The tool's build output root. A new tree starts as a snapshot of the
 # canonical checkout — its sources with their modification times, and this
@@ -14,26 +17,18 @@ sync_inputs = ["Cargo.lock", "Cargo.toml"]
 # included, since unit hashes and fingerprints are independent of the
 # checkout's path. The directory itself is never shared between trees: two
 # checkouts writing one build directory hand each other their compiled
-# workspace code. After every task wt runs, and in `wt prune`, output the
+# workspace code. During `wt prune`, output the
 # workspace will never read again is deleted from it (SPEC §11.9).
 [[tools.cargo.output]]
 path = "target"
 kind = "cargo"
 
-[tools.cargo.task.sync]
-run = "cargo fetch"
-[tools.cargo.task.build]
-run = "cargo build --all-targets"
-[tools.cargo.task.test]
-run = '''if [ "$#" -gt 0 ]; then cargo test "$@"; else cargo test; fi'''
-[tools.cargo.task.lint]
-run = "cargo clippy --all-targets -- -D warnings"
-[tools.cargo.task.fmt]
-run = "cargo fmt"
-
 [tools.cargo-nightly-fmt]
 requires = "cargo"
 sync_inputs = ["Cargo.lock", "Cargo.toml"]
+after_new = "cargo build"
+warm = "cargo build"
+sync = "cargo fetch"
 sniff = [
   { file = "rustfmt.toml", toml_key = "unstable_features" },
   { file = ".rustfmt.toml", toml_key = "unstable_features" },
@@ -47,14 +42,3 @@ sniff = [
 [[tools.cargo-nightly-fmt.output]]
 path = "target"
 kind = "cargo"
-
-[tools.cargo-nightly-fmt.task.sync]
-run = "cargo fetch"
-[tools.cargo-nightly-fmt.task.build]
-run = "cargo build --all-targets"
-[tools.cargo-nightly-fmt.task.test]
-run = '''if [ "$#" -gt 0 ]; then cargo test "$@"; else cargo test; fi'''
-[tools.cargo-nightly-fmt.task.lint]
-run = "cargo clippy --all-targets -- -D warnings"
-[tools.cargo-nightly-fmt.task.fmt]
-run = "cargo +nightly fmt"

@@ -18,13 +18,13 @@ const REPO_SPECIFIC_KEYS: &[&str] = &["WT_LABEL", "WT_REPO"];
 pub fn minimise_env(
     assembled: &EnvMap,
     declared_aliases: &[String],
-    task_env_keys: &[String],
+    recipe_env_keys: &[String],
     snapshot_env: &[String],
     tied_to: TiedTo,
 ) -> EnvMap {
     let explicit: BTreeSet<&str> = declared_aliases
         .iter()
-        .chain(task_env_keys)
+        .chain(recipe_env_keys)
         .chain(snapshot_env)
         .map(String::as_str)
         .collect();
@@ -107,22 +107,22 @@ mod tests {
             ("WT_ACTIVATION".to_owned(), "secret-marker".to_owned()),
             ("PATH".to_owned(), "/tree/bin:/usr/bin".to_owned()),
             ("ALIAS".to_owned(), "alias".to_owned()),
-            ("TASK_KEY".to_owned(), "task".to_owned()),
+            ("RECIPE_KEY".to_owned(), "recipe".to_owned()),
             ("PARENT_KEEP".to_owned(), "keep".to_owned()),
             ("PARENT_DROP".to_owned(), "drop".to_owned()),
         ]);
         let aliases = ["ALIAS".to_owned()];
-        let task = ["TASK_KEY".to_owned()];
+        let recipe = ["RECIPE_KEY".to_owned()];
         let requested = ["PARENT_KEEP".to_owned(), "WT_ACTIVATION".to_owned()];
 
-        let tree = minimise_env(&assembled, &aliases, &task, &requested, TiedTo::Tree);
+        let tree = minimise_env(&assembled, &aliases, &recipe, &requested, TiedTo::Tree);
         assert_eq!(
             tree.keys().map(String::as_str).collect::<Vec<_>>(),
             [
                 "ALIAS",
                 "PARENT_KEEP",
                 "PATH",
-                "TASK_KEY",
+                "RECIPE_KEY",
                 "WT_BRANCH",
                 "WT_LABEL",
                 "WT_REPO",
@@ -132,16 +132,16 @@ mod tests {
         assert!(!tree.contains_key("PARENT_DROP"));
         assert!(!tree.contains_key("WT_ACTIVATION"));
 
-        let repo = minimise_env(&assembled, &aliases, &task, &requested, TiedTo::Repo);
+        let repo = minimise_env(&assembled, &aliases, &recipe, &requested, TiedTo::Repo);
         assert_eq!(
             repo.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["ALIAS", "PARENT_KEEP", "TASK_KEY", "WT_LABEL", "WT_REPO"]
+            ["ALIAS", "PARENT_KEEP", "RECIPE_KEY", "WT_LABEL", "WT_REPO"]
         );
 
-        let machine = minimise_env(&assembled, &aliases, &task, &requested, TiedTo::Machine);
+        let machine = minimise_env(&assembled, &aliases, &recipe, &requested, TiedTo::Machine);
         assert_eq!(
             machine.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["ALIAS", "PARENT_KEEP", "TASK_KEY"]
+            ["ALIAS", "PARENT_KEEP", "RECIPE_KEY"]
         );
     }
 

@@ -1,7 +1,6 @@
 ---
 source: tests/human_transcripts.rs
-expression: "normalize(h, &output.stdout)"
+expression: normalized
 ---
-Synced repo/work
-  steps   1/1 passed
+repo/work is already in sync
   inputs  README.md

@@ -43,13 +43,6 @@ pub struct SyncState {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct VerifyState {
-    pub at: String,
-    pub ok: bool,
-    pub log: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BuildState {
     pub started: String,
     pub log: String,
@@ -87,9 +80,7 @@ pub struct TreeState {
     pub name: String,
     pub phase: StatePhase,
     pub op: Option<Operation>,
-    pub verify_pending: bool,
     pub sync: Option<SyncState>,
-    pub verify: Option<VerifyState>,
     #[serde(default)]
     pub build: Option<BuildState>,
     pub resources: BTreeMap<String, ResourceRecord>,
@@ -102,12 +93,12 @@ pub struct RepoState {
     pub schema: u8,
     pub label: Option<Label>,
     pub resources: BTreeMap<String, ResourceRecord>,
-    #[serde(default)]
-    pub exclusive: BTreeMap<String, ExclusiveHolder>,
+    #[serde(default, rename = "arenas", alias = "exclusive")]
+    pub arenas: BTreeMap<String, ArenaHolder>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ExclusiveHolder {
+pub struct ArenaHolder {
     pub holder: String,
     pub since: String,
 }
@@ -116,7 +107,6 @@ pub struct ExclusiveHolder {
 pub struct StateView {
     pub phase: StatePhase,
     pub op: Option<OpVerb>,
-    pub verify_pending: bool,
     pub has_records: bool,
 }
 
@@ -134,7 +124,6 @@ pub struct TreeObs {
 #[serde(rename_all = "kebab-case")]
 pub enum DerivedPhase {
     Ready,
-    Verifying,
     Initialising,
     InitInterrupted,
     Bootstrapping,
@@ -205,10 +194,7 @@ pub fn derive_phase(obs: &TreeObs) -> PhaseDecision {
         return result(DerivedPhase::Incomplete, Some("TREE_INCOMPLETE"));
     };
     match state.phase {
-        StatePhase::Ready if !state.verify_pending => result(DerivedPhase::Ready, None),
-        // Ready trees never consult lock liveness. A shared door lock must not
-        // make a pending verification appear to be actively running.
-        StatePhase::Ready => result(DerivedPhase::Ready, Some("VERIFY_PENDING")),
+        StatePhase::Ready => result(DerivedPhase::Ready, None),
         StatePhase::Initialising if obs.lock_held => result(DerivedPhase::Initialising, None),
         StatePhase::Initialising => result(DerivedPhase::InitInterrupted, Some("INIT_INTERRUPTED")),
         StatePhase::Bootstrapping if obs.lock_held => result(DerivedPhase::Bootstrapping, None),
@@ -297,7 +283,6 @@ mod tests {
             state: state.map(|phase| StateView {
                 phase,
                 op: None,
-                verify_pending: false,
                 has_records: false,
             }),
             lock_held: false,
@@ -337,15 +322,6 @@ mod tests {
             observation.lock_held = held;
             assert_eq!(derive_phase(&observation).phase, expected);
         }
-
-        let mut verifying = obs(Some(StatePhase::Ready));
-        verifying.state.as_mut().unwrap().verify_pending = true;
-        verifying.lock_held = true;
-        assert_eq!(derive_phase(&verifying).phase, DerivedPhase::Ready);
-        assert_eq!(derive_phase(&verifying).finding, Some("VERIFY_PENDING"));
-        verifying.lock_held = false;
-        assert_eq!(derive_phase(&verifying).phase, DerivedPhase::Ready);
-        assert_eq!(derive_phase(&verifying).finding, Some("VERIFY_PENDING"));
 
         let mut creating = obs(Some(StatePhase::Bootstrapping));
         creating.dir_exists = false;
@@ -451,4 +427,30 @@ mod tests {
             Decision::Start
         );
     }
+}
+#[test]
+fn current_repo_state_migrates_without_losing_destroy_snapshot_or_arena_holder() {
+    let mut state: RepoState = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/current-v1-repo-state.json"
+    ))
+    .unwrap();
+    assert_eq!(state.schema, 1);
+    assert_eq!(
+        state.resources["database"].instance.as_ref().unwrap().env["DATABASE_URL"],
+        "frozen"
+    );
+    assert_eq!(state.arenas["database"].holder, "repo/work");
+    assert_eq!(
+        state.resources["database"].hold,
+        crate::resource::ResourceHold::Free
+    );
+    state.schema = 2;
+    let migrated = serde_json::to_value(&state).unwrap();
+    assert_eq!(migrated["schema"], 2);
+    assert!(migrated.get("arenas").is_some());
+    assert!(migrated.get("exclusive").is_none());
+    assert_eq!(
+        migrated["resources"]["database"]["instance"]["env"]["DATABASE_URL"],
+        "frozen"
+    );
 }

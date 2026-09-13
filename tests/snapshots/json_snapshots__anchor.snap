@@ -5,7 +5,6 @@ expression: "normalize(value, &h.root)"
 {
   "command": "anchor",
   "data": {
-    "build": "ok",
     "fetched": true,
     "head": "<head>",
     "label": "repo",
@@ -16,7 +15,8 @@ expression: "normalize(value, &h.root)"
       "incremental": 0,
       "kb": 0,
       "units": 0
-    }
+    },
+    "warm": "ok"
   },
   "error": null,
   "notices": [],

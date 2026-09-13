@@ -1391,7 +1391,7 @@ fn apply_one(
             } else {
                 Err(CoreError::new(
                     ExitClass::State,
-                    "TASK_FAILED",
+                    "COMMAND_FAILED",
                     format!("{command} exited {}", status.code.unwrap_or(-1)),
                     "install tmux by hand, then re-run `wt setup`",
                 ))

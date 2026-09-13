@@ -14,9 +14,10 @@ mod env;
 mod exec;
 mod executor;
 mod forget;
+mod hooks;
 mod human;
+mod leases;
 mod list;
-mod locks;
 mod meta;
 mod new;
 mod open;
@@ -25,16 +26,15 @@ mod prune;
 mod refresh;
 mod register;
 mod remove;
-mod run;
 mod setup;
 mod shell;
 mod shell_init;
 mod status;
 mod sweep;
 mod sync;
-mod tasks;
 mod unregister;
 mod which;
+mod with_resources;
 
 use std::io::Write;
 
@@ -57,8 +57,8 @@ pub(crate) struct Output {
 
 pub(crate) enum AfterRender {
     Attach { session: String },
-    NewSession { target: String, build: bool },
-    Build { target: String },
+    NewSession { target: String, after_new: bool },
+    AfterNew { target: String },
 }
 
 impl Output {
@@ -140,16 +140,16 @@ fn run(cli: Cli) -> i32 {
     match result {
         Ok(mut output) => {
             if json {
-                if let Some(AfterRender::Build { target }) = output.after_render.take() {
-                    match open::start_build(
+                if let Some(AfterRender::AfterNew { target }) = output.after_render.take() {
+                    match open::start_after_new(
                         opened_context
                             .as_mut()
                             .expect("deferred actions require an open context"),
                         &target,
                     ) {
-                        Ok((build, notice)) => {
-                            output.data["build"] =
-                                serde_json::to_value(build).expect("build state always serializes");
+                        Ok((after_new, notice)) => {
+                            output.data["after_new"] = serde_json::to_value(after_new)
+                                .expect("hook state always serializes");
                             output = output.with_notices(notice);
                         }
                         Err(error) => output = output.with_failure(error),
@@ -198,27 +198,31 @@ fn run(cli: Cli) -> i32 {
                     .as_mut()
                     .expect("deferred actions require an open context");
                 match action {
-                    AfterRender::NewSession { target, build } => {
-                        if let Err(error) = open::open_new_after_summary(context, &target, build) {
+                    AfterRender::NewSession { target, after_new } => {
+                        if let Err(error) =
+                            open::open_new_after_summary(context, &target, after_new)
+                        {
                             emit_session_warning(&target, &error);
                         }
                     }
-                    AfterRender::Build { target } => match open::start_build(context, &target) {
-                        Ok((build, notice)) => {
-                            println!("build started  {}", build.log);
-                            if let Some(notice) = notice {
-                                let _ = writeln!(
-                                    std::io::stderr(),
-                                    "wt: {} — {}",
-                                    notice.code,
-                                    notice.message
-                                );
+                    AfterRender::AfterNew { target } => {
+                        match open::start_after_new(context, &target) {
+                            Ok((after_new, notice)) => {
+                                println!("after_new started  {}", after_new.log);
+                                if let Some(notice) = notice {
+                                    let _ = writeln!(
+                                        std::io::stderr(),
+                                        "wt: {} — {}",
+                                        notice.code,
+                                        notice.message
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                return render_error(&command, json, color, error, Vec::new());
                             }
                         }
-                        Err(error) => {
-                            return render_error(&command, json, color, error, Vec::new())
-                        }
-                    },
+                    }
                     AfterRender::Attach { session } => {
                         if let Err(error) = open::attach(context, &session) {
                             return render_error(&command, json, color, error, Vec::new());
@@ -270,10 +274,7 @@ fn render_error_with_visibility(
     stderr_tty: bool,
     verbose: bool,
 ) -> i32 {
-    let exit = if !json
-        && matches!(command, "run" | "test" | "lint" | "fmt" | "build")
-        && error.code.0 == "TASK_FAILED"
-    {
+    let exit = if !json && command == "with" && error.code.0 == "WITH_FAILED" {
         error.details["child"]["code"]
             .as_i64()
             .and_then(|code| i32::try_from(code).ok())
@@ -315,7 +316,14 @@ fn render_error_with_visibility(
 }
 
 fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
+    if !matches!(
+        &cli.command,
+        Command::Hook(_) | Command::Doctor(_) | Command::Prune(_)
+    ) {
+        let _ = with_resources::spawn_idle_cleanup(context);
+    }
     match cli.command {
+        Command::Hook(args) => hooks::run(context, args),
         Command::Setup(args) => setup::run(context, args),
         Command::Register(args) => register::run(context, args),
         Command::Unregister(args) => unregister::run(context, args),
@@ -326,12 +334,8 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Status(args) => status::run(context, args),
         Command::Meta(args) => meta::run(context, args),
         Command::Path(args) => path::run(context, args),
-        Command::Run(args) => run::run(context, args),
+        Command::With(args) => with_resources::run(context, args),
         Command::Sync(args) => sync::run(context, args),
-        Command::Test(args) => run::run(context, args.into_run("test")),
-        Command::Lint(args) => run::run(context, args.into_run("lint")),
-        Command::Fmt(args) => run::run(context, args.into_run("fmt")),
-        Command::Build(args) => build::dispatch(context, args),
         Command::Anchor(args) => anchor::run(context, args),
         Command::Exec(args) => exec::run(context, args),
         Command::Shell(args) => shell::run(context, args),
@@ -345,10 +349,9 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Destroy(args) => destroy::run(context, args),
         Command::Refresh(args) => refresh::run(context, args),
         Command::Doctor(args) => doctor::run(context, args),
-        Command::Tasks(args) => tasks::run(context, args),
         Command::Config(args) => config::run(context, args),
         Command::Which(args) => which::run(context, args),
-        Command::Locks(args) => locks::run(context, args),
+        Command::Leases(args) => leases::run(context, args),
         Command::ShellInit(args) => shell_init::run(context, args),
         Command::Completions(args) => completions::run(context, args),
     }

@@ -12,6 +12,7 @@ pub const FUNCTIONS: &[&str] = &[
     "name_snake",
     "name_short",
     "target",
+    "index",
 ];
 
 /// The functions a `branch` template may call. A branch is chosen before the

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{Command, Exclusive, Task, TiedTo},
+    config::{Arena, Command, Recipe, TiedTo},
     error::CoreError,
     model::{EnvMap, RelDir},
     resource::ResourceKey,
@@ -27,15 +27,15 @@ pub struct Node {
     pub origin: Origin,
     pub cwd: RelDir,
     pub needs: Vec<String>,
-    pub run: Option<Command>,
+    pub command: Option<Command>,
     pub exists: Option<Command>,
     pub destroy: Option<Command>,
     pub template: bool,
     pub tied_to: Option<TiedTo>,
-    pub exclusive: Option<Exclusive>,
+    pub arena: Option<Arena>,
+    pub capacity: Option<u16>,
     pub name: Option<String>,
     pub env: EnvMap,
-    pub lock: Option<String>,
     pub timeout: Option<String>,
     pub ready_within: Option<String>,
     pub description: Option<String>,
@@ -45,28 +45,28 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn from_task(id: String, scope: RelDir, origin: Origin, task: &Task) -> Self {
-        let cwd = task.cwd.clone().unwrap_or_else(|| scope.clone());
+    pub fn from_recipe(id: String, scope: RelDir, origin: Origin, recipe: &Recipe) -> Self {
+        let cwd = recipe.cwd.clone().unwrap_or_else(|| scope.clone());
         Self {
             id,
             scope,
             origin,
             cwd,
-            needs: task.needs.clone().unwrap_or_default(),
-            run: task.run.clone(),
-            exists: task.exists.clone(),
-            destroy: task.destroy.clone(),
-            template: task.template,
-            tied_to: task.tied_to,
-            exclusive: task.exclusive,
-            name: task.name.clone(),
-            env: task.env.clone().into_iter().collect(),
-            lock: task.lock.clone(),
-            timeout: task.timeout.clone(),
-            ready_within: task.ready_within.clone(),
-            description: task.description.clone(),
-            snapshot_env: task.snapshot_env.clone(),
-            sys_locks: task.sys_locks.clone(),
+            needs: recipe.needs.clone().unwrap_or_default(),
+            command: recipe.command.clone(),
+            exists: recipe.exists.clone(),
+            destroy: recipe.destroy.clone(),
+            template: recipe.template,
+            tied_to: recipe.tied_to,
+            arena: recipe.arena,
+            capacity: recipe.capacity,
+            name: recipe.name.clone(),
+            env: recipe.env.clone().into_iter().collect(),
+            timeout: recipe.timeout.clone(),
+            ready_within: recipe.ready_within.clone(),
+            description: recipe.description.clone(),
+            snapshot_env: recipe.snapshot_env.clone(),
+            sys_locks: recipe.sys_locks.clone(),
             resource: None,
         }
     }
@@ -77,18 +77,18 @@ impl Node {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TaskPlan {
+pub struct ResourcePlan {
     pub root: String,
     pub nodes: Vec<Node>,
 }
 
-pub fn plan(root: &str, catalog: &BTreeMap<String, Node>) -> Result<TaskPlan, CoreError> {
+pub fn plan(root: &str, catalog: &BTreeMap<String, Node>) -> Result<ResourcePlan, CoreError> {
     if !catalog.contains_key(root) {
         return Err(CoreError::new(
             ExitClass::NotFound,
             "NOT_FOUND",
-            format!("task `{root}` was not found"),
-            "run `wt tasks` to list tasks",
+            format!("resource `{root}` was not found"),
+            "run `wt config` to inspect declared resources",
         ));
     }
     let mut required = BTreeSet::new();
@@ -104,14 +104,14 @@ pub fn plan(root: &str, catalog: &BTreeMap<String, Node>) -> Result<TaskPlan, Co
             .collect();
         ready.sort_by_key(|node| node.order_key());
         if ready.is_empty() {
-            return Err(invalid_graph("task graph contains a cycle"));
+            return Err(invalid_graph("resource dependency graph contains a cycle"));
         }
         for node in ready {
             emitted.insert(node.id.clone());
             nodes.push(node.clone());
         }
     }
-    Ok(TaskPlan {
+    Ok(ResourcePlan {
         root: root.to_owned(),
         nodes,
     })
@@ -127,11 +127,11 @@ fn collect(
         return Ok(());
     }
     if !visiting.insert(id.to_owned()) {
-        return Err(invalid_graph("task graph contains a cycle"));
+        return Err(invalid_graph("resource dependency graph contains a cycle"));
     }
     let node = catalog
         .get(id)
-        .ok_or_else(|| invalid_graph(format!("task `{id}` has an unresolved dependency")))?;
+        .ok_or_else(|| invalid_graph(format!("resource `{id}` has an unresolved dependency")))?;
     for need in &node.needs {
         collect(need, catalog, required, visiting)?;
     }
@@ -145,7 +145,7 @@ fn invalid_graph(message: impl Into<String>) -> CoreError {
         ExitClass::State,
         "CONFIG_INVALID",
         message,
-        "fix task needs so every dependency exists and the graph is acyclic",
+        "fix resource needs so every dependency exists and the graph is acyclic",
     )
 }
 
@@ -161,9 +161,8 @@ pub enum LockLevel {
     Tree = 1,
     RepoGit = 2,
     Resource = 3,
-    Named = 4,
-    RegistryRmw = 5,
-    StateRmw = 6,
+    RegistryRmw = 4,
+    StateRmw = 5,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -172,7 +171,6 @@ pub enum PlannedLock {
     TreeShared,
     RepoGit,
     Resource { key: ResourceKey },
-    Named { name: String },
 }
 
 impl PlannedLock {
@@ -181,7 +179,6 @@ impl PlannedLock {
             Self::TreeShared => LockLevel::Tree,
             Self::RepoGit => LockLevel::RepoGit,
             Self::Resource { .. } => LockLevel::Resource,
-            Self::Named { .. } => LockLevel::Named,
         }
     }
 }
@@ -196,9 +193,6 @@ pub fn lock_plan(node: &Node, held: HeldLocks) -> Vec<PlannedLock> {
     }
     if let Some(key) = &node.resource {
         locks.push(PlannedLock::Resource { key: key.clone() });
-    }
-    if let Some(name) = &node.lock {
-        locks.push(PlannedLock::Named { name: name.clone() });
     }
     locks
 }
@@ -215,15 +209,15 @@ mod tests {
             origin: Origin::Repo,
             cwd: RelDir::new(scope).unwrap(),
             needs: needs.iter().map(|value| (*value).to_owned()).collect(),
-            run: Some(Command::Shell("true".to_owned())),
+            command: Some(Command::Shell("true".to_owned())),
             exists: None,
             destroy: None,
             template: true,
             tied_to: None,
-            exclusive: None,
+            arena: None,
+            capacity: None,
             name: None,
             env: EnvMap::new(),
-            lock: None,
             timeout: None,
             ready_within: None,
             description: None,
@@ -256,31 +250,24 @@ mod tests {
                 LockLevel::Tree as u8,
                 LockLevel::RepoGit as u8,
                 LockLevel::Resource as u8,
-                LockLevel::Named as u8,
                 LockLevel::RegistryRmw as u8,
                 LockLevel::StateRmw as u8,
             ],
-            [1, 2, 3, 4, 5, 6]
+            [1, 2, 3, 4, 5]
         );
         let mut node = node("db", ".", &[]);
         node.sys_locks.push("RepoGit".to_owned());
-        node.lock = Some("serial".to_owned());
         node.resource = Some(ResourceKey {
             label: Some(Label::new("repo").unwrap()),
             tied_to: TiedTo::Tree,
             name: Some("work".to_owned()),
             scope: RelDir::new(".").unwrap(),
-            task: "db".to_owned(),
+            resource: "db".to_owned(),
         });
         let locks = lock_plan(&node, HeldLocks::default());
         assert_eq!(
             locks.iter().map(PlannedLock::level).collect::<Vec<_>>(),
-            [
-                LockLevel::Tree,
-                LockLevel::RepoGit,
-                LockLevel::Resource,
-                LockLevel::Named
-            ]
+            [LockLevel::Tree, LockLevel::RepoGit, LockLevel::Resource]
         );
         assert_eq!(
             lock_plan(
@@ -293,7 +280,7 @@ mod tests {
             .iter()
             .map(PlannedLock::level)
             .collect::<Vec<_>>(),
-            [LockLevel::Resource, LockLevel::Named]
+            [LockLevel::Resource]
         );
     }
 

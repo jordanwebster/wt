@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use wt_core::from_ref::{pr_origin_branch, PullRequestHead};
-use wt_core::lifecycle::{Materialized, MaterializedKind, StatePhase, SyncState, VerifyState};
+use wt_core::lifecycle::{Materialized, MaterializedKind, StatePhase, SyncState};
 use wt_core::model::{AbsPath, SourceKind, Target, TreeRec, TreeSource};
-use wt_core::report::{NewData, NewVerifyReport};
+use wt_core::report::NewData;
 use wt_core::report::{Notice, NoticeLevel};
 use wt_core::{CoreError, ExitClass};
 use wt_sys::lock::{self, Mode};
@@ -16,7 +16,6 @@ use super::{door, executor, list, open, register, AfterRender, Context, Output};
 
 struct NewFinish {
     sync: Option<Vec<wt_core::report::StepReport>>,
-    verify: Option<NewVerifyReport>,
     notices: Vec<Notice>,
 }
 
@@ -26,17 +25,21 @@ pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError>
     let target = args.target.clone();
     let no_open = args.no_open;
     let no_attach = args.no_attach;
-    let no_build = args.no_build;
+    let no_after_new = args.no_after_new;
     let mut output = create_tree(context, args, meta)?;
     if let Some(notice) = backend_notice {
         output = output.with_notices([notice]);
     }
+    let after_new = !no_after_new && has_after_new_hook(context, &target)?;
     if no_open {
-        return Ok(output);
+        return Ok(if after_new {
+            output.after_render(AfterRender::AfterNew { target })
+        } else {
+            output
+        });
     }
-    let build = !no_build && has_build_task(context, &target)?;
     if open::should_attach(context, no_attach) {
-        return Ok(output.after_render(AfterRender::NewSession { target, build }));
+        return Ok(output.after_render(AfterRender::NewSession { target, after_new }));
     }
     match open::provision_new(context, &target) {
         // Creation already carries the same door notice set. Session
@@ -55,17 +58,17 @@ pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError>
             .agent
             .map_or(serde_json::Value::Null, serde_json::Value::String);
     }
-    if build {
-        output = output.after_render(AfterRender::Build { target });
+    if after_new {
+        output = output.after_render(AfterRender::AfterNew { target });
     }
     Ok(output)
 }
 
-fn has_build_task(context: &Context, target: &str) -> Result<bool, CoreError> {
+fn has_after_new_hook(context: &Context, target: &str) -> Result<bool, CoreError> {
     let target = context.resolve(Some(target))?;
     let tree = context.tree(&target)?;
     let config = context.load_config(&tree)?;
-    Ok(context.task_catalog(&tree, &config)?.contains_key("build"))
+    Ok(config.hooks.after_new.is_some())
 }
 
 fn create_tree(
@@ -174,7 +177,6 @@ fn create_tree(
             phase,
             source_identical: existing.source.branch.as_deref() == Some(&requested_branch)
                 && (requested_start.is_none() || existing.source.start == requested_start),
-            verify_pending: state.as_ref().is_some_and(|state| state.verify_pending),
             has_resource_records: state
                 .as_ref()
                 .is_some_and(|state| !state.resources.is_empty()),
@@ -182,17 +184,13 @@ fn create_tree(
         let decision = wt_core::new::decide(
             Some(&view),
             &wt_core::new::Request {
-                verify: args.verify,
                 name_shadows_label: false,
                 path_occupied: false,
             },
         );
         match decision {
             wt_core::new::Decision::AlreadyReady => {
-                return ready_report(context, existing, false, false, None, None, Vec::new())
-            }
-            wt_core::new::Decision::Verify { resumed } => {
-                return verify_ready(context, existing, args, resumed)
+                return ready_report(context, existing, false, false, None, Vec::new())
             }
             wt_core::new::Decision::FreshIncarnation { .. } => {
                 return fresh_incarnation(context, existing, canonical, args, meta, head)
@@ -220,7 +218,6 @@ fn create_tree(
     if let wt_core::new::Decision::Refuse { code, remedy } = wt_core::new::decide(
         None,
         &wt_core::new::Request {
-            verify: args.verify,
             name_shadows_label: false,
             path_occupied,
         },
@@ -319,7 +316,6 @@ fn create(
         true,
         false,
         finished.sync,
-        finished.verify,
         source_notices(notice, finished.notices),
     )
 }
@@ -366,21 +362,12 @@ fn resume(
             false,
             true,
             finished.sync,
-            finished.verify,
             source_notices(notice, finished.notices),
         );
     }
     let finished = finish_under_lock(context, &tree, &canonical, &initial, &args, &holder, start)?;
     drop(token);
-    ready_report(
-        context,
-        tree,
-        false,
-        true,
-        finished.sync,
-        finished.verify,
-        finished.notices,
-    )
+    ready_report(context, tree, false, true, finished.sync, finished.notices)
 }
 
 fn add_worktree(
@@ -397,7 +384,7 @@ fn add_worktree(
         &context.git_lock_path(&context.registry.labels[&tree.label].gitdir_id),
         &holder,
         super::context::duration(
-            context.settings.locks.repo_git.as_deref(),
+            context.settings.waits.repo_git.as_deref(),
             std::time::Duration::from_secs(60),
         ),
     )?;
@@ -841,7 +828,6 @@ fn finish_under_lock(
             context,
             &door,
             &plan,
-            None,
             executor::ExecuteOptions::DEFAULT,
         ) {
             Ok(execution) => execution,
@@ -885,21 +871,11 @@ fn finish_under_lock(
     context.mutate_state(&target, holder, |state| {
         state.phase = StatePhase::Ready;
         state.op = None;
-        state.verify_pending = args.verify;
         state.last_error = None;
         Ok(())
     })?;
     finish.finish();
-    let verify = if args.verify {
-        Some(run_verify(context, &door, holder, &mut notices)?)
-    } else {
-        None
-    };
-    Ok(NewFinish {
-        sync,
-        verify,
-        notices,
-    })
+    Ok(NewFinish { sync, notices })
 }
 
 fn mark_new_failed(
@@ -914,89 +890,6 @@ fn mark_new_failed(
         state.last_error = Some(error.to_string());
         Ok(())
     })
-}
-
-fn run_verify(
-    context: &mut Context,
-    door: &door::Door,
-    holder: &wt_sys::lock::Holder,
-    notices: &mut Vec<Notice>,
-) -> Result<NewVerifyReport, CoreError> {
-    let target = door.target.clone();
-    let result = executor::plan(context, door, "verify").and_then(|plan| {
-        executor::execute_plan(
-            context,
-            door,
-            &plan,
-            None,
-            executor::ExecuteOptions::DEFAULT,
-        )
-    });
-    match result {
-        Ok(execution) => {
-            notices.extend(execution.notices);
-            context.mutate_state(&target, holder, |state| {
-                state.verify = Some(VerifyState {
-                    at: wt_sys::fsx::timestamp()?,
-                    ok: true,
-                    log: execution.data.log.clone(),
-                });
-                state.verify_pending = false;
-                Ok(())
-            })?;
-            Ok(NewVerifyReport {
-                ok: true,
-                steps: execution.data.steps,
-            })
-        }
-        Err(error) => {
-            context.mutate_state(&target, holder, |state| {
-                state.verify = Some(VerifyState {
-                    at: wt_sys::fsx::timestamp()?,
-                    ok: false,
-                    log: None,
-                });
-                state.verify_pending = false;
-                state.phase = StatePhase::Ready;
-                state.op = None;
-                state.last_error = Some(error.to_string());
-                Ok(())
-            })?;
-            Err(CoreError::new(
-                ExitClass::ChildFailed,
-                "VERIFY_FAILED",
-                format!("verification failed: {}", error.message),
-                "fix the verify task and run `wt new --verify` again",
-            )
-            .with_details(error.details))
-        }
-    }
-}
-
-fn verify_ready(
-    context: &mut Context,
-    tree: TreeRec,
-    _args: New,
-    resumed: bool,
-) -> Result<Output, CoreError> {
-    let target = target_of(&tree);
-    let holder = context.holder(target.to_string(), "new")?;
-    let token = lock::tree(
-        &context.tree_lock_path(&target),
-        Mode::Exclusive,
-        &holder,
-        context.tree_wait(None),
-    )?;
-    context.require_identity(&tree)?;
-    context.mutate_state(&target, &holder, |state| {
-        state.verify_pending = true;
-        Ok(())
-    })?;
-    let door = door::enter_held(context, tree.clone(), "new", true)?;
-    let mut notices = door.notices.clone();
-    let verify = run_verify(context, &door, &holder, &mut notices)?;
-    drop(token);
-    ready_report(context, tree, false, resumed, None, Some(verify), notices)
 }
 
 fn fresh_incarnation(
@@ -1050,7 +943,6 @@ fn fresh_incarnation(
         true,
         false,
         finished.sync,
-        finished.verify,
         source_notices(source_notice, finished.notices),
     )
 }
@@ -1214,7 +1106,6 @@ fn ready_report(
     created: bool,
     resumed: bool,
     sync: Option<Vec<wt_core::report::StepReport>>,
-    verify: Option<NewVerifyReport>,
     notices: Vec<Notice>,
 ) -> Result<Output, CoreError> {
     context.reload_registry()?;
@@ -1223,8 +1114,7 @@ fn ready_report(
         created,
         resumed,
         sync,
-        verify,
-        build: None,
+        after_new: None,
     })?
     .with_notices(notices))
 }

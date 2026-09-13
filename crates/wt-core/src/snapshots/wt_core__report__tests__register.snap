@@ -46,11 +46,7 @@ expression: envelope
         "changed": [],
         "drift": []
       },
-      "verify": {
-        "ok": true,
-        "at": "TIME"
-      },
-      "build": null,
+      "after_new": null,
       "session": "no",
       "session_name": "session",
       "agent": null,
@@ -60,7 +56,7 @@ expression: envelope
       "resources": [
         {
           "scope": ".",
-          "task": "db",
+          "resource": "db",
           "tied_to": "tree",
           "name": "repo_db",
           "state": "declared",
@@ -91,13 +87,10 @@ expression: envelope
       "build_kb": null
     },
     "declared": {
-      "tasks": [
-        "test"
-      ],
       "resources": [
         {
           "scope": ".",
-          "task": "db",
+          "resource": "db",
           "tied_to": "tree",
           "snapshot_keys": [
             "PATH",

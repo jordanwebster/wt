@@ -13,12 +13,12 @@ expression: envelope
     "target": "repo/work",
     "entries": [
       {
-        "key": "task.test",
+        "key": "resource.cache",
         "scope": ".",
         "layer": "repo",
         "value": {
           "needs": [
-            "build"
+            "database"
           ]
         }
       }

@@ -13,8 +13,7 @@ expression: "normalize(value, &h.root)"
       "env": [],
       "files": [],
       "ports": [],
-      "resources": [],
-      "tasks": []
+      "resources": []
     },
     "gitdir_id": "<gitdir_id>",
     "hub": "$ROOT/clone/hub.git",
@@ -23,10 +22,10 @@ expression: "normalize(value, &h.root)"
     "registered": true,
     "resumed": false,
     "tree": {
+      "after_new": null,
       "agent": null,
       "behind_default": 0,
       "branch": null,
-      "build": null,
       "build_kb": null,
       "canonical": true,
       "detached_sha": "<detached_sha>",
@@ -58,8 +57,7 @@ expression: "normalize(value, &h.root)"
       },
       "target": "clone",
       "tree_id": "<tree_id>",
-      "upstream": null,
-      "verify": null
+      "upstream": null
     },
     "url": "$ROOT/repos/source"
   },

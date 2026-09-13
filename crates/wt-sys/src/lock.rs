@@ -18,11 +18,12 @@ pub enum Level {
     /// build, so it sits below every other level.
     Anchor = 0,
     Tree = 1,
-    RepoGit = 2,
-    Resource = 3,
-    Named = 4,
-    RegistryRmw = 5,
-    StateRmw = 6,
+    Lease = 2,
+    RepoGit = 3,
+    Resource = 4,
+    Named = 5,
+    RegistryRmw = 6,
+    StateRmw = 7,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,6 +35,8 @@ pub enum Mode {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Holder {
     pub pid: u32,
+    #[serde(default)]
+    pub process_start: String,
     pub target: String,
     pub verb: String,
     pub since: String,
@@ -45,11 +48,14 @@ impl Holder {
         verb: impl Into<String>,
         since: impl Into<String>,
     ) -> Self {
+        let since = since.into();
+        let pid = std::process::id();
         Self {
-            pid: std::process::id(),
+            pid,
+            process_start: crate::proc::process_start(pid).unwrap_or_else(|| since.clone()),
             target: target.into(),
             verb: verb.into(),
-            since: since.into(),
+            since,
         }
     }
 }
@@ -70,6 +76,10 @@ impl Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
+        if self.level == Level::Lease {
+            let _ = self.file.set_len(0);
+            let _ = self.file.sync_data();
+        }
         // SAFETY: the file owns a valid open descriptor; flock only changes
         // its advisory lock and does not transfer ownership.
         unsafe {
@@ -118,6 +128,15 @@ pub struct NamedToken(Guard);
 impl NamedToken {
     pub fn raw_fd(&self) -> RawFd {
         self.0.raw_fd()
+    }
+
+    pub fn slot(&self) -> u16 {
+        self.0
+            .path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .and_then(|value| value.parse().ok())
+            .expect("named slot paths end in a numeric file stem")
     }
 }
 
@@ -206,26 +225,53 @@ pub fn resource(path: &Path, holder: &Holder, wait: Duration) -> Result<Resource
     acquire(path, Level::Resource, Mode::Exclusive, holder, wait).map(ResourceToken)
 }
 
-/// Acquires one slot of a level-4 named task lock.
+/// Acquires one slot of a level-4 lease pool.
 pub fn named(
     dir: &Path,
     slots: u16,
     holder: &Holder,
     wait: Option<Duration>,
 ) -> std::result::Result<NamedToken, NamedAcquireError> {
+    named_at_level(dir, slots, holder, wait, Level::Named, None)
+}
+
+/// Acquires one or more sorted pool leases before resource lifecycle locks.
+pub fn lease(
+    dir: &Path,
+    slots: u16,
+    holder: &Holder,
+    wait: Option<Duration>,
+) -> std::result::Result<NamedToken, NamedAcquireError> {
+    named_at_level(dir, slots, holder, wait, Level::Lease, None)
+}
+
+pub fn lease_ordered(
+    dir: &Path,
+    slots: u16,
+    order: &[u16],
+    holder: &Holder,
+    wait: Option<Duration>,
+) -> std::result::Result<NamedToken, NamedAcquireError> {
+    named_at_level(dir, slots, holder, wait, Level::Lease, Some(order))
+}
+
+fn named_at_level(
+    dir: &Path,
+    slots: u16,
+    holder: &Holder,
+    wait: Option<Duration>,
+    level: Level,
+    order: Option<&[u16]>,
+) -> std::result::Result<NamedToken, NamedAcquireError> {
     debug_assert!(slots > 0, "named locks always have at least one slot");
     let started = Instant::now();
     loop {
-        for slot in 0..slots {
+        let candidates = order
+            .map(<[u16]>::to_vec)
+            .unwrap_or_else(|| (0..slots).collect());
+        for slot in candidates {
             let path = named_slot_path(dir, slot);
-            match acquire_inner(
-                &path,
-                Level::Named,
-                Mode::Exclusive,
-                holder,
-                Duration::ZERO,
-                true,
-            ) {
+            match acquire_inner(&path, level, Mode::Exclusive, holder, Duration::ZERO, true) {
                 Ok(guard) => return Ok(NamedToken(guard)),
                 Err(error) if error.code.0 == "LOCK_HELD" => {}
                 Err(error) => return Err(NamedAcquireError::Other(error)),
@@ -234,7 +280,7 @@ pub fn named(
 
         if wait.is_some_and(|deadline| started.elapsed() >= deadline) {
             let occupancy = named_occupancy(dir, slots).map_err(NamedAcquireError::Other)?;
-            if occupancy.holders.len() < usize::from(slots) {
+            if order.is_none() && occupancy.holders.len() < usize::from(slots) {
                 // A slot freed between the sweep and this read; re-attempt after
                 // a short pause so a deadline overrun stays bounded instead of
                 // spinning hot while holders churn.
@@ -314,7 +360,7 @@ pub fn read_holder(path: &Path) -> Result<Option<Holder>> {
     Ok(serde_json::from_slice(&bytes).ok())
 }
 
-/// Uses a non-blocking exclusive flock as the sole liveness test for a lock file.
+/// Uses a non-blocking write flock as the sole liveness test for a lock file.
 pub fn is_held(path: &Path) -> Result<bool> {
     let file = match OpenOptions::new().read(true).open(path) {
         Ok(file) => file,
@@ -546,7 +592,9 @@ fn trace_acquire(level: Level) {
         // Executors intentionally hold at most one resource lock at a time;
         // equal levels therefore indicate a real lock-plan violation.
         assert!(
-            held.last().is_none_or(|current| *current < level),
+            held.last().is_none_or(|current| {
+                *current < level || (*current == Level::Lease && level == Level::Lease)
+            }),
             "lock order violation: attempted {level:?} while holding {held:?}"
         );
     });

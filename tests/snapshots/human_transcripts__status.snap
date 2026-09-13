@@ -8,6 +8,5 @@ repo/work is ready
   sync       never
   session    yes
   changes    0 modified, 0 untracked
-  build      ok (log <ROOT>/wt-home/trees/repo/work/.wt/logs/wt-setup.log)
+  after_new  ok (log <ROOT>/wt-home/trees/repo/work/.wt/logs/wt-setup.log)
   resources  1
-  tasks      8

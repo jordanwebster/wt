@@ -12,7 +12,7 @@
 //! rather than split.
 //!
 //! Recipe text never appears here. Argument text is recorded only where wt
-//! composed it — its own `git` and `tmux` invocations — because a task recipe
+//! composed it — its own `git` and `tmux` invocations — because a lifecycle recipe
 //! is the user's, and can hold a credential.
 //!
 //! Nothing in this module reports failure to its caller. A command that did

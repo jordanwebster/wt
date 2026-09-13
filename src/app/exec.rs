@@ -40,6 +40,6 @@ pub(crate) fn json_unsupported() -> CoreError {
         ExitClass::Usage,
         "JSON_UNSUPPORTED",
         "passthrough doors have no JSON envelope",
-        "use `wt env --json` or `wt run --json`",
+        "use a structured wt verb when JSON output is required",
     )
 }

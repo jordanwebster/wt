@@ -1,12 +1,12 @@
 mod common;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::time::{Duration, Instant};
 
 use common::Harness;
 use predicates::prelude::*;
-use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
 
 const BASIC: &str = r#"
 ports = ["http"]
@@ -14,8 +14,6 @@ ports = ["http"]
 APP_PORT = "{{ports.http}}"
 [files.".wt/generated"]
 content = "port={{ports.http}}"
-[task.hello]
-run = "printf hello"
 "#;
 
 static NEXT_ISOLATED_PORT: AtomicU16 = AtomicU16::new(40_000);
@@ -28,28 +26,735 @@ fn configure_backend_none(h: &Harness) {
     );
 }
 
-fn wait_for_text(path: &Path, expected: &str) {
+fn advance_origin(h: &Harness, name: &str, file: &str) -> String {
+    let origin = h.repos.join(format!("{name}-origin.git"));
+    let other = h.root.join(format!("{name}-other-{file}"));
+    common::git(
+        &h.root,
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    common::write(&other.join(file), "upstream\n");
+    common::git(&other, &["add", "-A"]);
+    common::git(&other, &["commit", "-qm", "upstream change"]);
+    common::git(&other, &["push", "-q", "origin", "main"]);
+    common::git_stdout(&other, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned()
+}
+
+fn quiet(h: &Harness) {
+    static NEXT_BASE: AtomicU16 = AtomicU16::new(45_000);
+    let base = NEXT_BASE.fetch_add(128, Ordering::Relaxed);
+    common::write(
+        &h.home.join("config.toml"),
+        &format!("[ports]\nbase={base}\nstride=16\n[session]\nbackend='none'\n"),
+    );
+}
+
+fn wait_for(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if wt_sys::fsx::read_string(path).unwrap().as_deref() == Some(expected) {
-            return;
-        }
+    while !path.exists() {
         assert!(
             Instant::now() < deadline,
-            "{} never became {expected:?}",
+            "{} was not created",
             path.display()
         );
         std::thread::sleep(Duration::from_millis(20));
     }
 }
 
-const RESOURCE: &str = r#"
-[task.service]
-run = "touch \"$WT_ROOT/.service\""
-exists = "test -f \"$WT_ROOT/.service\""
-destroy = "rm -f \"$WT_ROOT/.service\""
-tied_to = "tree"
+fn wait_for_absence(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while path.exists() {
+        assert!(Instant::now() < deadline, "{} still exists", path.display());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn removed_configuration_keys_name_their_replacements() {
+    let cases = [
+        (
+            "task-run",
+            "[task.old]\nrun='true'\n",
+            "repository task runner",
+        ),
+        ("task-build", "[task.build]\nrun='true'\n", "after_new"),
+        ("task-warm", "[task.warm]\nrun='true'\n", "[hooks] warm"),
+        (
+            "task-needs",
+            "[task.old]\nneeds=['later']\n[task.later]\nrun='true'\n",
+            "resource dependencies",
+        ),
+        (
+            "task-lock",
+            "[task.old]\nrun='true'\nlock='serial'\n[locks.serial]\nslots=1\n",
+            "token pool",
+        ),
+        (
+            "task-exclusive",
+            "[task.old]\ntied_to='tree'\nexists='false'\ndestroy='true'\nexclusive='repo'\n",
+            "arena",
+        ),
+        ("locks-table", "[locks.serial]\nslots=1\n", "token pools"),
+        ("resource-run", "[resource.old]\nrun='true'\n", "create"),
+        (
+            "resource-reset",
+            "[resource.old]\nreset='true'\n",
+            "acquire",
+        ),
+        (
+            "resource-lock",
+            "[resource.old]\nlock='serial'\n",
+            "token pool",
+        ),
+        (
+            "resource-exclusive",
+            "[resource.old]\nexclusive='repo'\n",
+            "arena",
+        ),
+        (
+            "token-keep",
+            "[resource.old]\ncount=1\nkeep='1m'\n",
+            "may not declare",
+        ),
+        (
+            "token-idle",
+            "[resource.old]\ncount=1\nidle='1m'\n",
+            "may not declare",
+        ),
+    ];
+    for (label, config, replacement) in cases {
+        let h = Harness::new();
+        quiet(&h);
+        let repo = h.repo(label, config);
+        h.wt()
+            .args(["register", repo.to_str().unwrap(), "--json"])
+            .assert()
+            .code(5)
+            .stdout(predicate::str::contains("CONFIG_INVALID"))
+            .stdout(predicate::str::contains(replacement));
+    }
+}
+
+#[test]
+fn removed_work_and_inspection_verbs_are_not_commands() {
+    let h = Harness::new();
+    for verb in [
+        "run", "test", "lint", "fmt", "build", "tasks", "locks", "lease", "release",
+    ] {
+        h.wt()
+            .arg(verb)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("unrecognized subcommand"));
+    }
+}
+
+#[test]
+fn current_state_file_is_migrated_on_the_first_upgraded_invocation() {
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo("repo", "");
+    h.register(&repo);
+    let label = wt_core::model::Label::new("repo").unwrap();
+    let path = h.home.join(wt_core::model::repo_state_path(&label));
+    common::write(&path, include_str!("fixtures/current-v1-repo-state.json"));
+
+    h.wt().args(["config", "repo", "--json"]).assert().success();
+
+    let migrated: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(migrated["schema"], 2);
+    assert_eq!(migrated["arenas"]["database"]["holder"], "repo/work");
+    assert_eq!(
+        migrated["resources"]["database"]["instance"]["env"]["DATABASE_URL"],
+        "frozen"
+    );
+    assert!(migrated.get("exclusive").is_none());
+}
+
+#[test]
+fn configured_output_is_rendered_cloned_sized_and_not_swept() {
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo("cache-fixture", "output=[{path='node_modules'}]\n");
+    common::write(&repo.join("node_modules/cache/marker"), "warm\n");
+    h.register(&repo);
+    let config = h.json(&["config", "cache-fixture"]);
+    assert_eq!(
+        config["data"]["entries"][0]["value"]["output"][0]["kind"],
+        "opaque"
+    );
+    let made = h.json(&[
+        "new",
+        "cache-fixture/work",
+        "--no-sync",
+        "--no-after-new",
+        "--no-open",
+    ]);
+    let tree = PathBuf::from(made["data"]["tree"]["path"].as_str().unwrap());
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            std::fs::read_to_string(tree.join("node_modules/cache/marker")).unwrap(),
+            "warm\n"
+        );
+        let list = h.json(&["ls", "cache-fixture", "--disk"]);
+        let row = list["data"]["trees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["target"] == "cache-fixture/work")
+            .unwrap();
+        assert!(row["build_kb"].as_u64().unwrap() > 0);
+    }
+    assert!(h.json(&["prune", "cache-fixture"])["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["action"] != "sweep"));
+}
+
+#[test]
+fn after_new_is_detached_gates_claims_and_anchor_runs_warm() {
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo(
+        "hook-fixture",
+        r#"
+bin=["bin"]
+commands=["claimed-tool"]
+output=[{path="cache"}]
+[hooks]
+after_new="sleep 0.15; touch .wt/after-new"
+warm="touch .wt/warm"
+"#,
+    );
+    common::write_executable(&repo.join("bin/claimed-tool"), "#!/bin/sh\nprintf ready\n");
+    common::write(&repo.join("cache/seed"), "seed\n");
+    common::git(&repo, &["add", "bin/claimed-tool", "cache/seed"]);
+    common::git(&repo, &["commit", "-qm", "fixture tool"]);
+    h.register(&repo);
+    let made = h.json(&["new", "hook-fixture/work", "--no-sync", "--no-open"]);
+    let tree = PathBuf::from(made["data"]["tree"]["path"].as_str().unwrap());
+    h.wt()
+        .current_dir(&tree)
+        .args(["exec", "--", "claimed-tool"])
+        .assert()
+        .success()
+        .stdout("ready");
+    wait_for(&tree.join(".wt/after-new"));
+    wait_for(&repo.join(".wt/warm"));
+}
+
+#[test]
+fn durable_resources_cover_dependencies_scopes_and_arena_take() {
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo(
+        "resource-fixture",
+        r#"
+[resource.base]
+tied_to="tree"
+name="{{name_short()}}-base"
+exists="test -f .wt/base"
+create="touch .wt/base"
+destroy="rm -f .wt/base"
+
+[resource.service]
+tied_to="tree"
+needs=["base"]
+arena="repo"
+capacity=2
+name="{{name_short()}}-service"
+exists="test -f .wt/service"
+create="touch .wt/service"
+destroy="rm -f .wt/service"
+
+[resource.shared]
+tied_to="repo"
+name="shared-fixture"
+exists="test -f $WT_HOME/shared-fixture"
+create="touch $WT_HOME/shared-fixture"
+destroy="rm -f $WT_HOME/shared-fixture"
+
+[resource.machine]
+tied_to="machine"
+name="machine-fixture"
+exists="test -f $WT_HOME/machine-fixture"
+create="touch $WT_HOME/machine-fixture"
+destroy="rm -f $WT_HOME/machine-fixture"
+"#,
+    );
+    h.register(&repo);
+    let mut roots = Vec::new();
+    for name in ["one", "two", "three"] {
+        let made = h.json(&[
+            "new",
+            &format!("resource-fixture/{name}"),
+            "--no-sync",
+            "--no-after-new",
+            "--no-open",
+        ]);
+        roots.push(PathBuf::from(
+            made["data"]["tree"]["path"].as_str().unwrap(),
+        ));
+    }
+    for root in &roots[..2] {
+        h.wt()
+            .current_dir(root)
+            .args(["with", "service", "shared", "machine", "--json"])
+            .assert()
+            .success();
+        assert!(root.join(".wt/base").exists());
+    }
+    h.wt()
+        .current_dir(&roots[2])
+        .args(["with", "service", "--json"])
+        .assert()
+        .code(4)
+        .stdout(predicate::str::contains("RESOURCE_HELD"));
+    h.wt()
+        .current_dir(&roots[2])
+        .args(["with", "service", "--take", "--json"])
+        .assert()
+        .success();
+    assert!(h.home.join("shared-fixture").exists());
+    assert!(h.home.join("machine-fixture").exists());
+}
+
+#[test]
+fn token_pools_order_export_log_release_and_refuse_invalid_uses() {
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo(
+        "token-fixture",
+        "[resource.zed]\ncount=1\nwait='100ms'\n[resource.alpha]\ncount=1\nwait='500ms'\n",
+    );
+    h.register(&repo);
+    h.wt()
+        .current_dir(&repo)
+        .args(["with", "alpha", "--json"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("TOKEN_COMMAND_REQUIRED"));
+    h.wt()
+        .current_dir(&repo)
+        .args(["--json", "with", "alpha", "alpha", "--", "true"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("RESOURCE_DUPLICATE"));
+    let output = h
+        .wt()
+        .current_dir(&repo)
+        .args([
+            "--json",
+            "with",
+            "zed",
+            "alpha",
+            "--",
+            "sh",
+            "-c",
+            "printf '%s|%s' \"$WT_LEASE_ALPHA\" \"$WT_LEASE_ZED\"",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["leases"]["WT_LEASE_ALPHA"], "alpha-1");
+    assert_eq!(value["data"]["leases"]["WT_LEASE_ZED"], "zed-1");
+    assert_eq!(
+        std::fs::read_to_string(value["data"]["log"].as_str().unwrap()).unwrap(),
+        "alpha-1|zed-1"
+    );
+    assert!(h.json(&["leases", "token-fixture"])["data"]["leases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|slot| slot["hold"] == "free"));
+
+    let mut child = h
+        .wt_std()
+        .current_dir(&repo)
+        .args(["with", "alpha", "--", "sleep", "2"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let listed = h.json(&["leases", "token-fixture"]);
+    let held = listed["data"]["leases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["pool"] == "alpha")
+        .unwrap();
+    assert_eq!(held["hold"], "leased");
+    assert!(held["holder"]["pid"].as_u64().unwrap() > 0);
+    assert!(!held["holder"]["process_start"].as_str().unwrap().is_empty());
+    h.wt()
+        .current_dir(&repo)
+        .args(["--json", "with", "alpha", "--take", "--", "true"])
+        .assert()
+        .code(4)
+        .stdout(predicate::str::contains("LEASE_HELD"))
+        .stdout(predicate::str::contains("\"waiting_on\":\"work\""));
+    let _ = child.kill();
+    let _ = child.wait();
+    let doctor = h.json(&["doctor", "token-fixture"]);
+    assert!(doctor["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "LEASE_HOLDER_DEAD"));
+    h.wt()
+        .current_dir(&repo)
+        .args(["--json", "with", "alpha", "--", "true"])
+        .assert()
+        .success();
+    let mut finishing = h
+        .wt_std()
+        .current_dir(&repo)
+        .args(["with", "alpha", "--", "sleep", "0.15"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    h.wt()
+        .current_dir(&repo)
+        .args(["--json", "with", "alpha", "--", "true"])
+        .assert()
+        .success();
+    assert!(finishing.wait().unwrap().success());
+    h.wt()
+        .current_dir(&repo)
+        .args(["--json", "with", "alpha", "--", "sh", "-c", "kill -9 $$"])
+        .assert()
+        .code(6);
+    h.wt()
+        .current_dir(&repo)
+        .args(["--json", "with", "alpha", "--", "true"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn a_later_pool_failure_releases_an_earlier_instance() {
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo(
+        "partial-lease-fixture",
+        r#"
+[resource.alpha]
+tied_to="repo"
+count=1
+name="alpha-{{index()}}"
+exists="test -f $WT_HOME/$WT_SELF"
+create="touch $WT_HOME/$WT_SELF"
+acquire="printf acquire >> $WT_HOME/acquire-events"
+destroy="rm -f $WT_HOME/$WT_SELF"
+keep="0ms"
+wait="100ms"
+
+[resource.zed]
+count=1
+wait="100ms"
+"#,
+    );
+    h.register(&repo);
+    let mut blocker = h
+        .wt_std()
+        .current_dir(&repo)
+        .args(["with", "zed", "--", "sleep", "2"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    h.wt()
+        .current_dir(&repo)
+        .args(["with", "alpha", "zed", "--", "true"])
+        .assert()
+        .code(4);
+    let label = wt_core::model::Label::new("partial-lease-fixture").unwrap();
+    let state: wt_core::lifecycle::RepoState = wt_sys::fsx::read_json(
+        &h.home.join(wt_core::model::repo_state_path(&label)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        state.resources["alpha#1"].hold,
+        wt_core::resource::ResourceHold::Free
+    );
+    h.wt()
+        .current_dir(&repo)
+        .args(["with", "alpha", "--", "true"])
+        .assert()
+        .success();
+    let _ = blocker.kill();
+    let _ = blocker.wait();
+}
+
+#[test]
+fn indexed_instances_create_acquire_keep_and_destroy() {
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo(
+        "pool-fixture",
+        r#"
+[resource.sim]
+tied_to="tree"
+count=2
+name="sim-{{index()}}"
+exists="test -f .wt/$WT_SELF"
+create="touch .wt/$WT_SELF; printf create >> .wt/events"
+acquire="printf ':acquire:%s' \"$WT_SELF\" >> .wt/events"
+destroy="rm -f .wt/$WT_SELF"
+keep="0ms"
+wait="100ms"
+"#,
+    );
+    h.register(&repo);
+    let made = h.json(&[
+        "new",
+        "pool-fixture/work",
+        "--no-sync",
+        "--no-after-new",
+        "--no-open",
+    ]);
+    let tree = PathBuf::from(made["data"]["tree"]["path"].as_str().unwrap());
+    for _ in 0..2 {
+        h.wt()
+            .current_dir(&tree)
+            .args(["--json", "with", "sim", "--", "true"])
+            .assert()
+            .success();
+    }
+    assert_eq!(
+        std::fs::read_to_string(tree.join(".wt/events")).unwrap(),
+        "create:acquire:sim-1:acquire:sim-1"
+    );
+    h.wt()
+        .current_dir(&tree)
+        .args(["destroy", "sim#1", "--yes", "--json"])
+        .assert()
+        .success();
+    assert!(!tree.join(".wt/sim-1").exists());
+
+    h.wt()
+        .args(["rm", "pool-fixture/work", "--force", "--yes", "--json"])
+        .assert()
+        .success();
+    assert!(!h
+        .home
+        .join("leases/tree/pool-fixture/work/sim/0.keep.json")
+        .exists());
+}
+
+#[test]
+fn machine_pool_declarations_agree_and_operator_sizing_wins() {
+    let h = Harness::new();
+    quiet(&h);
+    let declaration = r#"
+[resource.shared]
+tied_to="machine"
+count=2
+name="shared-{{index()}}"
+exists="test -f $WT_HOME/$WT_SELF"
+create="touch $WT_HOME/$WT_SELF"
+acquire="true"
+destroy="rm -f $WT_HOME/$WT_SELF"
 "#;
+    let first = h.repo("agreement-one", declaration);
+    let second = h.repo("agreement-two", declaration);
+    h.register(&first);
+    h.register(&second);
+
+    common::write(
+        &second.join(".wt.toml"),
+        &declaration.replace("count=2", "count=3"),
+    );
+    h.wt()
+        .args(["config", "agreement-two", "--json"])
+        .assert()
+        .code(5)
+        .stdout(predicate::str::contains(
+            "disagree on machine resource `shared` count",
+        ));
+
+    common::write(
+        &h.home.join("config.toml"),
+        "[session]\nbackend='none'\n[resources.shared]\ncount=4\n",
+    );
+    let rendered = h.json(&["config", "agreement-two"]);
+    let text = rendered.to_string();
+    assert!(text.contains("\"count\":4"));
+
+    common::write(
+        &second.join(".wt.toml"),
+        &declaration.replace("acquire=\"true\"", "acquire=\"false\""),
+    );
+    h.wt()
+        .args(["config", "agreement-two", "--json"])
+        .assert()
+        .code(5)
+        .stdout(predicate::str::contains("lifecycle recipes"));
+}
+
+#[test]
+fn keeps_are_hard_reservations_and_idle_destroys_free_instances() {
+    let h = Harness::new();
+    quiet(&h);
+    let config = r#"
+[resource.worker]
+tied_to="repo"
+count=1
+name="worker-{{index()}}"
+exists="test -f $WT_HOME/$WT_SELF"
+create="touch $WT_HOME/$WT_SELF"
+acquire="true"
+destroy="rm -f $WT_HOME/$WT_SELF"
+keep="2s"
+idle="0ms"
+wait="100ms"
+"#;
+    let repo = h.repo("cleanup-fixture", config);
+    h.register(&repo);
+    let first = h.json(&[
+        "new",
+        "cleanup-fixture/first",
+        "--no-sync",
+        "--no-after-new",
+        "--no-open",
+    ]);
+    let second = h.json(&[
+        "new",
+        "cleanup-fixture/second",
+        "--no-sync",
+        "--no-after-new",
+        "--no-open",
+    ]);
+    let first = PathBuf::from(first["data"]["tree"]["path"].as_str().unwrap());
+    let second = PathBuf::from(second["data"]["tree"]["path"].as_str().unwrap());
+    h.wt()
+        .current_dir(&first)
+        .args(["with", "worker", "--", "true"])
+        .assert()
+        .success();
+    let label = wt_core::model::Label::new("cleanup-fixture").unwrap();
+    let state: wt_core::lifecycle::RepoState = wt_sys::fsx::read_json(
+        &h.home.join(wt_core::model::repo_state_path(&label)),
+        "STATE_CORRUPT",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        &state.resources["worker#1"].hold,
+        wt_core::resource::ResourceHold::Kept { tree, .. }
+            if tree == "cleanup-fixture/first"
+    ));
+    h.wt()
+        .current_dir(&second)
+        .args(["with", "worker", "--", "true"])
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains(
+            "reserved for tree `cleanup-fixture/first`",
+        ));
+    assert_eq!(
+        h.json(&["leases", "cleanup-fixture"])["data"]["leases"][0]["hold"],
+        "kept"
+    );
+    h.wt()
+        .current_dir(&first)
+        .args(["with", "worker", "--", "true"])
+        .assert()
+        .success();
+    std::thread::sleep(Duration::from_millis(2100));
+    h.wt()
+        .current_dir(&second)
+        .args(["with", "worker", "--", "true"])
+        .assert()
+        .success();
+    assert!(h.home.join("worker-1").exists());
+    std::thread::sleep(Duration::from_millis(2100));
+    h.json(&["config", "cleanup-fixture"]);
+    wait_for_absence(&h.home.join("worker-1"));
+
+    let no_keep = config.replace("keep=\"2s\"", "keep=\"0ms\"");
+    common::write(&repo.join(".wt.toml"), &no_keep);
+    common::write(&second.join(".wt.toml"), &no_keep);
+    h.wt()
+        .current_dir(&second)
+        .args(["with", "worker", "--", "true"])
+        .assert()
+        .success();
+    h.json(&["doctor", "cleanup-fixture"]);
+    assert!(!h.home.join("worker-1").exists());
+    h.wt()
+        .current_dir(&second)
+        .args(["with", "worker", "--", "true"])
+        .assert()
+        .success();
+    h.json(&["prune", "cleanup-fixture"]);
+    assert!(!h.home.join("worker-1").exists());
+}
+
+#[test]
+fn doctor_reports_and_prune_destroys_an_instance_beyond_the_new_count() {
+    let h = Harness::new();
+    quiet(&h);
+    let config = r#"
+[resource.worker]
+tied_to="repo"
+count=2
+name="worker-{{index()}}"
+exists="test -f $WT_HOME/$WT_SELF"
+create="touch $WT_HOME/$WT_SELF"
+acquire="true"
+destroy="rm -f $WT_HOME/$WT_SELF"
+keep="0ms"
+idle="1h"
+wait="100ms"
+"#;
+    let repo = h.repo("undeclared-fixture", config);
+    h.register(&repo);
+    let mut first = h
+        .wt_std()
+        .current_dir(&repo)
+        .args(["with", "worker", "--", "sleep", "2"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    h.wt()
+        .current_dir(&repo)
+        .args(["with", "worker", "--", "true"])
+        .assert()
+        .success();
+    let _ = first.kill();
+    let _ = first.wait();
+    assert!(h.home.join("worker-2").exists());
+    common::write(
+        &repo.join(".wt.toml"),
+        &config.replace("count=2", "count=1"),
+    );
+    let doctor = h.json(&["doctor", "undeclared-fixture"]);
+    assert!(doctor["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "RESOURCE_UNDECLARED"));
+    let pruned = h.json(&["prune", "undeclared-fixture", "--yes"]);
+    assert!(pruned["data"]["items"]
+        .to_string()
+        .contains("undeclared-resource"));
+    assert!(!h.home.join("worker-2").exists());
+}
 
 #[test]
 fn register_and_idempotence_have_envelopes() {
@@ -62,32 +767,6 @@ fn register_and_idempotence_have_envelopes() {
     assert_eq!(first["data"]["tree"]["session_name"], "repo");
     let second = h.register(&repo);
     assert_eq!(second["data"]["registered"], false);
-}
-
-#[test]
-fn truth_and_inspection_verbs_match_the_registered_tree() {
-    let h = Harness::new();
-    let repo = h.repo("repo", BASIC);
-    h.register(&repo);
-    let list = h.json(&["ls"]);
-    assert_eq!(list["command"], "list");
-    assert_eq!(list["data"]["trees"][0]["target"], "repo");
-    assert_eq!(h.json(&["status", "repo"])["data"]["phase"], "ready");
-    assert_eq!(
-        h.json(&["path", "repo"])["data"]["path"],
-        std::fs::canonicalize(repo)
-            .unwrap()
-            .to_string_lossy()
-            .as_ref()
-    );
-    assert!(h.json(&["tasks", "repo"])["data"]["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|task| task["id"] == "hello"));
-    assert_eq!(h.json(&["config", "repo"])["data"]["target"], "repo");
-    assert_eq!(h.json(&["locks", "repo"])["data"]["locks"][0]["level"], 1);
-    assert_eq!(h.json(&["doctor", "repo"])["command"], "doctor");
 }
 
 #[test]
@@ -432,90 +1111,6 @@ fn forget_removes_only_wt_records_and_artifacts_and_requires_consent() {
 }
 
 #[test]
-fn forget_refuses_resources_sessions_and_door_holders_with_specific_remedies() {
-    let resources = Harness::new();
-    configure_backend_none(&resources);
-    let repo = resources.repo("repo", RESOURCE);
-    resources.register(&repo);
-    resources.json(&["new", "repo/work", "--no-sync", "--no-open"]);
-    // Declaring a resource is not creating one: the tree that has only ever
-    // been declared at is forgettable, and every tree of a repo with resources
-    // carries such records.
-    resources.json(&["new", "repo/declared", "--no-sync", "--no-open"]);
-    let declared = resources.json(&["forget", "repo/declared", "--yes"]);
-    assert_eq!(declared["data"]["forgotten"], true);
-
-    resources.json(&["run", "service", "repo/work"]);
-    resources
-        .wt()
-        .args(["forget", "repo/work", "--yes"])
-        .assert()
-        .code(5)
-        .stderr(predicate::str::contains("RESOURCES_EXIST"))
-        .stderr(predicate::str::contains("service"))
-        .stderr(predicate::str::contains("wt destroy"))
-        .stderr(predicate::str::contains("wt rm"));
-    // And once it is torn down the refusal lifts.
-    resources.json(&["destroy", "service", "repo/work", "--yes"]);
-    let destroyed = resources.json(&["forget", "repo/work", "--yes"]);
-    assert_eq!(destroyed["data"]["forgotten"], true);
-
-    let sessions = Harness::new();
-    let port = NEXT_ISOLATED_PORT.fetch_add(32, Ordering::Relaxed);
-    common::write(
-        &sessions.home.join("config.toml"),
-        &format!("[ports]\nbase={port}\nstride=1\n[session]\nbackend='tmux'\n"),
-    );
-    let repo = sessions.repo("repo", BASIC);
-    sessions.register(&repo);
-    sessions.json(&["new", "repo/work", "--no-sync", "--no-attach"]);
-    sessions
-        .wt()
-        .args(["forget", "repo/work", "--yes"])
-        .assert()
-        .code(5)
-        .stderr(predicate::str::contains("SESSION_LIVE"))
-        .stderr(predicate::str::contains("wt close"));
-
-    let holders = Harness::new();
-    configure_backend_none(&holders);
-    let repo = holders.repo("repo", BASIC);
-    holders.register(&repo);
-    holders.json(&["new", "repo/work", "--no-sync", "--no-open"]);
-    let mut child = holders
-        .wt_std()
-        .args(["exec", "repo/work", "--", "sleep", "5"])
-        .spawn()
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(100));
-    holders
-        .wt()
-        .args(["forget", "repo/work", "--yes"])
-        .assert()
-        .code(4)
-        .stderr(predicate::str::contains("TREE_IN_USE"))
-        .stderr(predicate::str::contains("wait for the door holders"));
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-#[test]
-fn top_level_help_uses_intent_groups_and_primary_short_spellings() {
-    let h = Harness::new();
-    let output = h.wt().arg("--help").output().unwrap();
-    assert!(output.status.success());
-    let help = String::from_utf8(output.stdout).unwrap();
-    let headings = ["Everyday:", "Setup:", "Working inside a tree:", "Upkeep:"];
-    let positions = headings.map(|heading| help.find(heading).unwrap());
-    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
-    assert!(help.contains("ls           List registered trees [aliases: list]"));
-    assert!(help.contains("rm           Tear down and remove a linked tree [aliases: remove]"));
-    for alias in ["test", "lint", "fmt", "build"] {
-        assert!(help.contains(&format!("  {alias}")));
-    }
-}
-
-#[test]
 fn section_4_1_tree_metadata_validation_refuses_before_registry_write() {
     let h = Harness::new();
     configure_backend_none(&h);
@@ -581,199 +1176,10 @@ fn passthrough_doors_refuse_json_with_usage_exit() {
 }
 
 #[test]
-fn run_json_keeps_one_envelope_on_stdout() {
-    let h = Harness::new();
-    let repo = h.repo("repo", BASIC);
-    h.register(&repo);
-    let output = h
-        .wt()
-        .args(["run", "hello", "repo", "--json"])
-        .output()
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["data"]["task"], "hello");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("hello"));
-    let log = value["data"]["log"].as_str().unwrap();
-    assert_eq!(std::fs::read(log).unwrap(), b"hello");
-}
-
-#[test]
-fn shell_and_argv_recipes_are_templates_while_dollars_stay_literal() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        r#"
-ports = ["http"]
-[vars]
-private = "secret"
-[env]
-OLD_TEMPLATE = '${root()}'
-[files."generated.sh"]
-marker = ""
-content = "printf '%s\\n' '$' '${HOME}' '$$' '${h%??}' '{{private}}' '{{ports.http}}'"
-[files."verbatim.j2"]
-marker = ""
-template = false
-content = "{{ jinja_value }} ${HOME} $$"
-[files."source-copy.j2"]
-marker = ""
-template = false
-source = "input.j2"
-[task.shell]
-run = '''h=abcdef; printf '%s|%s|%s|%s|%s|%s|%s|%s' '{{root()}}' '$' '$HOME' '${HOME}' '$$' "${h%??}" '{{private}}' '{{ports.http}}' '''
-[task.argv]
-run = ["printf", "%s|%s", "{{private}}", "{{ports.http}}"]
-"#,
-    );
-    common::write(&repo.join("input.j2"), "{{ source_value }} ${HOME} $$");
-    h.register(&repo);
-    assert_eq!(
-        h.json(&["env", "repo"])["data"]["env"]["OLD_TEMPLATE"],
-        "${root()}"
-    );
-
-    h.wt()
-        .args(["run", "shell", "repo"])
-        .assert()
-        .success()
-        .stdout(predicate::eq(format!(
-            "{}|$|$HOME|${{HOME}}|$$|abcd|secret|20000",
-            std::fs::canonicalize(&repo).unwrap().display()
-        )));
-    h.wt()
-        .args(["run", "argv", "repo"])
-        .assert()
-        .success()
-        .stdout(predicate::eq("secret|20000"));
-    assert_eq!(
-        std::fs::read_to_string(repo.join("generated.sh")).unwrap(),
-        "printf '%s\\n' '$' '${HOME}' '$$' '${h%??}' 'secret' '20000'"
-    );
-    assert_eq!(
-        std::fs::read_to_string(repo.join("verbatim.j2")).unwrap(),
-        "{{ jinja_value }} ${HOME} $$"
-    );
-    assert_eq!(
-        std::fs::read_to_string(repo.join("source-copy.j2")).unwrap(),
-        "{{ source_value }} ${HOME} $$"
-    );
-}
-
-#[test]
-fn shell_resource_run_exists_and_destroy_are_templated_before_sh_c() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        r#"
-[vars]
-leaf = ".service"
-[task.service]
-tied_to = "tree"
-run = "touch '{{root()}}/{{leaf}}'"
-exists = "test -f '{{root()}}/{{leaf}}'"
-destroy = "rm -f '{{root()}}/{{leaf}}'"
-"#,
-    );
-    h.register(&repo);
-    h.wt().args(["run", "service", "repo"]).assert().success();
-    assert!(repo.join(".service").exists());
-    h.wt()
-        .args(["destroy", "service", "repo", "--yes"])
-        .assert()
-        .success();
-    assert!(!repo.join(".service").exists());
-}
-
-#[test]
 fn ports_is_a_reserved_var_key() {
     let error = wt_core::config::parse("[vars]\nports='mine'", "repo/.wt.toml").unwrap_err();
     assert_eq!(error.code.0, "CONFIG_INVALID");
     assert!(error.message.contains("reserved"));
-}
-
-#[test]
-fn section_11_2_branch_convention_names_the_branch_a_creation_does_not() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let repo = h.repo(
-        "repo",
-        "branch = [\"{{meta.ticket}}_{{name()}}\", \"wip/{{name()}}\"]\n",
-    );
-    h.register(&repo);
-
-    let ticketed = h.json(&[
-        "new",
-        "repo/fix-scroll",
-        "--no-sync",
-        "--no-open",
-        "--meta",
-        "ticket=ABC-42",
-    ]);
-    assert_eq!(ticketed["data"]["tree"]["branch"], "ABC-42_fix-scroll");
-    assert_eq!(ticketed["data"]["tree"]["name"], "fix-scroll");
-
-    // No ticket: the next candidate decides, and nothing refuses.
-    let adhoc = h.json(&["new", "repo/poke", "--no-sync", "--no-open"]);
-    assert_eq!(adhoc["data"]["tree"]["branch"], "wip/poke");
-
-    // Naming the branch outright still wins, and re-running an address is
-    // idempotent against the recorded branch rather than the convention.
-    let named = h.json(&[
-        "new",
-        "repo/audit",
-        "--no-sync",
-        "--no-open",
-        "--branch",
-        "audit-only",
-        "--meta",
-        "ticket=ABC-43",
-    ]);
-    assert_eq!(named["data"]["tree"]["branch"], "audit-only");
-    let again = h.json(&[
-        "new",
-        "repo/fix-scroll",
-        "--no-sync",
-        "--no-open",
-        "--meta",
-        "ticket=ABC-42",
-    ]);
-    assert_eq!(again["data"]["created"], false);
-    // The branch was decided once, so a re-run that restates nothing is the
-    // same source — even after the metadata it was derived from changes.
-    let bare = h.json(&["new", "repo/fix-scroll", "--no-sync", "--no-open"]);
-    assert_eq!(bare["data"]["created"], false);
-    assert_eq!(bare["data"]["tree"]["branch"], "ABC-42_fix-scroll");
-    h.json(&["meta", "repo/fix-scroll", "ticket=ABC-99"]);
-    let edited = h.json(&["new", "repo/fix-scroll", "--no-sync", "--no-open"]);
-    assert_eq!(edited["data"]["created"], false);
-    assert_eq!(edited["data"]["tree"]["branch"], "ABC-42_fix-scroll");
-
-    // A metadata value git cannot spell as a branch is refused before the
-    // worktree is touched.
-    let output = h
-        .wt()
-        .args([
-            "new",
-            "repo/spacey",
-            "--no-sync",
-            "--no-open",
-            "--meta",
-            "ticket=ABC 44",
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    let refusal: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(refusal["error"]["code"], "BRANCH_INVALID");
-    assert!(refusal["error"]["remedy"]
-        .as_str()
-        .unwrap()
-        .contains("--branch"));
-    assert_eq!(
-        h.json(&["list"])["data"]["trees"].as_array().unwrap().len(),
-        4
-    );
 }
 
 #[test]
@@ -790,19 +1196,6 @@ fn section_5_1_user_layer_branch_convention_overrides_the_repository() {
     h.register(&repo);
     let created = h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
     assert_eq!(created["data"]["tree"]["branch"], "mine/work");
-}
-
-#[test]
-fn new_run_and_remove_form_an_idempotent_lifecycle() {
-    let h = Harness::new();
-    let repo = h.repo("repo", BASIC);
-    h.register(&repo);
-    let created = h.json(&["new", "repo/work", "--no-sync"]);
-    assert_eq!(created["data"]["created"], true);
-    assert_eq!(h.json(&["run", "hello", "repo/work"])["ok"], true);
-    let removed = h.json(&["remove", "repo/work", "--yes"]);
-    assert_eq!(removed["data"]["removed"], true);
-    assert!(!Path::new(created["data"]["tree"]["path"].as_str().unwrap()).exists());
 }
 
 #[test]
@@ -861,266 +1254,6 @@ fn remove_resolves_bare_names_and_reports_unresolved_addresses() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains("NOT_FOUND — target is not live"));
-}
-
-#[test]
-fn backend_none_runs_build_plan_after_ready_and_respects_suppression() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let events = h.root.join("build-events");
-    let config = format!(
-        r#"
-[task.prepare]
-run = ["sh", "-c", "printf 'prepare\\n' >> \"$EVENTS\""]
-[task.prepare.env]
-EVENTS = "{}"
-[task.build]
-needs = ["prepare"]
-run = ["sh", "-c", "printf 'build:%s\\n' \"$(cat \"$WT_ROOT/.wt/build.status\")\" >> \"$EVENTS\""]
-[task.build.env]
-EVENTS = "{}"
-"#,
-        events.display(),
-        events.display(),
-    );
-    let repo = h.repo("repo", &config);
-    h.register(&repo);
-
-    let created = h.json(&["new", "repo/work", "--no-sync"]);
-    let status =
-        Path::new(created["data"]["tree"]["path"].as_str().unwrap()).join(".wt/build.status");
-    wait_for_text(&status, "ok\n");
-    assert_eq!(
-        std::fs::read_to_string(&events).unwrap(),
-        "prepare\nbuild:running\n"
-    );
-    let target = wt_core::model::Target::parse("repo/work").unwrap();
-    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
-        &h.home.join(wt_core::model::tree_state_path(&target)),
-        "STATE_CORRUPT",
-    )
-    .unwrap()
-    .unwrap();
-    let build = state.build.unwrap();
-    assert!(Path::new(&build.log).ends_with(".wt/logs/wt-setup.log"));
-    assert_eq!(created["data"]["tree"]["phase"], "ready");
-    assert_eq!(created["data"]["build"]["log"], build.log);
-    assert_eq!(std::fs::read_to_string(&status).unwrap(), "ok\n");
-
-    common::write(&events, "");
-    h.json(&["build", "repo/work"]);
-    assert_eq!(
-        std::fs::read_to_string(&events).unwrap(),
-        "prepare\nbuild:running\n"
-    );
-    assert_eq!(std::fs::read_to_string(&status).unwrap(), "ok\n");
-
-    common::write(&events, "");
-    h.json(&["new", "repo/no-build", "--no-sync", "--no-build"]);
-    assert_eq!(std::fs::read_to_string(&events).unwrap(), "");
-    h.json(&["new", "repo/no-open", "--no-sync", "--no-open"]);
-    assert_eq!(std::fs::read_to_string(&events).unwrap(), "");
-}
-
-#[test]
-fn backend_none_build_failure_is_reported_after_new_returns() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let repo = h.repo(
-        "repo",
-        r#"
-bin = ["bin"]
-commands = ["orbit"]
-[task.build]
-run = ["sh", "-c", "cat \"$WT_ROOT/.wt/build.status\" > \"$WT_ROOT/seen-status\"; exit 9"]
-"#,
-    );
-    common::write_executable(&h.shims.join("orbit"), "#!/bin/sh\nprintf 'INSTALLED\\n'\n");
-    h.register(&repo);
-
-    let output = h
-        .wt()
-        .args(["new", "repo/work", "--no-sync", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(0));
-    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(envelope["ok"], true);
-    assert!(envelope["data"]["build"]["started"].is_string());
-    let root = PathBuf::from(envelope["data"]["tree"]["path"].as_str().unwrap());
-    wait_for_text(&root.join(".wt/build.status"), "failed\n");
-    assert_eq!(
-        std::fs::read_to_string(root.join("seen-status")).unwrap(),
-        "running\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(root.join(".wt/build.status")).unwrap(),
-        "failed\n"
-    );
-    let status = h.json(&["status", "repo/work"]);
-    assert_eq!(status["data"]["build"]["state"], "failed");
-    assert!(h.json(&["doctor", "repo"])["data"]["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["code"] == "BUILD_FAILED"));
-
-    let refusal = h
-        .wt()
-        .args(["exec", "repo/work", "--", "orbit"])
-        .output()
-        .unwrap();
-    assert_eq!(refusal.status.code(), Some(5));
-    let refusal = String::from_utf8_lossy(&refusal.stderr);
-    assert!(refusal.contains("wt build repo/work"), "{refusal}");
-    assert!(refusal.contains(&h.shims.join("orbit").to_string_lossy().to_string()));
-    assert!(!refusal.contains("wt:setup"), "{refusal}");
-    assert!(!refusal.contains("build is in progress"), "{refusal}");
-    common::proof_capture(
-        "A1",
-        format!(
-            "recorded-tree terminal refusal:\n{}",
-            refusal
-                .replace(
-                    &std::fs::canonicalize(&h.root)
-                        .unwrap_or_else(|_| h.root.clone())
-                        .to_string_lossy()
-                        .to_string(),
-                    "<ROOT>",
-                )
-                .replace(&h.root.to_string_lossy().to_string(), "<ROOT>")
-        ),
-    );
-
-    common::write(
-        &root.join(".wt.toml"),
-        r#"
-bin = ["bin"]
-commands = ["orbit"]
-[task.build]
-run = ["sh", "-c", "cat \"$WT_ROOT/.wt/build.status\" > \"$WT_ROOT/seen-status\""]
-"#,
-    );
-    h.json(&["build", "repo/work"]);
-    assert_eq!(
-        std::fs::read_to_string(root.join("seen-status")).unwrap(),
-        "running\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(root.join(".wt/build.status")).unwrap(),
-        "ok\n"
-    );
-    common::proof_capture(
-        "D3",
-        "backend none observed running inside the task\nfirst terminal status: failed\nretry observed running inside the task\nretry terminal status: ok",
-    );
-}
-
-#[test]
-fn dead_build_supervisor_is_abandoned_for_status_doctor_and_shims() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let repo = h.repo(
-        "repo",
-        r#"
-bin = ["bin"]
-commands = ["orbit"]
-[task.build]
-run = "true"
-"#,
-    );
-    h.register(&repo);
-    h.json(&["env", "repo"]);
-
-    let target = wt_core::model::Target::parse("repo").unwrap();
-    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
-    let mut state =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap();
-    let log = repo.join(".wt/logs/wt-setup.log");
-    state.build = Some(wt_core::lifecycle::BuildState {
-        started: wt_sys::fsx::timestamp().unwrap(),
-        log: log.to_string_lossy().into_owned(),
-        pid: u32::MAX,
-        head: None,
-    });
-    wt_sys::fsx::write_json(&state_path, &state).unwrap();
-    common::write(&repo.join(".wt/build.status"), "running\n");
-
-    let listed = h.json(&["ls"]);
-    assert_eq!(listed["data"]["trees"][0]["build"]["state"], "abandoned");
-    assert_eq!(
-        h.json(&["status", "repo"])["data"]["build"]["state"],
-        "abandoned"
-    );
-    let doctor = h.json(&["doctor", "repo"]);
-    let finding = doctor["data"]["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|finding| finding["code"] == "BUILD_ABANDONED")
-        .unwrap();
-    assert_eq!(finding["severity"], "warn");
-    assert!(finding["remedy"]
-        .as_str()
-        .unwrap()
-        .contains("wt build repo"));
-
-    let refusal = h
-        .wt()
-        .args(["exec", "repo", "--", "orbit"])
-        .output()
-        .unwrap();
-    assert_eq!(refusal.status.code(), Some(5));
-    let stderr = String::from_utf8_lossy(&refusal.stderr);
-    assert!(stderr.contains("COMMAND_NOT_BUILT"), "{stderr}");
-    assert!(stderr.contains("wt build repo"), "{stderr}");
-    assert!(!stderr.contains("build is in progress"), "{stderr}");
-}
-
-#[test]
-fn foreground_build_records_its_own_pid_over_a_dead_supervisor() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let repo = h.repo(
-        "repo",
-        r#"
-[task.build]
-run = "true"
-"#,
-    );
-    h.register(&repo);
-    h.json(&["env", "repo"]);
-
-    let target = wt_core::model::Target::parse("repo").unwrap();
-    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
-    let mut state =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap();
-    state.build = Some(wt_core::lifecycle::BuildState {
-        started: wt_sys::fsx::timestamp().unwrap(),
-        log: repo
-            .join(".wt/logs/wt-setup.log")
-            .to_string_lossy()
-            .into_owned(),
-        pid: u32::MAX,
-        head: None,
-    });
-    wt_sys::fsx::write_json(&state_path, &state).unwrap();
-    common::write(&repo.join(".wt/build.status"), "running\n");
-
-    h.json(&["build", "repo"]);
-
-    // The reset to `running` must carry the live pid, or the whole foreground
-    // run reads as abandoned against the finished supervisor's dead pid.
-    let state =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap();
-    assert_ne!(state.build.unwrap().pid, u32::MAX);
-    assert_eq!(h.json(&["status", "repo"])["data"]["build"]["state"], "ok");
 }
 
 #[test]
@@ -1223,659 +1356,6 @@ fn forge_pr_urls_use_the_matching_origin_and_refspec() {
             assert!(h.gh_calls().is_none());
         }
     }
-}
-
-#[test]
-fn github_pull_requests_check_out_their_own_branch_and_track_it() {
-    let h = Harness::new();
-    let repo = h.repo("repo", BASIC);
-    let origin = repo.parent().unwrap().join("repo-origin.git");
-    let url = "https://github.com/o/repo.git";
-    common::git(
-        &repo,
-        &[
-            "config",
-            &format!("url.{}.insteadOf", origin.display()),
-            url,
-        ],
-    );
-    common::git(&repo, &["remote", "set-url", "origin", url]);
-    common::write(&repo.join("README.md"), "feature\n");
-    common::git(&repo, &["add", "README.md"]);
-    common::git(&repo, &["commit", "-qm", "feature"]);
-    common::git(
-        &repo,
-        &["push", "-q", "origin", "HEAD:refs/heads/feature/x"],
-    );
-    h.push_pull_ref(&repo, 8, "HEAD");
-    common::git(&repo, &["reset", "-q", "--hard", "HEAD^"]);
-    h.register(&repo);
-
-    // gh names the branch, so the worktree is that branch and tracks it:
-    // a plain `git push` from inside updates the pull request.
-    h.install_gh(
-        r#"{"headRefName":"feature/x","isCrossRepository":false,"headRepositoryOwner":{"login":"o"}}"#,
-        0,
-    );
-    let report = h.json(&[
-        "new",
-        "repo/pr-8",
-        "--from",
-        "https://github.com/o/repo/pull/8",
-        "--no-sync",
-    ]);
-    assert_eq!(report["data"]["tree"]["branch"], "feature/x");
-    assert_eq!(
-        report["notices"][0]["code"], "PR_BRANCH_TRACKED",
-        "{report}"
-    );
-    let path = PathBuf::from(report["data"]["tree"]["path"].as_str().unwrap());
-    assert_eq!(
-        common::git_stdout(&path, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
-        "origin/feature/x"
-    );
-    assert_eq!(
-        common::git_stdout(&path, &["rev-parse", "HEAD"]),
-        common::git_stdout(&repo, &["rev-parse", "refs/remotes/origin/feature/x"])
-    );
-    let (cwd, argv) = h.gh_calls().unwrap();
-    assert_eq!(
-        argv,
-        "pr view 8 --json headRefName,isCrossRepository,headRepositoryOwner"
-    );
-    assert_eq!(
-        std::fs::canonicalize(cwd).unwrap(),
-        std::fs::canonicalize(&repo).unwrap()
-    );
-    // The bare `pr:N` spelling asks the same question of origin's forge,
-    // and lands on the same branch: one pull request, one worktree.
-    h.wt()
-        .args(["new", "repo/pr-8-again", "--from", "pr:8", "--no-sync"])
-        .assert()
-        .code(4)
-        .stderr(predicate::str::contains("feature/x"));
-
-    // A detached checkout of the same pull request tracks nothing and is
-    // told where a push has to go.
-    let detached = h.json(&[
-        "new",
-        "repo/pr-8-detached",
-        "--from",
-        "pr:8",
-        "--detach",
-        "--no-sync",
-    ]);
-    assert!(detached["data"]["tree"]["branch"].is_null(), "{detached}");
-    assert_eq!(detached["notices"][0]["code"], "PR_BRANCH_UNTRACKED");
-    let message = detached["notices"][0]["message"].as_str().unwrap();
-    assert!(
-        message.contains("this detached worktree mirrors"),
-        "{message}"
-    );
-    assert!(
-        message.contains("git push origin HEAD:feature/x"),
-        "{message}"
-    );
-
-    // A local branch already named like the head is checked out as it is,
-    // and the creation says both that it is behind and that it tracks
-    // nothing, rather than promising a push it cannot deliver.
-    common::git(
-        &repo,
-        &[
-            "push",
-            "-q",
-            "origin",
-            "refs/remotes/origin/feature/x:refs/heads/feature/z",
-        ],
-    );
-    h.push_pull_ref(&repo, 6, "refs/remotes/origin/feature/x");
-    common::git(&repo, &["branch", "feature/z", "HEAD"]);
-    h.install_gh(
-        r#"{"headRefName":"feature/z","isCrossRepository":false,"headRepositoryOwner":{"login":"o"}}"#,
-        0,
-    );
-    let stale = h.json(&["new", "repo/pr-6", "--from", "pr:6", "--no-sync"]);
-    assert_eq!(stale["data"]["tree"]["branch"], "feature/z");
-    let notices = stale["notices"].as_array().unwrap();
-    let codes: BTreeSet<_> = notices
-        .iter()
-        .map(|notice| notice["code"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        codes,
-        BTreeSet::from(["FROM_LOCAL_SHADOWS_REMOTE", "PR_BRANCH_UNTRACKED"]),
-        "{stale}"
-    );
-    assert!(notices.iter().any(|notice| notice["message"]
-        .as_str()
-        .unwrap()
-        .contains("git push origin HEAD:feature/z")));
-
-    // `--branch` naming an unrelated branch that tracks its own origin
-    // twin is not the pull request's branch, however well it tracks.
-    common::git(&repo, &["branch", "other", "HEAD"]);
-    common::git(&repo, &["push", "-q", "-u", "origin", "other"]);
-    h.install_gh(
-        r#"{"headRefName":"feature/x","isCrossRepository":false,"headRepositoryOwner":{"login":"o"}}"#,
-        0,
-    );
-    let other = h.json(&[
-        "new",
-        "repo/pr-8-other",
-        "--from",
-        "pr:8",
-        "--branch",
-        "other",
-        "--no-sync",
-    ]);
-    assert_eq!(other["data"]["tree"]["branch"], "other");
-    let notices = other["notices"].as_array().unwrap();
-    assert!(
-        notices
-            .iter()
-            .all(|notice| notice["code"] != "PR_BRANCH_TRACKED"),
-        "{other}"
-    );
-    assert!(
-        notices
-            .iter()
-            .any(|notice| notice["code"] == "PR_BRANCH_UNTRACKED"
-                && notice["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("branch other tracks origin/other, which is not")
-                && notice["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("git push origin HEAD:feature/x")),
-        "{other}"
-    );
-
-    // A re-run for an address that records the pull request never asks
-    // gh, so a broken gh cannot fail it.
-    h.install_gh("gh: command failed", 1);
-    h.forget_gh_calls();
-    let rerun = h.json(&[
-        "new",
-        "repo/pr-8",
-        "--from",
-        "https://github.com/o/repo/pull/8",
-        "--no-sync",
-    ]);
-    assert_eq!(rerun["data"]["tree"]["branch"], "feature/x");
-    assert!(h.gh_calls().is_none());
-
-    // An offline re-run keeps the recorded branch without asking gh.
-    h.forget_gh_calls();
-    let again = h.json(&[
-        "new",
-        "repo/pr-8",
-        "--from",
-        "https://github.com/o/repo/pull/8",
-        "--no-fetch",
-        "--no-sync",
-    ]);
-    assert_eq!(again["data"]["tree"]["branch"], "feature/x");
-    assert!(h.gh_calls().is_none());
-
-    // A fork's branch is not on origin, so the PR ref is mirrored and the
-    // creation says where a push would have to go instead.
-    h.push_pull_ref(&repo, 7, "HEAD");
-    h.install_gh(
-        r#"{"headRefName":"feature/y","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"}}"#,
-        0,
-    );
-    let fork = h.json(&["new", "repo/pr-7", "--from", "pr:7", "--no-sync"]);
-    assert_eq!(fork["data"]["tree"]["branch"], "pr/7");
-    assert_eq!(fork["notices"][0]["code"], "PR_BRANCH_UNTRACKED", "{fork}");
-    let message = fork["notices"][0]["message"].as_str().unwrap();
-    assert!(
-        message.contains("branch pr/7 mirrors pull request 7"),
-        "{message}"
-    );
-    assert!(
-        message.contains("push to that fork's `feature/y` branch"),
-        "{message}"
-    );
-
-    // --no-fetch on a new address mirrors the already-fetched PR ref
-    // without asking gh, and names the flag that would track it.
-    h.forget_gh_calls();
-    let offline = h.json(&[
-        "new",
-        "repo/pr-7-offline",
-        "--from",
-        "pr:7",
-        "--branch",
-        "offline-7",
-        "--no-fetch",
-        "--no-sync",
-    ]);
-    assert_eq!(offline["data"]["tree"]["branch"], "offline-7");
-    assert_eq!(offline["notices"][0]["code"], "PR_BRANCH_UNTRACKED");
-    let message = offline["notices"][0]["message"].as_str().unwrap();
-    assert!(
-        message.contains("branch offline-7 mirrors pull request 7"),
-        "{message}"
-    );
-    assert!(message.contains("retry without --no-fetch"), "{message}");
-    assert!(h.gh_calls().is_none());
-
-    // gh refusing is the creation refusing, with gh's reason and a way in.
-    h.install_gh(
-        "To get started with GitHub CLI, please run:  gh auth login",
-        4,
-    );
-    h.wt()
-        .args(["new", "repo/pr-9", "--from", "pr:9", "--no-sync"])
-        .assert()
-        .code(7)
-        .stderr(predicate::str::contains(
-            "gh could not look up pull request 9",
-        ))
-        .stderr(predicate::str::contains("run `gh auth login`"));
-    h.install_gh("GraphQL: Could not resolve to a PullRequest", 1);
-    h.wt()
-        .args(["new", "repo/pr-9", "--from", "pr:9", "--no-sync"])
-        .assert()
-        .code(7)
-        .stderr(predicate::str::contains("Could not resolve"))
-        .stderr(predicate::str::contains("gh auth status"));
-    assert!(h.json(&["ls"])["data"]["trees"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|tree| tree["name"] != "pr-9"));
-}
-
-#[test]
-fn aliases_use_the_run_task_set() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        "[task.test]\nrun='printf test'\n[task.lint]\nrun='printf lint'\n[task.fmt]\nrun='printf fmt'\n[task.build]\nrun='printf build'\n",
-    );
-    h.register(&repo);
-    for alias in ["test", "lint", "fmt", "build"] {
-        let value = h.json(&[alias, "repo"]);
-        assert_eq!(value["command"], alias);
-        assert_eq!(value["data"]["task"], alias);
-    }
-}
-
-#[test]
-fn section_6_2_aggregate_task_runs_needs_in_plan_order() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        r#"
-[task.first]
-run='printf first >> "$WT_ROOT/.aggregate-order"'
-[task.second]
-run='printf second >> "$WT_ROOT/.aggregate-order"'
-needs=['first']
-[task.setup]
-needs=['second']
-description='run all setup steps'
-"#,
-    );
-    h.register(&repo);
-
-    let result = h.json(&["run", "setup", "repo"]);
-    assert_eq!(
-        result["data"]["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|step| step["id"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        ["first", "second", "setup"]
-    );
-    assert_eq!(result["data"]["steps"][2]["status"], "skipped");
-    assert_eq!(result["data"]["steps"][2]["child"], serde_json::Value::Null);
-    assert_eq!(
-        std::fs::read_to_string(repo.join(".aggregate-order")).unwrap(),
-        "firstsecond"
-    );
-    let tasks = h.json(&["tasks", "repo"]);
-    let setup = tasks["data"]["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|task| task["id"] == "setup")
-        .unwrap();
-    assert_eq!(setup["origin"], "repo");
-}
-
-#[test]
-fn section_5_6_aggregate_inert_key_refusal_names_key() {
-    let h = Harness::new();
-    let repo = h.repo("repo", "[task.setup]\nneeds=[]\nlock='serial'\n");
-    h.wt()
-        .args(["register", repo.to_str().unwrap()])
-        .assert()
-        .code(5)
-        .stderr(predicate::str::contains("CONFIG_INVALID"))
-        .stderr(predicate::str::contains("key `lock`"))
-        .stderr(predicate::str::contains("would guard nothing"))
-        .stderr(predicate::str::contains("task that runs"));
-}
-
-#[test]
-fn section_10_1_trailing_args_append_to_argv_root_only_and_are_reported() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let repo = h.repo(
-        "repo",
-        r#"
-[task.dependency]
-run=['{{root()}}/record-args', 'dependency', 'declared']
-[task.argv]
-run=['{{root()}}/record-args', 'root', 'base']
-needs=['dependency']
-[task.test]
-run=['{{root()}}/record-args', 'alias', 'declared']
-"#,
-    );
-    common::write_executable(
-        &repo.join("record-args"),
-        r#"#!/bin/sh
-label=$1
-shift
-printf '%s:' "$label" >> "$WT_ROOT/.recorded-args"
-for arg in "$@"; do printf '<%s>' "$arg" >> "$WT_ROOT/.recorded-args"; done
-printf '\n' >> "$WT_ROOT/.recorded-args"
-"#,
-    );
-    h.register(&repo);
-
-    let output = h
-        .wt()
-        .args(["run", "argv", "repo", "--json", "--", "a b", "*.rs"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["data"]["args"], serde_json::json!(["a b", "*.rs"]));
-    assert_eq!(value["data"]["args_target"], "argv");
-    assert_eq!(
-        std::fs::read_to_string(repo.join(".recorded-args")).unwrap(),
-        "dependency:<declared>\nroot:<base><a b><*.rs>\n"
-    );
-    let log = value["data"]["log"].as_str().unwrap();
-    assert!(std::fs::read_to_string(log)
-        .unwrap()
-        .starts_with("wt args: [\"a b\",\"*.rs\"]\n"));
-
-    let dry = h
-        .wt()
-        .args([
-            "run",
-            "argv",
-            "repo",
-            "--dry-run",
-            "--json",
-            "--",
-            "dry arg",
-        ])
-        .output()
-        .unwrap();
-    assert!(dry.status.success());
-    let dry: serde_json::Value = serde_json::from_slice(&dry.stdout).unwrap();
-    assert_eq!(dry["data"]["args"], serde_json::json!(["dry arg"]));
-    assert_eq!(dry["data"]["args_target"], "argv");
-    h.wt()
-        .args(["run", "argv", "repo", "--dry-run", "--", "visible arg"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Plan for argv -- \"visible arg\""));
-
-    let alias = h
-        .wt()
-        .args(["test", "repo", "--json", "--", "alias arg"])
-        .output()
-        .unwrap();
-    assert!(alias.status.success());
-    let alias: serde_json::Value = serde_json::from_slice(&alias.stdout).unwrap();
-    assert_eq!(alias["data"]["args"], serde_json::json!(["alias arg"]));
-    assert_eq!(alias["data"]["args_target"], "test");
-    assert!(std::fs::read_to_string(repo.join(".recorded-args"))
-        .unwrap()
-        .ends_with("alias:<declared><alias arg>\n"));
-    assert_eq!(
-        h.json(&["run", "argv", "repo", "--dry-run"])["data"]["args_target"],
-        serde_json::Value::Null
-    );
-}
-
-#[test]
-fn section_10_1_shell_trailing_args_use_positional_parameters() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let repo = h.repo(
-        "repo",
-        r#"
-[task.shell]
-run='"$WT_ROOT/record-args" shell ruff "$@" && "$WT_ROOT/record-args" shell mypy .'
-[task.plain]
-run='printf unchanged > "$WT_ROOT/.plain"'
-[task.comment]
-run='''# "$@" is intentionally only a lexical match
-printf ignored > "$WT_ROOT/.comment"'''
-"#,
-    );
-    common::write_executable(
-        &repo.join("record-args"),
-        r#"#!/bin/sh
-label=$1
-shift
-printf '%s:' "$label" >> "$WT_ROOT/.shell-args"
-for arg in "$@"; do printf '<%s>' "$arg" >> "$WT_ROOT/.shell-args"; done
-printf '\n' >> "$WT_ROOT/.shell-args"
-"#,
-    );
-    h.register(&repo);
-
-    h.wt()
-        .args(["run", "shell", "repo", "--", "only file.py", "second"])
-        .assert()
-        .success();
-    assert_eq!(
-        std::fs::read_to_string(repo.join(".shell-args")).unwrap(),
-        "shell:<ruff><only file.py><second>\nshell:<mypy><.>\n"
-    );
-    h.wt().args(["run", "plain", "repo"]).assert().success();
-    assert_eq!(
-        std::fs::read_to_string(repo.join(".plain")).unwrap(),
-        "unchanged"
-    );
-    h.wt()
-        .args(["run", "comment", "repo", "--", "ignored"])
-        .assert()
-        .success();
-    assert_eq!(
-        std::fs::read_to_string(repo.join(".comment")).unwrap(),
-        "ignored"
-    );
-}
-
-#[test]
-fn section_10_1_trailing_arg_refusals_precede_dependencies() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let repo = h.repo(
-        "repo",
-        r#"
-[task.dependency]
-run='touch "$WT_ROOT/.dependency-ran"'
-[task.no_parameters]
-run='true'
-needs=['dependency']
-[task.leaf]
-run='true'
-[task.aggregate]
-needs=['leaf']
-[task.service]
-run='touch "$WT_ROOT/.service"'
-exists='test -f "$WT_ROOT/.service"'
-destroy='rm -f "$WT_ROOT/.service"'
-tied_to='tree'
-"#,
-    );
-    h.register(&repo);
-
-    h.wt()
-        .args(["run", "no_parameters", "repo", "--", "arg"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("ARGS_UNSUPPORTED"))
-        .stderr(predicate::str::contains("\"$@\""));
-    assert!(!repo.join(".dependency-ran").exists());
-
-    h.wt()
-        .args(["run", "aggregate", "repo", "--", "arg"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("ARGS_ON_COMPOSITE"))
-        .stderr(predicate::str::contains("leaf"))
-        .stderr(predicate::str::contains("wt run leaf --"));
-
-    h.wt()
-        .args(["run", "service", "repo", "--", "arg"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("ARGS_UNSUPPORTED"))
-        .stderr(predicate::str::contains(
-            "state transition replayed from snapshots",
-        ));
-    assert!(!repo.join(".service").exists());
-
-    h.wt()
-        .args(["run", "no_parameters", "repo"])
-        .assert()
-        .success();
-    assert!(repo.join(".dependency-ran").exists());
-}
-
-#[test]
-fn section_10_1_trailing_args_refuse_two_scope_composite_with_public_needs() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let repo = h.repo(
-        "repo",
-        r#"
-[dirs."d1".task.check]
-run=['true']
-[dirs."d2".task.check]
-run=['true']
-"#,
-    );
-    wt_sys::fsx::create_private_dir(&repo.join("d1")).unwrap();
-    wt_sys::fsx::create_private_dir(&repo.join("d2")).unwrap();
-    h.register(&repo);
-
-    let output = h
-        .wt()
-        .args(["run", "check", "repo", "--", "arg"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("ARGS_ON_COMPOSITE"), "{stderr}");
-    assert!(stderr.contains("d1/check"), "{stderr}");
-    assert!(stderr.contains("d2/check"), "{stderr}");
-    assert!(!stderr.contains('@'), "{stderr}");
-}
-
-#[test]
-fn section_10_1_trailing_args_cross_single_scope_composite() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let repo = h.repo(
-        "repo",
-        r#"
-[dirs."d1".task.check]
-run=['{{root()}}/record-args', 'check']
-"#,
-    );
-    wt_sys::fsx::create_private_dir(&repo.join("d1")).unwrap();
-    common::write_executable(
-        &repo.join("record-args"),
-        r#"#!/bin/sh
-printf '%s' "$1" > "$WT_ROOT/.single-scope-args"
-shift
-for arg in "$@"; do printf '<%s>' "$arg" >> "$WT_ROOT/.single-scope-args"; done
-"#,
-    );
-    h.register(&repo);
-
-    h.wt()
-        .args(["run", "check", "repo", "--", "forwarded arg"])
-        .assert()
-        .success();
-    assert_eq!(
-        std::fs::read_to_string(repo.join(".single-scope-args")).unwrap(),
-        "check<forwarded arg>"
-    );
-}
-
-#[test]
-fn section_10_1_trailing_args_cross_adapter_composite_and_alias() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let repo = h.repo("repo", "[dirs.d1]\n");
-    common::write(
-        &repo.join("d1/package.json"),
-        r#"{"name":"fixture","scripts":{"test":"fixture"}}"#,
-    );
-    common::write(&repo.join("d1/package-lock.json"), "{}\n");
-    common::write_executable(
-        &h.shims.join("npm"),
-        r#"#!/bin/sh
-for arg in "$@"; do printf '<%s>' "$arg" >> "$WT_ROOT/.adapter-args"; done
-printf '\n' >> "$WT_ROOT/.adapter-args"
-"#,
-    );
-    h.register(&repo);
-
-    h.wt()
-        .args(["test", "repo", "--", "-k", "foo"])
-        .assert()
-        .success();
-    assert_eq!(
-        std::fs::read_to_string(repo.join(".adapter-args")).unwrap(),
-        "<test><--><-k><foo>\n"
-    );
-}
-
-#[test]
-fn section_14_1_trailing_args_require_the_delimiter() {
-    let h = Harness::new();
-    h.wt()
-        .args(["run", "task", "repo", "argument"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("unexpected argument 'argument'"))
-        .stderr(predicate::str::contains("[-- <ARGS>...]"));
-}
-
-#[test]
-fn resource_run_and_destroy_follow_probe_truth() {
-    let h = Harness::new();
-    let repo = h.repo("repo", RESOURCE);
-    h.register(&repo);
-    assert_eq!(h.json(&["run", "service", "repo"])["ok"], true);
-    assert!(repo.join(".service").exists());
-    assert_eq!(
-        h.json(&["destroy", "service", "repo", "--yes"])["data"]["after"],
-        "declared"
-    );
-    assert!(!repo.join(".service").exists());
 }
 
 #[test]
@@ -2457,24 +1937,6 @@ fn doctor_reports_and_prune_deletes_state_orphans() {
 }
 
 #[test]
-fn remove_keep_orphans_leaves_a_missing_live_entry() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        "[task.service]\nrun='true'\nexists='exit 2'\ndestroy='true'\ntied_to='tree'\n",
-    );
-    h.register(&repo);
-    h.json(&["new", "repo/work", "--no-sync"]);
-    let removed = h.json(&["remove", "repo/work", "--yes", "--force", "--keep-orphans"]);
-    assert_eq!(removed["data"]["removed"], true);
-    assert!(!removed["data"]["orphans_kept"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    assert_eq!(h.json(&["status", "repo/work"])["data"]["phase"], "missing");
-}
-
-#[test]
 fn register_move_to_repairs_and_rechecks_the_checkout() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
@@ -2496,149 +1958,6 @@ fn register_move_to_repairs_and_rechecks_the_checkout() {
 }
 
 #[test]
-fn register_repair_restores_only_a_replaced_canonical_checkout() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        "[files.'.wt/generated']\ncontent='restored {{target()}}'\n[task.service]\nrun='true'\nexists='false'\ndestroy='true'\ntied_to='tree'\n",
-    );
-    let registered = h.register(&repo);
-    let tree_id = registered["data"]["tree"]["tree_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let registry_before = wt_sys::fsx::read_string(&h.home.join("registry.json"))
-        .unwrap()
-        .unwrap();
-    let target = wt_core::model::Target::canonical(wt_core::model::Label::new("repo").unwrap());
-    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
-    let state_before =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap();
-
-    wt_sys::fsx::remove_path(&repo.join(".wt/tree_id")).unwrap();
-    wt_sys::fsx::remove_path(&repo.join(".wt/generated")).unwrap();
-    let doctor = h.json(&["doctor", "repo"]);
-    let replaced = doctor["data"]["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|finding| finding["code"] == "TREE_REPLACED")
-        .unwrap();
-    assert!(replaced["remedy"].as_str().unwrap().contains("wt register"));
-    assert!(replaced["remedy"].as_str().unwrap().contains("--repair"));
-
-    // Reaching the same condition through an ordinary command must point at
-    // the same escape. `remove` and `adopt` both refuse a canonical tree, so
-    // naming them here would send the reader to two dead ends.
-    let refused = h.wt().args(["env", "repo"]).output().unwrap();
-    assert_eq!(refused.status.code(), Some(5));
-    let remedy = String::from_utf8_lossy(&refused.stderr).into_owned();
-    assert!(remedy.contains("--repair"), "door remedy was: {remedy}");
-    assert!(!remedy.contains("wt adopt"), "door remedy was: {remedy}");
-
-    let other = h.repo("other", "");
-    h.wt()
-        .args([
-            "register",
-            other.to_str().unwrap(),
-            "--label",
-            "repo",
-            "--repair",
-            "--json",
-        ])
-        .assert()
-        .code(5)
-        .stdout(predicate::str::contains("REPAIR_REFUSED"))
-        .stdout(predicate::str::contains(
-            "not repo's registered canonical checkout",
-        ));
-
-    let repaired = h.json(&[
-        "register",
-        repo.to_str().unwrap(),
-        "--label",
-        "repo",
-        "--repair",
-    ]);
-    assert_eq!(repaired["data"]["registered"], false);
-    assert_eq!(
-        wt_sys::fsx::read_string(&repo.join(".wt/tree_id")).unwrap(),
-        Some(format!("{tree_id}\n"))
-    );
-    assert_eq!(
-        wt_sys::fsx::read_string(&repo.join(".wt/generated")).unwrap(),
-        Some("# generated by wt for repo. If you edit this file, wt stops re-rendering it; delete it to let wt regenerate it, or set files.\".wt/generated\" = false in .wt/config.toml\nrestored repo".to_owned())
-    );
-    assert_eq!(
-        wt_sys::fsx::read_string(&h.home.join("registry.json"))
-            .unwrap()
-            .unwrap(),
-        registry_before
-    );
-    let state_after =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap();
-    assert_eq!(state_after.tree_id, state_before.tree_id);
-    assert_eq!(state_after.phase, state_before.phase);
-    assert_eq!(state_after.sync, state_before.sync);
-    assert_eq!(state_after.verify, state_before.verify);
-    assert_eq!(state_after.resources, state_before.resources);
-
-    h.wt()
-        .args([
-            "register",
-            repo.to_str().unwrap(),
-            "--label",
-            "repo",
-            "--repair",
-            "--json",
-        ])
-        .assert()
-        .code(5)
-        .stdout(predicate::str::contains("is not replaced"));
-}
-
-#[test]
-fn truth_reports_upstream_default_drift_staleness_probe_and_disk() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        "sync_inputs=['README.md']\n[task.sync]\nrun='true'\n[task.service]\nrun='touch \"$WT_ROOT/.service\"'\nexists='test -f \"$WT_ROOT/.service\"'\ndestroy='rm -f \"$WT_ROOT/.service\"'\ntied_to='tree'\n",
-    );
-    h.register(&repo);
-    h.json(&["new", "repo/work"]);
-    h.json(&["run", "service", "repo/work"]);
-    common::write(&repo.join("README.md"), "default advanced\n");
-    common::git(&repo, &["add", "README.md"]);
-    common::git(&repo, &["commit", "-qm", "advance default"]);
-    common::git(&repo, &["push", "-q", "origin", "main"]);
-    common::write(
-        &Path::new(
-            h.json(&["path", "repo/work"])["data"]["path"]
-                .as_str()
-                .unwrap(),
-        )
-        .join("README.md"),
-        "locally stale\n",
-    );
-    let value = h.json(&["list", "--disk", "--probe"]);
-    let tree = value["data"]["trees"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tree| tree["target"] == "repo/work")
-        .unwrap();
-    assert_eq!(tree["behind_default"], 1);
-    assert_eq!(tree["sync"]["state"], "stale");
-    assert_eq!(tree["sync"]["drift"][0], "README.md");
-    assert!(tree["disk_kb"].as_u64().is_some());
-    assert_eq!(tree["resources"][0]["last_probe"]["result"], "present");
-}
-
-#[test]
 fn unregister_leaves_the_checkout() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
@@ -2648,83 +1967,6 @@ fn unregister_leaves_the_checkout() {
         true
     );
     assert!(repo.exists());
-}
-
-#[test]
-fn ready_exec_stays_inside_the_door_subprocess_budget() {
-    let h = Harness::new();
-    let repo = h.repo("repo", BASIC);
-    let registered = h.register(&repo);
-    let trace = h.root.join("spawn.jsonl");
-    let lock_trace = h.root.join("locks.jsonl");
-    let budget_trace = h.root.join("budget.jsonl");
-    let label = registered["data"]["tree"]["label"].as_str().unwrap();
-    let name = registered["data"]["tree"]["name"].as_str().unwrap();
-    let state = h.home.join(format!("state/{label}/{name}.json"));
-    let state_before = std::fs::read(&state).unwrap();
-    h.wt()
-        .env("WT_SPAWN_TRACE", &trace)
-        .env("WT_LOCK_TRACE_FILE", &lock_trace)
-        .env("WT_BUDGET_TRACE", &budget_trace)
-        .args(["exec", "repo", "--", "true"])
-        .assert()
-        .success();
-    let records = std::fs::read_to_string(trace).unwrap();
-    let values = records
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        values
-            .iter()
-            .filter(|value| value["program"] == "git")
-            .count(),
-        1
-    );
-    assert_eq!(values.len(), 2, "one git query plus the requested child");
-    let locks = std::fs::read_to_string(lock_trace).unwrap();
-    let locks = locks
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(locks.len(), 2, "tree shared plus the door-holder flock");
-    assert_eq!(locks[0]["mode"], "shared");
-    assert_eq!(locks[1]["mode"], "exclusive");
-    let budget = std::fs::read_to_string(budget_trace).unwrap();
-    let kinds = budget
-        .lines()
-        .map(|line| {
-            serde_json::from_str::<serde_json::Value>(line).unwrap()["kind"]
-                .as_str()
-                .unwrap()
-                .to_owned()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        kinds,
-        [
-            "registry_read",
-            "identity_read",
-            "state_read",
-            "render_hash_compare",
-        ]
-    );
-    assert_eq!(std::fs::read(state).unwrap(), state_before);
-}
-
-#[test]
-fn sync_and_which_have_stable_data_shapes() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        "sync_inputs=['README.md']\n[task.prep]\nrun='true'\n[task.sync]\nrun='true'\nneeds=['prep']\n",
-    );
-    h.register(&repo);
-    let synced = h.json(&["sync", "repo"]);
-    assert_eq!(synced["data"]["ran"], true);
-    assert_eq!(synced["data"]["steps"].as_array().unwrap().len(), 2);
-    let which = h.json(&["which", "repo", "true"]);
-    assert!(which["data"]["path"].as_str().is_some());
 }
 
 #[test]
@@ -2773,903 +2015,6 @@ fn adopt_registers_an_existing_linked_worktree() {
 }
 
 #[test]
-fn refresh_recreates_a_present_resource() {
-    let h = Harness::new();
-    let repo = h.repo("repo", RESOURCE);
-    h.register(&repo);
-    h.json(&["run", "service", "repo"]);
-    let refreshed = h.json(&["refresh", "service", "repo", "--yes"]);
-    assert_eq!(refreshed["data"]["after"], "present");
-    assert!(repo.join(".service").exists());
-}
-
-#[test]
-fn sections_10_2_to_11_5_machine_scope_is_shared_and_lifecycle_excluded() {
-    let h = Harness::new();
-    let config = |source: &str| {
-        format!(
-            r#"
-[task.setup]
-run = 'printf %s "$SOURCE" > "$WT_HOME/machine-ready"'
-exists = 'test -f "$WT_HOME/machine-ready"'
-destroy = 'rm -f "$WT_HOME/machine-ready"'
-tied_to = "machine"
-[task.setup.env]
-SOURCE = "{source}"
-"#
-        )
-    };
-    let first = h.repo("first", &config("first"));
-    let second = h.repo("second", &config("second"));
-    h.register(&first);
-    h.register(&second);
-
-    let machine_path = h.home.join(wt_core::model::machine_state_path());
-    let machine =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(&machine_path, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap();
-    assert_eq!(machine.label, None);
-    assert_eq!(machine.resources.len(), 1);
-    let record = &machine.resources["setup"];
-    assert_eq!(record.key.label, None);
-    assert_eq!(record.key.name, None);
-    assert_eq!(record.key.tied_to, wt_core::config::TiedTo::Machine);
-    assert!(!record.declaration.env.contains_key("WT_LABEL"));
-    assert!(!record.declaration.env.contains_key("WT_REPO"));
-    assert!(!record.declaration.env.contains_key("WT_ROOT"));
-
-    h.json(&["run", "setup", "first"]);
-    assert_eq!(
-        std::fs::read_to_string(h.home.join("machine-ready")).unwrap(),
-        "first"
-    );
-    assert!(h.home.join("locks/_machine.rmw.lock").exists());
-    assert!(h.home.join("locks/_machine/res/./setup.lock").exists());
-
-    h.json(&["refresh", "setup", "second", "--yes"]);
-    assert_eq!(
-        std::fs::read_to_string(h.home.join("machine-ready")).unwrap(),
-        "second"
-    );
-    h.json(&["refresh", "setup", "first", "--yes"]);
-    assert_eq!(
-        std::fs::read_to_string(h.home.join("machine-ready")).unwrap(),
-        "first"
-    );
-
-    h.json(&["new", "first/work", "--no-sync", "--no-open"]);
-    let before_remove = std::fs::read(&machine_path).unwrap();
-    h.json(&["remove", "first/work", "--yes"]);
-    assert_eq!(std::fs::read(&machine_path).unwrap(), before_remove);
-    h.json(&["unregister", "first", "--yes"]);
-    assert_eq!(std::fs::read(&machine_path).unwrap(), before_remove);
-
-    h.wt()
-        .args(["destroy", "setup", "second"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("CONFIRM_REQUIRED"));
-    assert!(h.home.join("machine-ready").exists());
-    let declined = h.pty_output(&["destroy", "setup", "second"], b"n\n");
-    let transcript = String::from_utf8_lossy(&declined.stdout);
-    assert!(transcript.contains("destroy resource setup? [y/N]"));
-    assert!(h.home.join("machine-ready").exists());
-    assert_eq!(
-        h.pty_status(&["destroy", "setup", "second"], b"y\n").code,
-        Some(0)
-    );
-    assert!(!h.home.join("machine-ready").exists());
-
-    h.json(&["refresh", "setup", "second", "--yes"]);
-    assert_eq!(
-        std::fs::read_to_string(h.home.join("machine-ready")).unwrap(),
-        "second"
-    );
-    h.json(&["destroy", "setup", "second", "--yes"]);
-    assert!(!h.home.join("machine-ready").exists());
-}
-
-fn resource_config(exclusive: Option<&str>, live: &Path, events: &Path) -> String {
-    let exclusive =
-        exclusive.map_or_else(String::new, |arena| format!("exclusive = \"{arena}\"\n"));
-    format!(
-        r#"
-[task.service]
-run = 'printf %s "$WT_TARGET" > "{}"'
-exists = 'test -f "{}"'
-destroy = 'printf "destroy:%s\n" "$WT_TARGET" >> "{}"; rm -f "{}"'
-tied_to = "tree"
-{}
-"#,
-        live.display(),
-        live.display(),
-        events.display(),
-        live.display(),
-        exclusive,
-    )
-}
-
-fn exclusive_config(arena: &str, live: &Path, events: &Path) -> String {
-    resource_config(Some(arena), live, events)
-}
-
-fn repo_exclusive_holder(h: &Harness) -> Option<String> {
-    let label = wt_core::model::Label::new("repo").unwrap();
-    wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(
-        &h.home.join(wt_core::model::repo_state_path(&label)),
-        "STATE_CORRUPT",
-    )
-    .unwrap()
-    .and_then(|state| state.exclusive.get("service").cloned())
-    .map(|entry| entry.holder)
-}
-
-#[test]
-fn sections_5_2_and_10_4_exclusive_grammar_names_the_tree_resource_rule() {
-    for invalid in [
-        r#"[task.x]
-run = "true"
-exclusive = "repo"
-"#,
-        r#"[task.x]
-destroy = "true"
-tied_to = "tree"
-exclusive = "machine"
-"#,
-        r#"[task.x]
-exists = "false"
-destroy = "true"
-tied_to = "repo"
-exclusive = "repo"
-"#,
-    ] {
-        let error = wt_core::config::parse(invalid, "repo/.wt.toml").unwrap_err();
-        assert_eq!(error.code.0, "CONFIG_INVALID");
-        assert!(error.message.contains(
-            "exclusive is valid only on a tree-tied resource (destroy + exists + tied_to = \"tree\")"
-        ));
-    }
-}
-
-#[test]
-fn sections_10_1_to_10_4_take_displaces_frozen_holder_and_flips_repo_arena() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let live = h.root.join("exclusive-live");
-    let events = h.root.join("exclusive-events");
-    let repo = h.repo("repo", &exclusive_config("repo", &live, &events));
-    h.register(&repo);
-    h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
-    h.json(&["new", "repo/b", "--no-sync", "--no-open"]);
-    h.json(&["run", "service", "repo/a"]);
-
-    let held = h
-        .wt()
-        .args(["run", "service", "repo/b", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(held.status.code(), Some(4));
-    let held_json: serde_json::Value = serde_json::from_slice(&held.stdout).unwrap();
-    assert_eq!(held_json["error"]["code"], "RESOURCE_HELD");
-    assert!(held_json["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("repo/a"));
-    assert!(held_json["error"]["remedy"]
-        .as_str()
-        .unwrap()
-        .contains("--take"));
-
-    h.wt()
-        .args(["run", "service", "repo/b", "--take"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("displaced repo/a"));
-    assert_eq!(std::fs::read_to_string(&live).unwrap(), "repo/b");
-    assert_eq!(
-        std::fs::read_to_string(&events).unwrap(),
-        "destroy:repo/a\n"
-    );
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/b"));
-
-    let displaced_json = h.json(&["run", "service", "repo/a", "--take"]);
-    assert_eq!(displaced_json["data"]["displaced"], "repo/b");
-    let final_json = h.json(&["run", "service", "repo/b", "--take"]);
-    assert_eq!(final_json["data"]["displaced"], "repo/a");
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/b"));
-    assert_eq!(std::fs::read_to_string(&live).unwrap(), "repo/b");
-}
-
-#[test]
-fn sections_10_4_and_11_4_live_declaration_protects_stale_non_holder_on_remove() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let live = h.root.join("exclusive-live");
-    let events = h.root.join("exclusive-events");
-    let repo = h.repo("repo", &resource_config(None, &live, &events));
-    h.register(&repo);
-    let created_a = h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
-    let created_b = h.json(&["new", "repo/b", "--no-sync", "--no-open"]);
-    let tree_a = PathBuf::from(created_a["data"]["tree"]["path"].as_str().unwrap());
-    let tree_b = PathBuf::from(created_b["data"]["tree"]["path"].as_str().unwrap());
-    h.json(&["run", "service", "repo/a"]);
-
-    let target_a = wt_core::model::Target::parse("repo/a").unwrap();
-    let state_path_a = h.home.join(wt_core::model::tree_state_path(&target_a));
-    let state_a =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path_a, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap();
-    assert_eq!(
-        state_a.resources["service"]
-            .instance
-            .as_ref()
-            .unwrap()
-            .exclusive,
-        None
-    );
-
-    let exclusive = exclusive_config("repo", &live, &events);
-    common::write(&tree_a.join(".wt/config.toml"), &exclusive);
-    common::write(&tree_b.join(".wt/config.toml"), &exclusive);
-    h.json(&["run", "service", "repo/b"]);
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/b"));
-
-    let removed = h.json(&["remove", "repo/a", "--yes"]);
-    assert_eq!(removed["data"]["destroyed"][0]["state"], "dropped");
-    assert!(!state_path_a.exists());
-    assert!(live.exists());
-    assert!(!events.exists());
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/b"));
-}
-
-#[test]
-fn sections_10_4_and_11_4_arena_protects_pre_exclusive_checkout_on_remove() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let live = h.root.join("exclusive-live");
-    let events = h.root.join("exclusive-events");
-    let repo = h.repo("repo", &resource_config(None, &live, &events));
-    h.register(&repo);
-    h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
-    let created_b = h.json(&["new", "repo/b", "--no-sync", "--no-open"]);
-    let tree_b = PathBuf::from(created_b["data"]["tree"]["path"].as_str().unwrap());
-
-    common::write(
-        &tree_b.join(".wt/config.toml"),
-        &exclusive_config("repo", &live, &events),
-    );
-    h.json(&["run", "service", "repo/b"]);
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/b"));
-
-    let target_a = wt_core::model::Target::parse("repo/a").unwrap();
-    let state_path_a = h.home.join(wt_core::model::tree_state_path(&target_a));
-    let state_a =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path_a, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap();
-    assert_eq!(state_a.resources["service"].declaration.exclusive, None);
-
-    let removed = h.json(&["remove", "repo/a", "--yes"]);
-    assert_eq!(removed["data"]["destroyed"][0]["state"], "dropped");
-    let notice = removed["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|notice| notice["code"] == "RESOURCE_HELD_BY")
-        .unwrap();
-    assert_eq!(notice["subject"], "service");
-    assert!(notice["message"]
-        .as_str()
-        .unwrap()
-        .contains("left to repo/b"));
-    assert!(live.exists());
-    assert!(!events.exists());
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/b"));
-}
-
-#[test]
-fn sections_10_4_and_11_4_unrelated_label_ignores_machine_divergence_guard() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let alpha_live = h.root.join("alpha-db");
-    let beta_live = h.root.join("beta-db");
-    let beta_destroyed = h.root.join("beta-db-destroyed");
-    let alpha = h.repo(
-        "alpha",
-        &format!(
-            r#"
-[task.db]
-run = 'touch "{}"'
-exists = 'test -f "{}"'
-destroy = 'rm -f "{}"'
-tied_to = "tree"
-exclusive = "machine"
-"#,
-            alpha_live.display(),
-            alpha_live.display(),
-            alpha_live.display(),
-        ),
-    );
-    let beta = h.repo(
-        "beta",
-        &format!(
-            r#"
-[task.db]
-run = 'touch "{}"'
-exists = 'test -f "{}"'
-destroy = 'touch "{}"; rm -f "{}"'
-tied_to = "tree"
-"#,
-            beta_live.display(),
-            beta_live.display(),
-            beta_destroyed.display(),
-            beta_live.display(),
-        ),
-    );
-    h.register(&alpha);
-    h.register(&beta);
-    h.json(&["run", "db", "alpha"]);
-    h.json(&["run", "db", "beta"]);
-    assert!(alpha_live.exists());
-    assert!(beta_live.exists());
-
-    let destroyed = h.json(&["destroy", "db", "beta", "--yes"]);
-    assert_eq!(destroyed["data"]["after"], "declared");
-    assert!(!destroyed["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|notice| notice["code"] == "RESOURCE_HELD_BY"));
-    assert!(alpha_live.exists());
-    assert!(!beta_live.exists());
-    assert!(beta_destroyed.exists());
-
-    let machine = wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(
-        &h.home.join(wt_core::model::machine_state_path()),
-        "STATE_CORRUPT",
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(machine.exclusive["db"].holder, "alpha");
-
-    // The other branch of the guard, pinned so a future narrowing cannot
-    // silently break it: a label that DECLARES exclusive = "machine" must
-    // respect another label's live holder on the teardown path.
-    let gamma_destroyed = h.root.join("gamma-db-destroyed");
-    let gamma = h.repo(
-        "gamma",
-        &format!(
-            r#"
-[task.db]
-run = 'true'
-exists = 'test -f "{}"'
-destroy = 'touch "{}"'
-tied_to = "tree"
-exclusive = "machine"
-"#,
-            alpha_live.display(),
-            gamma_destroyed.display(),
-        ),
-    );
-    h.register(&gamma);
-    let held = h.json(&["destroy", "db", "gamma", "--yes"]);
-    assert_eq!(held["data"]["after"], "declared");
-    assert!(held["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|notice| notice["code"] == "RESOURCE_HELD_BY"
-            && notice["message"].as_str().unwrap().contains("alpha")));
-    assert!(!gamma_destroyed.exists());
-    assert!(alpha_live.exists());
-}
-
-#[test]
-fn section_12_prune_collects_stale_exclusive_arena_entries() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let live = h.root.join("exclusive-live");
-    let events = h.root.join("exclusive-events");
-    let repo = h.repo("repo", &exclusive_config("repo", &live, &events));
-    h.register(&repo);
-    let created = h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
-    let tree = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
-    h.json(&["run", "service", "repo/a"]);
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/a"));
-
-    wt_sys::fsx::remove_path(&tree).unwrap();
-    let registry_path = h.home.join("registry.json");
-    let mut registry =
-        wt_sys::fsx::read_json::<wt_core::model::Registry>(&registry_path, "REGISTRY_CORRUPT")
-            .unwrap()
-            .unwrap();
-    registry
-        .trees
-        .retain(|tree| tree.label.as_str() != "repo" || tree.name != "a");
-    wt_sys::fsx::write_json(&registry_path, &registry).unwrap();
-
-    let pruned = h.json(&["prune", "--yes"]);
-    let item = pruned["data"]["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["target"] == "repo:exclusive.service")
-        .unwrap();
-    assert_eq!(item["reasons"][0], "stale-exclusive-holder");
-    assert_eq!(item["action"], "delete-exclusive");
-    assert_eq!(item["result"]["deleted"], true);
-    assert_eq!(repo_exclusive_holder(&h), None);
-}
-
-#[test]
-fn section_10_4_live_declaration_claims_for_stale_pre_exclusive_instance() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let live = h.root.join("exclusive-live");
-    let events = h.root.join("exclusive-events");
-    let repo = h.repo("repo", &resource_config(None, &live, &events));
-    h.register(&repo);
-    let created = h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
-    let tree = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
-    h.json(&["run", "service", "repo/a"]);
-    assert_eq!(repo_exclusive_holder(&h), None);
-
-    common::write(
-        &tree.join(".wt/config.toml"),
-        &exclusive_config("repo", &live, &events),
-    );
-    h.json(&["run", "service", "repo/a"]);
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/a"));
-}
-
-#[test]
-fn sections_10_1_and_14_4_take_without_displacement_is_a_plain_run() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let live = h.root.join("exclusive-live");
-    let events = h.root.join("exclusive-events");
-    let repo = h.repo("repo", &exclusive_config("repo", &live, &events));
-    h.register(&repo);
-
-    let no_holder = h.json(&["run", "service", "repo", "--take"]);
-    assert_eq!(no_holder["data"]["displaced"], serde_json::Value::Null);
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo"));
-
-    let current_holder = h.json(&["run", "service", "repo", "--take"]);
-    assert_eq!(current_holder["data"]["displaced"], serde_json::Value::Null);
-    h.wt()
-        .args(["run", "service", "repo", "--take"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("displaced").not());
-}
-
-#[test]
-fn sections_10_4_and_11_4_non_holder_remove_skips_and_holder_remove_clears() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let live = h.root.join("exclusive-live");
-    let events = h.root.join("exclusive-events");
-    let repo = h.repo("repo", &exclusive_config("repo", &live, &events));
-    h.register(&repo);
-    h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
-    h.json(&["new", "repo/b", "--no-sync", "--no-open"]);
-    h.json(&["run", "service", "repo/a"]);
-
-    h.json(&["remove", "repo/b", "--yes"]);
-    assert!(live.exists());
-    assert!(!events.exists());
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/a"));
-
-    h.json(&["remove", "repo/a", "--yes"]);
-    assert!(!live.exists());
-    assert_eq!(
-        std::fs::read_to_string(&events).unwrap(),
-        "destroy:repo/a\n"
-    );
-    assert_eq!(repo_exclusive_holder(&h), None);
-}
-
-#[test]
-fn sections_10_4_and_12_external_adoption_and_absent_probe_manage_holder() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let live = h.root.join("exclusive-live");
-    let events = h.root.join("exclusive-events");
-    let repo = h.repo("repo", &exclusive_config("repo", &live, &events));
-    h.register(&repo);
-    common::write(&live, "external");
-
-    let adopted = h.json(&["run", "service", "repo"]);
-    assert_eq!(adopted["data"]["steps"][0]["status"], "present");
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo"));
-    let status = h.json(&["status", "repo"]);
-    assert_eq!(status["data"]["resources"][0]["external"], true);
-    assert_eq!(status["data"]["resources"][0]["holder"], "repo");
-    h.wt()
-        .args(["status", "repo"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("holder repo"));
-    h.wt()
-        .args(["list"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("service:repo"));
-
-    wt_sys::fsx::remove_path(&live).unwrap();
-    let probed = h.json(&["status", "repo", "--probe"]);
-    assert_eq!(probed["data"]["resources"][0]["state"], "declared");
-    assert_eq!(probed["data"]["resources"][0]["has_instance"], false);
-    assert_eq!(
-        probed["data"]["resources"][0]["holder"],
-        serde_json::Value::Null
-    );
-    assert_eq!(repo_exclusive_holder(&h), None);
-
-    let label = wt_core::model::Label::new("repo").unwrap();
-    let arena_path = h.home.join(wt_core::model::repo_state_path(&label));
-    let mut arena =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(&arena_path, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap_or(wt_core::lifecycle::RepoState {
-                schema: 1,
-                label: Some(label),
-                resources: std::collections::BTreeMap::new(),
-                exclusive: std::collections::BTreeMap::new(),
-            });
-    arena.exclusive.insert(
-        "service".to_owned(),
-        wt_core::lifecycle::ExclusiveHolder {
-            holder: "repo/gone".to_owned(),
-            since: wt_sys::fsx::timestamp().unwrap(),
-        },
-    );
-    wt_sys::fsx::write_json(&arena_path, &arena).unwrap();
-    h.json(&["run", "service", "repo"]);
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo"));
-}
-
-#[test]
-fn section_10_4_exclusive_frozen_crash_is_settled_by_the_next_probe() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let live = h.root.join("exclusive-live");
-    let events = h.root.join("exclusive-events");
-    let repo = h.repo("repo", &exclusive_config("repo", &live, &events));
-    h.register(&repo);
-
-    let target = wt_core::model::Target::parse("repo").unwrap();
-    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
-    let mut state =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap();
-    let record = state.resources.get_mut("service").unwrap();
-    record.instance = Some(record.declaration.clone());
-    wt_sys::fsx::write_json(&state_path, &state).unwrap();
-
-    let label = wt_core::model::Label::new("repo").unwrap();
-    let arena_path = h.home.join(wt_core::model::repo_state_path(&label));
-    let mut arena =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(&arena_path, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap_or(wt_core::lifecycle::RepoState {
-                schema: 1,
-                label: Some(label),
-                resources: std::collections::BTreeMap::new(),
-                exclusive: std::collections::BTreeMap::new(),
-            });
-    arena.exclusive.insert(
-        "service".to_owned(),
-        wt_core::lifecycle::ExclusiveHolder {
-            holder: "repo".to_owned(),
-            since: wt_sys::fsx::timestamp().unwrap(),
-        },
-    );
-    wt_sys::fsx::write_json(&arena_path, &arena).unwrap();
-
-    let probed = h.json(&["status", "repo", "--probe"]);
-    assert_eq!(probed["data"]["resources"][0]["state"], "declared");
-    assert_eq!(probed["data"]["resources"][0]["has_instance"], false);
-    assert_eq!(repo_exclusive_holder(&h), None);
-    assert!(!live.exists());
-}
-
-#[test]
-fn sections_10_1_and_14_1_take_on_non_exclusive_is_usage_error() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let repo = h.repo("repo", RESOURCE);
-    h.register(&repo);
-    let output = h
-        .wt()
-        .args(["run", "service", "repo", "--take", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["error"]["code"], "TAKE_REQUIRES_EXCLUSIVE");
-}
-
-#[test]
-fn section_10_1_take_destroy_failure_retains_holder_and_orphans_its_record() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let live = h.root.join("exclusive-live");
-    let repo = h.repo(
-        "repo",
-        &format!(
-            r#"
-[task.service]
-run = 'touch "{}"'
-exists = 'test -f "{}"'
-destroy = 'exit 9'
-tied_to = "tree"
-exclusive = "repo"
-"#,
-            live.display(),
-            live.display(),
-        ),
-    );
-    h.register(&repo);
-    h.json(&["new", "repo/a", "--no-sync", "--no-open"]);
-    h.json(&["new", "repo/b", "--no-sync", "--no-open"]);
-    h.json(&["run", "service", "repo/a"]);
-
-    let output = h
-        .wt()
-        .args(["run", "service", "repo/b", "--take", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(6));
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["error"]["code"], "DESTROY_FAILED");
-    assert_eq!(repo_exclusive_holder(&h).as_deref(), Some("repo/a"));
-    let target = wt_core::model::Target::parse("repo/a").unwrap();
-    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
-        &h.home.join(wt_core::model::tree_state_path(&target)),
-        "STATE_CORRUPT",
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        state.resources["service"].state,
-        wt_core::resource::ResourceState::Orphaned
-    );
-}
-
-#[test]
-fn sections_10_2_and_10_4_machine_exclusive_conflicts_across_labels() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let live = h.root.join("exclusive-live");
-    let events = h.root.join("exclusive-events");
-    let first = h.repo("first", &exclusive_config("machine", &live, &events));
-    let second = h.repo("second", &exclusive_config("machine", &live, &events));
-    h.register(&first);
-    h.register(&second);
-    h.json(&["run", "service", "first"]);
-
-    let output = h
-        .wt()
-        .args(["run", "service", "second", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(4));
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["error"]["code"], "RESOURCE_HELD");
-    assert!(value["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("first"));
-    let machine = wt_sys::fsx::read_json::<wt_core::lifecycle::RepoState>(
-        &h.home.join(wt_core::model::machine_state_path()),
-        "STATE_CORRUPT",
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(machine.exclusive["service"].holder, "first");
-}
-
-#[test]
-fn list_probe_deduplicates_shared_resources_across_trees_and_status_probes_once() {
-    let h = Harness::new();
-    let probe_log = h.root.join("resource-probes");
-    let repo = h.repo(
-        "repo",
-        &format!(
-            r#"
-[task.tree]
-exists = 'printf "tree\n" >> "$PROBE_LOG"; false'
-destroy = 'true'
-tied_to = "tree"
-[task.tree.env]
-PROBE_LOG = "{}"
-[task.repo]
-exists = 'printf "repo\n" >> "$PROBE_LOG"; false'
-destroy = 'true'
-tied_to = "repo"
-[task.repo.env]
-PROBE_LOG = "{}"
-[task.machine]
-exists = 'printf "machine\n" >> "$PROBE_LOG"; false'
-destroy = 'true'
-tied_to = "machine"
-[task.machine.env]
-PROBE_LOG = "{}"
-"#,
-            probe_log.display(),
-            probe_log.display(),
-            probe_log.display(),
-        ),
-    );
-    h.register(&repo);
-    h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
-
-    let listed = h.json(&["list", "--probe"]);
-    let counts = || {
-        let log = std::fs::read_to_string(&probe_log).unwrap();
-        ["tree", "repo", "machine"]
-            .map(|kind| log.lines().filter(|invocation| *invocation == kind).count())
-    };
-    assert_eq!(counts(), [2, 1, 1]);
-    let trees = listed["data"]["trees"].as_array().unwrap();
-    assert_eq!(trees.len(), 2);
-    for tied_to in ["repo", "machine"] {
-        let probes = trees
-            .iter()
-            .map(|tree| {
-                tree["resources"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|resource| resource["tied_to"] == tied_to)
-                    .unwrap()["last_probe"]
-                    .clone()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(probes[0]["result"], "absent");
-        assert_eq!(probes[0], probes[1]);
-    }
-
-    common::write(&probe_log, "");
-    h.json(&["status", "repo/work", "--probe"]);
-    assert_eq!(counts(), [1, 1, 1]);
-}
-
-#[test]
-fn section_14_5_status_and_list_order_resources_by_scope_axis() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        r#"
-[task.tree]
-exists = 'test -f "$WT_ROOT/.tree-resource"'
-destroy = 'rm -f "$WT_ROOT/.tree-resource"'
-tied_to = "tree"
-[task.repo]
-exists = 'test -f "$WT_REPO/.repo-resource"'
-destroy = 'rm -f "$WT_REPO/.repo-resource"'
-tied_to = "repo"
-[task.machine]
-exists = 'test -f "$WT_HOME/machine-resource"'
-destroy = 'rm -f "$WT_HOME/machine-resource"'
-tied_to = "machine"
-"#,
-    );
-    h.register(&repo);
-
-    for value in [
-        h.json(&["status", "repo"])["data"].clone(),
-        h.json(&["list"])["data"]["trees"][0].clone(),
-    ] {
-        assert_eq!(
-            value["resources"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|resource| resource["tied_to"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            ["tree", "repo", "machine"]
-        );
-    }
-}
-
-#[test]
-fn teardown_uses_frozen_instances_in_newest_first_order() {
-    let h = Harness::new();
-    let order = h.root.join("destroy-order");
-    let sentinel = h.root.join("changed-destroy-ran");
-    let config = format!(
-        r#"
-[task.older]
-run = 'touch "$WT_ROOT/.older"'
-exists = 'test -f "$WT_ROOT/.older"'
-destroy = 'printf "older\\n" >> "$ORDER"; rm -f "$WT_ROOT/.older"'
-tied_to = "tree"
-[task.older.env]
-ORDER = "{}"
-
-[task.newer]
-run = 'touch "$WT_ROOT/.newer"'
-exists = 'test -f "$WT_ROOT/.newer"'
-destroy = 'printf "newer\\n" >> "$ORDER"; rm -f "$WT_ROOT/.newer"'
-tied_to = "tree"
-[task.newer.env]
-ORDER = "{}"
-"#,
-        order.display(),
-        order.display(),
-    );
-    let repo = h.repo("repo", &config);
-    h.register(&repo);
-    let created = h.json(&["new", "repo/work", "--no-sync", "--no-open"]);
-    let tree = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
-    h.json(&["run", "older", "repo/work"]);
-    h.json(&["run", "newer", "repo/work"]);
-
-    let target = wt_core::model::Target::parse("repo/work").unwrap();
-    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
-    let mut state =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap();
-    let sequences = state
-        .resources
-        .values()
-        .map(|record| {
-            (
-                record.key.task.clone(),
-                record.instance.as_ref().unwrap().recorded_sequence,
-            )
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    assert!(sequences["older"] < sequences["newer"]);
-    for record in state.resources.values_mut() {
-        record.instance.as_mut().unwrap().recorded_at = "same-time".to_owned();
-    }
-    wt_sys::fsx::write_json(&state_path, &state).unwrap();
-
-    let changed = format!(
-        r#"
-[task.older]
-exists = 'test -f "$WT_ROOT/.older"'
-destroy = 'touch "$SENTINEL"; rm -f "$WT_ROOT/.older"'
-tied_to = "tree"
-[task.older.env]
-SENTINEL = "{}"
-
-[task.newer]
-exists = 'test -f "$WT_ROOT/.newer"'
-destroy = 'touch "$SENTINEL"; rm -f "$WT_ROOT/.newer"'
-tied_to = "tree"
-[task.newer.env]
-SENTINEL = "{}"
-"#,
-        sentinel.display(),
-        sentinel.display(),
-    );
-    common::write(&tree.join(".wt.toml"), &changed);
-    h.json(&["remove", "repo/work", "--yes", "--force"]);
-
-    assert_eq!(std::fs::read_to_string(&order).unwrap(), "newer\nolder\n");
-    assert!(!sentinel.exists());
-    common::proof_capture(
-        "D4",
-        format!(
-            "recorded sequence: older={} newer={}\ndestroy order:\n{}changed recipe sentinel exists: {}",
-            sequences["older"],
-            sequences["newer"],
-            std::fs::read_to_string(&order).unwrap(),
-            sentinel.exists()
-        ),
-    );
-}
-
-#[test]
 fn shell_refuses_json_while_open_provisions_without_attaching() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
@@ -3681,421 +2026,6 @@ fn shell_refuses_json_while_open_provisions_without_attaching() {
         .stdout(predicate::str::contains("JSON_UNSUPPORTED"));
     let opened = h.json(&["open", "repo"]);
     assert_eq!(opened["data"]["sessions"][0]["created"], true);
-}
-
-#[test]
-fn acceptance_shaped_fixture_walks_register_new_run_open_remove() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        r#"
-ports=['http']
-bin=['bin']
-copy=['secret.txt']
-[vars]
-app_port="{{ports.http}}"
-[env]
-APP_PORT='{{app_port}}'
-[files.".wt/app.conf"]
-content='port={{app_port}}'
-[task.service]
-run='touch "$WT_ROOT/.service"'
-exists='test -f "$WT_ROOT/.service"'
-destroy='rm -f "$WT_ROOT/.service"'
-tied_to='tree'
-"#,
-    );
-    wt_sys::fsx::create_private_dir(&repo.join("bin")).unwrap();
-    common::write_executable(&repo.join("bin/tool"), "#!/bin/sh\nexit 0\n");
-    common::write(&repo.join("secret.txt"), "copied\n");
-    common::write(&repo.join(".git/info/exclude"), "secret.txt\nbin/tool\n");
-    h.register(&repo);
-    let created = h.json(&["new", "repo/work", "--no-sync"]);
-    let tree = created["data"]["tree"]["path"].as_str().unwrap();
-    assert!(Path::new(tree).join("secret.txt").exists());
-    assert!(Path::new(tree).join(".wt/app.conf").exists());
-    h.json(&["run", "service", "repo/work"]);
-    common::write(
-        &h.home.join("config.toml"),
-        "[session]\nbackend='tmux'\nagent='probe'\n[agents.probe]\nstart=['true']\nresume=['true']\n",
-    );
-    h.json(&["open", "repo/work", "--no-attach"]);
-    assert_eq!(
-        h.json(&["remove", "repo/work", "--yes", "--force"])["data"]["removed"],
-        true
-    );
-    assert!(!Path::new(tree).exists());
-}
-
-#[test]
-fn sync_without_a_sync_task_never_bricks_the_canonical_tree() {
-    let h = Harness::new();
-    let repo = h.repo("repo", "[task.hello]\nrun='true'\n");
-    h.register(&repo);
-    h.wt()
-        .args(["sync", "repo", "--json"])
-        .assert()
-        .code(3)
-        .stdout(predicate::str::contains("NOT_FOUND"));
-    assert_eq!(h.json(&["status", "repo"])["data"]["phase"], "ready");
-    h.wt()
-        .args(["exec", "repo", "--", "true"])
-        .assert()
-        .success();
-}
-
-#[test]
-fn new_sync_failure_is_failed_and_resumes_from_sync() {
-    let h = Harness::new();
-    let repo = h.repo("repo", "[task.sync]\nrun='exit 3'\n");
-    h.register(&repo);
-    h.wt()
-        .args(["new", "repo/work", "--json"])
-        .assert()
-        .code(6)
-        .stdout(predicate::str::contains("TASK_FAILED"));
-    assert_eq!(h.json(&["status", "repo/work"])["data"]["phase"], "failed");
-    let tree = h.json(&["path", "repo/work"])["data"]["path"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    common::write(
-        &Path::new(&tree).join(".wt/config.toml"),
-        "[task.sync]\nrun='true'\n",
-    );
-    let resumed = h.json(&["new", "repo/work"]);
-    assert_eq!(resumed["data"]["resumed"], true);
-    assert_eq!(resumed["data"]["tree"]["phase"], "ready");
-}
-
-#[test]
-fn verify_failure_is_distinct_and_can_be_resumed() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        "[task.sync]\nrun='true'\n[task.verify]\nrun='exit 2'\n",
-    );
-    h.register(&repo);
-    h.wt()
-        .args(["new", "repo/work", "--verify", "--json"])
-        .assert()
-        .code(6)
-        .stdout(predicate::str::contains("VERIFY_FAILED"));
-    let status = h.json(&["status", "repo/work"]);
-    assert_eq!(status["data"]["phase"], "ready");
-    assert_eq!(status["data"]["verify"]["ok"], false);
-    let tree = status["data"]["path"].as_str().unwrap();
-    common::write(
-        &Path::new(tree).join(".wt/config.toml"),
-        "[task.verify]\nrun='true'\n",
-    );
-    let resumed = h.json(&["new", "repo/work", "--verify"]);
-    assert_eq!(resumed["data"]["verify"]["ok"], true);
-}
-
-#[test]
-fn present_resource_environment_is_identical_across_env_exec_and_run() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        r#"
-[task.resource]
-run='touch "$WT_ROOT/.resource"'
-exists='test -f "$WT_ROOT/.resource"'
-destroy='rm -f "$WT_ROOT/.resource"'
-tied_to='tree'
-[task.resource.env]
-RES_ENV='from-resource'
-[task.print]
-run='printf %s "$RES_ENV"'
-"#,
-    );
-    h.register(&repo);
-    h.json(&["run", "resource", "repo"]);
-    let env = h.json(&["env", "repo"])["data"]["env"]["RES_ENV"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let exec = h
-        .wt()
-        .args(["exec", "repo", "--", "sh", "-c", "printf %s \"$RES_ENV\""])
-        .output()
-        .unwrap();
-    let run = h.wt().args(["run", "print", "repo"]).output().unwrap();
-    assert_eq!(env, "from-resource");
-    assert_eq!(String::from_utf8(exec.stdout).unwrap(), env);
-    assert_eq!(String::from_utf8(run.stdout).unwrap(), env);
-}
-
-#[test]
-fn prune_records_then_new_creates_a_fresh_incarnation() {
-    let h = Harness::new();
-    let repo = h.repo("repo", RESOURCE);
-    h.register(&repo);
-    let created = h.json(&["new", "repo/work", "--no-sync"]);
-    h.json(&["run", "service", "repo/work"]);
-    let old_id = created["data"]["tree"]["tree_id"].as_str().unwrap();
-    let path = created["data"]["tree"]["path"].as_str().unwrap();
-    wt_sys::fsx::remove_path(Path::new(path)).unwrap();
-    let pruned = h.json(&["prune", "--records", "repo/work", "--yes"]);
-    assert_eq!(pruned["data"]["items"][0]["result"]["remaining"], 0);
-    let recreated = h.json(&["new", "repo/work", "--no-sync"]);
-    assert_ne!(recreated["data"]["tree"]["tree_id"], old_id);
-}
-
-#[test]
-fn missing_tree_teardown_reports_exe_missing_and_the_actual_remaining_count() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        "bin=['bin']\n[task.service]\nrun='mytool run'\nexists='mytool exists'\ndestroy='mytool destroy'\ntied_to='tree'\n",
-    );
-    wt_sys::fsx::create_private_dir(&repo.join("bin")).unwrap();
-    common::write_executable(
-        &repo.join("bin/mytool"),
-        "#!/bin/sh\ncase \"$1\" in run) touch \"$WT_ROOT/.service\";; exists) test -f \"$WT_ROOT/.service\";; destroy) rm -f \"$WT_ROOT/.service\";; esac\n",
-    );
-    common::git(&repo, &["add", "bin/mytool"]);
-    common::git(&repo, &["commit", "-qm", "fixture tool"]);
-    common::git(&repo, &["push", "-q", "origin", "main"]);
-    h.register(&repo);
-    let created = h.json(&["new", "repo/work", "--no-sync"]);
-    h.json(&["run", "service", "repo/work"]);
-    let path = created["data"]["tree"]["path"].as_str().unwrap();
-    wt_sys::fsx::remove_path(Path::new(path)).unwrap();
-    let pruned = h.json(&["prune", "--records", "repo/work", "--yes"]);
-    assert_eq!(pruned["data"]["items"][0]["result"]["remaining"], 1);
-    let target = wt_core::model::Target::parse("repo/work").unwrap();
-    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
-        &h.home.join(wt_core::model::tree_state_path(&target)),
-        "STATE_CORRUPT",
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        state.resources.values().next().unwrap().reason.as_deref(),
-        Some("exe_missing")
-    );
-}
-
-#[test]
-fn copy_populates_declared_paths_and_refuses_tracked_sources() {
-    let copied = Harness::new();
-    let repo = copied.repo("repo", "copy=['.env']\n");
-    common::write(&repo.join(".env"), "TOKEN=local-only\n");
-    copied.register(&repo);
-    let created = copied.json(&["new", "repo/work", "--no-sync", "--no-build"]);
-    let root = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
-    assert_eq!(
-        wt_sys::fsx::read_string(&root.join(".env")).unwrap(),
-        Some("TOKEN=local-only\n".to_owned())
-    );
-
-    let absent = Harness::new();
-    let repo = absent.repo("repo", "copy=['missing.secret']\n");
-    absent.register(&repo);
-    let created = absent.json(&["new", "repo/work", "--no-sync"]);
-    assert!(created["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|notice| notice["code"] == "COPY_ABSENT"));
-
-    let tracked = Harness::new();
-    let repo = tracked.repo("repo", "copy=['README.md']\n");
-    tracked.register(&repo);
-    tracked
-        .wt()
-        .args(["new", "repo/work", "--no-sync", "--json"])
-        .assert()
-        .code(5)
-        .stdout(predicate::str::contains("COPY_TRACKED"));
-    assert_eq!(
-        tracked.json(&["status", "repo/work"])["data"]["phase"],
-        "incomplete"
-    );
-}
-
-#[test]
-#[allow(clippy::disallowed_types)]
-fn cargo_sets_no_build_directory_and_seeds_a_tree_from_the_canonical_build() {
-    let h = Harness::new();
-    common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
-    let repo = h.repo("repo", "");
-    common::write(
-        &repo.join("Cargo.toml"),
-        "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
-    );
-    common::write(&repo.join("Cargo.lock"), "# generated fixture lockfile\n");
-    common::git(&repo, &["add", "Cargo.toml", "Cargo.lock"]);
-    common::git(&repo, &["commit", "-qm", "add cargo fixture"]);
-    common::git(&repo, &["push", "-q", "origin", "main"]);
-    h.register(&repo);
-    // A built canonical: compiled dependencies, incremental state, and the
-    // uplifted binary — the whole output root travels with the snapshot.
-    let rlib = "target/debug/deps/libfixture-0123456789abcdef.rlib";
-    common::write(&repo.join(rlib), "rlib\n");
-    common::write(
-        &repo.join("target/debug/.fingerprint/fixture-0123456789abcdef/lib-fixture"),
-        "fingerprint\n",
-    );
-    common::write(&repo.join("target/debug/incremental/fixture-abc/s-1/x"), "");
-    common::write(&repo.join("target/debug/fixture"), "binary\n");
-    // A source file whose modification time is what cargo's freshness rule
-    // reads, and one with uncommitted changes the snapshot must not carry.
-    let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_876_400);
-    std::fs::File::options()
-        .write(true)
-        .open(repo.join("Cargo.toml"))
-        .unwrap()
-        .set_modified(old)
-        .unwrap();
-    common::write(&repo.join("Cargo.lock"), "# edited, not committed\n");
-
-    let created = h.json(&["new", "repo/work", "--no-sync", "--no-build"]);
-    let canonical_env = h.json(&["env", "repo"])["data"]["env"].clone();
-    let linked_env = h.json(&["env", "repo/work"])["data"]["env"].clone();
-    // The whole build lives in the tree's own `target/`: no cargo directory
-    // variable of any kind, so a plain `cargo build` anywhere does the right
-    // thing and no two trees can address one another's units.
-    for env in [&canonical_env, &linked_env] {
-        assert!(env.get("CARGO_BUILD_BUILD_DIR").is_none());
-        assert!(env.get("CARGO_TARGET_DIR").is_none());
-    }
-    let linked = PathBuf::from(linked_env["WT_ROOT"].as_str().unwrap());
-    let codes = created["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|notice| notice["code"].as_str())
-        .collect::<Vec<_>>();
-    // Whatever the filesystem, the tree is the committed checkout: the
-    // canonical's uncommitted edit stays there.
-    assert_eq!(
-        std::fs::read_to_string(linked.join("Cargo.lock")).unwrap(),
-        "# generated fixture lockfile\n"
-    );
-    assert!(
-        common::git_stdout(&linked, &["status", "--porcelain", "--untracked-files=no"]).is_empty()
-    );
-    let seeded = if cfg!(target_os = "macos") {
-        assert!(codes.contains(&"SNAPSHOT_CLONED"), "{codes:?}");
-        assert_eq!(
-            std::fs::read_to_string(linked.join(rlib)).unwrap(),
-            "rlib\n"
-        );
-        assert!(linked
-            .join("target/debug/.fingerprint/fixture-0123456789abcdef/lib-fixture")
-            .exists());
-        assert!(linked
-            .join("target/debug/incremental/fixture-abc/s-1/x")
-            .exists());
-        assert!(linked.join("target/debug/fixture").exists());
-        // A clean tracked file keeps the canonical's modification time, so
-        // cargo finds the snapshot's units as fresh as the canonical's.
-        assert_eq!(
-            std::fs::metadata(linked.join("Cargo.toml"))
-                .unwrap()
-                .modified()
-                .unwrap(),
-            old
-        );
-        // Copy-on-write: a rebuild in the tree leaves the canonical as it was.
-        common::write(&linked.join(rlib), "rebuilt\n");
-        assert_eq!(std::fs::read_to_string(repo.join(rlib)).unwrap(), "rlib\n");
-        true
-    } else {
-        assert!(codes.contains(&"SNAPSHOT_SKIPPED"), "{codes:?}");
-        assert!(!linked.join("target").exists());
-        false
-    };
-    // Sizing follows the build output into the tree.
-    let listed = h.json(&["list", "repo", "--disk"]);
-    let work = listed["data"]["trees"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tree| tree["target"] == "repo/work")
-        .unwrap()
-        .clone();
-    if seeded {
-        assert!(work["build_kb"].as_u64().unwrap() > 0);
-    } else {
-        assert!(work["build_kb"].is_null());
-    }
-
-    let synced = h.json(&["sync", "repo/work"]);
-    let inputs = synced["data"]["inputs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|input| input["path"].as_str())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(inputs, BTreeSet::from(["Cargo.lock", "Cargo.toml"]));
-
-    common::proof_capture(
-        "D1",
-        format!(
-            "CARGO_BUILD_BUILD_DIR set: false\nCARGO_TARGET_DIR set: false\nseeded from canonical: {seeded}\nlinked target: {}\nsync inputs: {}",
-            linked.join("target").display(),
-            inputs.iter().copied().collect::<Vec<_>>().join(", ")
-        ),
-    );
-}
-
-#[test]
-fn configured_opaque_output_is_rendered_snapshotted_sized_and_never_swept() {
-    let h = Harness::new();
-    let repo = h.repo("repo", "output = [{ path = 'node_modules' }]\n");
-    common::write(&repo.join("node_modules/cache/marker"), "warm\n");
-    h.register(&repo);
-
-    let rendered = h.json(&["config", "repo"]);
-    let output = &rendered["data"]["entries"][0]["value"]["output"][0];
-    assert_eq!(output["path"], "node_modules");
-    assert_eq!(output["kind"], "opaque");
-
-    let created = h.json(&["new", "repo/work", "--no-sync", "--no-build"]);
-    let tree = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
-    if cfg!(target_os = "macos") {
-        assert_eq!(
-            std::fs::read_to_string(tree.join("node_modules/cache/marker")).unwrap(),
-            "warm\n"
-        );
-        let listed = h.json(&["list", "repo", "--disk"]);
-        let work = listed["data"]["trees"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["target"] == "repo/work")
-            .unwrap();
-        assert!(work["build_kb"].as_u64().unwrap() > 0);
-    }
-
-    let pruned = h.json(&["prune", "repo"]);
-    assert!(pruned["data"]["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|item| item["action"] != "sweep"));
-}
-
-#[test]
-fn sync_rechecks_tracked_render_paths_even_when_they_have_records() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        "[files.'.wt/generated']\ncontent='generated'\n[task.sync]\nrun='true'\n",
-    );
-    h.register(&repo);
-    common::git(&repo, &["add", "-f", ".wt/generated"]);
-    common::git(&repo, &["commit", "-qm", "track generated path"]);
-    h.wt()
-        .args(["sync", "repo", "--json"])
-        .assert()
-        .code(5)
-        .stdout(predicate::str::contains("RENDER_ONTO_TRACKED"));
-    assert_eq!(h.json(&["status", "repo"])["data"]["phase"], "failed");
 }
 
 #[test]
@@ -4117,242 +2047,6 @@ fn env_sh_unsets_keys_restored_to_absence() {
 }
 
 #[test]
-fn truth_surfaces_report_descriptions_config_errors_and_live_locks() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        "[task.hello]\nrun='true'\ndescription='says hello'\n",
-    );
-    h.register(&repo);
-    assert_eq!(
-        h.json(&["status", "repo"])["data"]["tasks"][0]["description"],
-        "says hello"
-    );
-    let mut child = h
-        .wt_std()
-        .args(["exec", "repo", "--", "sleep", "5"])
-        .spawn()
-        .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    assert!(!h.json(&["list"])["data"]["locks"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    let _ = child.kill();
-    let _ = child.wait();
-
-    common::write(&repo.join(".wt.toml"), "invalid = [\n");
-    assert!(!h.json(&["status", "repo"])["data"]["config_errors"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    assert!(
-        !h.json(&["register", repo.to_str().unwrap()])["data"]["config_errors"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
-fn sections_13_3_and_14_4_named_lock_capacity_reports_occupancy_and_waits() {
-    fn wait_for(path: &Path) {
-        for _ in 0..200 {
-            if path.exists() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("timed out waiting for {}", path.display());
-    }
-
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        r#"
-locks.serial = { slots = 2 }
-[task.first]
-run = 'touch "$WT_ROOT/.first"; while [ ! -e "$WT_ROOT/.release-first" ]; do sleep 0.01; done'
-lock = "serial"
-[task.second]
-run = 'touch "$WT_ROOT/.second"; while [ ! -e "$WT_ROOT/.release-second" ]; do sleep 0.01; done'
-lock = "serial"
-[task.waiter]
-run = 'touch "$WT_ROOT/.waiter"'
-lock = "serial"
-[task.legacy_first]
-run = 'touch "$WT_ROOT/.legacy-first"; while [ ! -e "$WT_ROOT/.release-legacy" ]; do sleep 0.01; done'
-lock = "legacy"
-[task.legacy_second]
-run = "true"
-lock = "legacy"
-"#,
-    );
-    h.register(&repo);
-
-    let mut first = h
-        .wt_std()
-        .args(["run", "first", "repo", "--json"])
-        .spawn()
-        .unwrap();
-    wait_for(&repo.join(".first"));
-    let mut second = h
-        .wt_std()
-        .args(["run", "second", "repo", "--json"])
-        .spawn()
-        .unwrap();
-    wait_for(&repo.join(".second"));
-
-    let refused = h
-        .wt()
-        .args(["run", "waiter", "repo", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(refused.status.code(), Some(4));
-    let refused: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
-    assert_eq!(refused["error"]["code"], "LOCK_HELD");
-    assert!(refused["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("2/2 in use"));
-    assert!(refused["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("slot 0: pid"));
-    assert!(refused["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("slot 1: pid"));
-    assert!(refused["error"]["remedy"]
-        .as_str()
-        .unwrap()
-        .contains("locks.\"serial\".slots"));
-
-    let locks = h.json(&["locks", "repo"]);
-    let named = locks["data"]["locks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|lock| lock["level"] == 4 && lock["name"] == "repo:serial")
-        .unwrap();
-    assert_eq!(named["held_slots"], 2);
-    assert_eq!(named["slots"], 2);
-    assert_eq!(named["holders"].as_array().unwrap().len(), 2);
-    assert!(named["holders"][0]["path"]
-        .as_str()
-        .unwrap()
-        .ends_with("/named/serial/0.lock"));
-    h.wt()
-        .args(["locks", "repo"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("held 2/2"));
-
-    let mut waiter = h
-        .wt_std()
-        .args(["run", "waiter", "repo", "--wait", "2s", "--json"])
-        .spawn()
-        .unwrap();
-    common::write(&repo.join(".release-first"), "release\n");
-    wait_for(&repo.join(".waiter"));
-    assert!(waiter.wait().unwrap().success());
-    assert!(first.wait().unwrap().success());
-    common::write(&repo.join(".release-second"), "release\n");
-    assert!(second.wait().unwrap().success());
-
-    let mut legacy = h
-        .wt_std()
-        .args(["run", "legacy_first", "repo", "--json"])
-        .spawn()
-        .unwrap();
-    wait_for(&repo.join(".legacy-first"));
-    let legacy_refused = h
-        .wt()
-        .args(["run", "legacy_second", "repo", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(legacy_refused.status.code(), Some(4));
-    let legacy_refused: serde_json::Value = serde_json::from_slice(&legacy_refused.stdout).unwrap();
-    assert!(legacy_refused["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("1/1 in use"));
-    common::write(&repo.join(".release-legacy"), "release\n");
-    assert!(legacy.wait().unwrap().success());
-}
-
-#[test]
-fn missing_bins_are_silent_at_doors_and_reported_by_doctor() {
-    let h = Harness::new();
-    let repo = h.repo("repo", "bin=['missing-bin']\n[task.fail]\nrun='exit 2'\n");
-    h.register(&repo);
-    h.wt()
-        .args(["exec", "repo", "--", "true"])
-        .assert()
-        .success()
-        .stderr(predicate::str::is_empty());
-    assert!(h.json(&["env", "repo"])["notices"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    assert!(h.json(&["doctor", "repo"])["data"]["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["code"] == "BIN_DIR_MISSING"));
-    h.wt()
-        .args(["run", "fail", "repo", "--json"])
-        .assert()
-        .code(6)
-        .stdout(predicate::str::contains("BIN_DIR_MISSING").not());
-}
-
-#[test]
-fn text_run_keeps_wt_guidance_off_the_child_stdout() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        "bin=['missing-bin']\n[task.print-version]\nrun='printf 1.2.3'\n",
-    );
-    h.register(&repo);
-    h.wt()
-        .args(["run", "print-version", "repo"])
-        .assert()
-        .success()
-        .stdout("1.2.3")
-        .stderr(predicate::str::is_empty());
-}
-
-#[test]
-fn remove_is_idempotent_and_text_run_preserves_child_status() {
-    let h = Harness::new();
-    let repo = h.repo("repo", "[task.fail]\nrun='exit 23'\n");
-    h.register(&repo);
-    h.wt().args(["run", "fail", "repo"]).assert().code(23);
-    h.json(&["new", "repo/work", "--no-sync"]);
-    assert_eq!(
-        h.json(&["remove", "repo/work", "--yes"])["data"]["removed"],
-        true
-    );
-    let repeated = h.json(&["remove", "repo/work", "--yes"]);
-    assert_eq!(repeated["data"]["removed"], false);
-    assert_eq!(repeated["notices"][0]["code"], "ALREADY_REMOVED");
-    assert_eq!(repeated["notices"][0]["subject"], "repo/work");
-    assert!(repeated["notices"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("No live tree exists"));
-
-    h.wt()
-        .args(["remove", "repo/work"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-        "No live tree exists for `repo/work`; its tombstone records that it was already removed",
-    ));
-}
-
-#[test]
 fn shell_scripts_do_not_depend_on_a_healthy_home() {
     let h = Harness::new();
     common::write(&h.home.join("registry.toml"), "old=true");
@@ -4368,144 +2062,6 @@ fn shell_scripts_do_not_depend_on_a_healthy_home() {
         .assert()
         .success()
         .stdout(predicate::str::contains("_wt_targets"));
-}
-
-#[test]
-fn doctor_manufactures_lifecycle_and_resource_conditions() {
-    let h = Harness::new();
-    let long_name = "x".repeat(64);
-    let repo = h.repo(
-        "repo",
-        &format!(
-            r#"
-[task.service]
-run='touch "$WT_ROOT/.service"'
-exists='test -f "$WT_ROOT/.service"'
-destroy='rm -f "$WT_ROOT/.service"'
-tied_to='tree'
-name='{{{{name()}}}}'
-[task.long]
-exists='false'
-destroy='true'
-tied_to='tree'
-name='{long_name}'
-"#
-        ),
-    );
-    let registered = h.register(&repo);
-    for name in [
-        "interrupted",
-        "initialising",
-        "removing",
-        "claimed",
-        "missing",
-        "incomplete",
-        "replaced",
-    ] {
-        h.json(&["new", &format!("repo/{name}"), "--no-sync"]);
-    }
-
-    let mutate = |name: &str, phase: wt_core::lifecycle::StatePhase, verb| {
-        let target = wt_core::model::Target::parse(&format!("repo/{name}")).unwrap();
-        let path = h.home.join(wt_core::model::tree_state_path(&target));
-        let mut state =
-            wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&path, "STATE_CORRUPT")
-                .unwrap()
-                .unwrap();
-        state.phase = phase;
-        state.op = Some(wt_core::lifecycle::Operation {
-            verb,
-            pid: u32::MAX,
-            started: wt_sys::fsx::timestamp().unwrap(),
-        });
-        wt_sys::fsx::write_json(&path, &state).unwrap();
-    };
-    mutate(
-        "interrupted",
-        wt_core::lifecycle::StatePhase::Bootstrapping,
-        wt_core::lifecycle::OpVerb::Sync,
-    );
-    mutate(
-        "initialising",
-        wt_core::lifecycle::StatePhase::Initialising,
-        wt_core::lifecycle::OpVerb::Adopt,
-    );
-    mutate(
-        "removing",
-        wt_core::lifecycle::StatePhase::Removing,
-        wt_core::lifecycle::OpVerb::Remove,
-    );
-    mutate(
-        "claimed",
-        wt_core::lifecycle::StatePhase::Bootstrapping,
-        wt_core::lifecycle::OpVerb::New,
-    );
-    for name in ["claimed", "missing"] {
-        let path = h.json(&["path", &format!("repo/{name}")])["data"]["path"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        wt_sys::fsx::remove_path(Path::new(&path)).unwrap();
-    }
-    let incomplete = wt_core::model::Target::parse("repo/incomplete").unwrap();
-    wt_sys::fsx::remove_path(&h.home.join(wt_core::model::tree_state_path(&incomplete))).unwrap();
-    let replaced = h.json(&["path", "repo/replaced"])["data"]["path"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    common::write(&Path::new(&replaced).join(".wt/tree_id"), "replacement\n");
-
-    let canonical = wt_core::model::Target::canonical(wt_core::model::Label::new("repo").unwrap());
-    let state_path = h.home.join(wt_core::model::tree_state_path(&canonical));
-    let mut state =
-        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
-            .unwrap()
-            .unwrap();
-    state.verify_pending = true;
-    state.last_error = Some("REFRESH_SKIPPED:.:service".to_owned());
-    let mut records = state.resources.values_mut().collect::<Vec<_>>();
-    records[0].state = wt_core::resource::ResourceState::Orphaned;
-    records[0].undeclared = true;
-    records[0].last_probe =
-        Some(wt_core::resource::Probe::failed_exit(wt_sys::fsx::timestamp().unwrap(), 2).unwrap());
-    records[1].state = wt_core::resource::ResourceState::Declared;
-    records[1].instance = Some(records[1].declaration.clone());
-    records[1].last_probe = Some(wt_core::resource::Probe::absent(
-        wt_sys::fsx::timestamp().unwrap(),
-    ));
-    wt_sys::fsx::write_json(&state_path, &state).unwrap();
-
-    let value = h.json(&["doctor", "repo"]);
-    let codes = value["data"]["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|finding| finding["code"].as_str().map(str::to_owned))
-        .collect::<BTreeSet<_>>();
-    for code in [
-        "TREE_INTERRUPTED",
-        "INIT_INTERRUPTED",
-        "REMOVE_INTERRUPTED",
-        "TREE_CLAIMED",
-        "TREE_MISSING",
-        "TREE_MISSING_PENDING",
-        "TREE_INCOMPLETE",
-        "TREE_REPLACED",
-        "VERIFY_PENDING",
-        "RESOURCE_ORPHANED",
-        "RESOURCE_GONE",
-        "RESOURCE_UNDECLARED",
-        "RESOURCE_PROBE_FAILED",
-        "REFRESH_SKIPPED",
-        "NAME_MAY_COLLIDE",
-        "IDENTIFIER_LONG",
-    ] {
-        assert!(
-            codes.contains(code),
-            "missing manufactured doctor code {code}"
-        );
-    }
-    assert_eq!(registered["data"]["tree"]["target"], "repo");
 }
 
 #[test]
@@ -4599,7 +2155,6 @@ fn doctor_condition_contracts_cover_every_documented_code() {
         "INIT_INTERRUPTED",
         "REMOVE_INTERRUPTED",
         "TREE_CLAIMED",
-        "VERIFY_PENDING",
         "UNMANAGED_WORKTREE",
         "STALE_GIT_WORKTREE",
         "BRANCH_MERGED",
@@ -4621,7 +2176,6 @@ fn doctor_condition_contracts_cover_every_documented_code() {
         "ACCELERATOR_MISSING",
         "NO_LOCKFILE",
         "NO_ADAPTER",
-        "NO_VERIFY",
         "NO_COORDINATION",
         "SESSION_BACKEND",
         "BIN_DIR_MISSING",
@@ -4642,146 +2196,6 @@ fn doctor_condition_contracts_cover_every_documented_code() {
         wt_core::doctor::CODES.iter().copied().collect(),
         "every documented doctor code must have a manufactured condition contract",
     );
-}
-
-#[test]
-fn doctor_manufactures_git_environment_port_and_adapter_conditions() {
-    fn finding_codes(value: &serde_json::Value) -> BTreeSet<String> {
-        value["data"]["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|finding| finding["code"].as_str().map(str::to_owned))
-            .collect()
-    }
-
-    let mut codes = BTreeSet::new();
-    let h = Harness::new();
-    let repo = h.repo("repo", "ports=['http']\nbin=['missing-bin']\n");
-    let registered = h.register(&repo);
-    codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
-    wt_sys::fsx::create_private_dir(&repo.join("missing-bin")).unwrap();
-    codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
-
-    // PATH_NOT_SHADOWED is only observable from inside a door (A76), and only
-    // where a bin directory or a claimed command gives it a prefix to miss.
-    let inside_door = h
-        .wt()
-        .env("WT_TARGET", "repo")
-        .args(["doctor", "repo", "--json"])
-        .output()
-        .unwrap();
-    codes.extend(finding_codes(
-        &serde_json::from_slice(&inside_door.stdout).unwrap(),
-    ));
-
-    let exclude = repo.join(".git/info/exclude");
-    common::write(&exclude, "");
-    codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
-    common::write(&exclude, "# >>> wt managed >>>\n/.wt/\n");
-    codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
-
-    let invalid_activation = h
-        .wt()
-        .env("WT_ACTIVATION", "not-json")
-        .args(["doctor", "repo", "--json"])
-        .output()
-        .unwrap();
-    assert!(invalid_activation.status.success());
-    codes.extend(finding_codes(
-        &serde_json::from_slice(&invalid_activation.stdout).unwrap(),
-    ));
-
-    common::write(
-        &h.home.join("config.toml"),
-        "[ports]\nbase=21000\nstride=16\n",
-    );
-    let port = registered["data"]["tree"]["ports"][0]["port"]
-        .as_u64()
-        .unwrap() as u16;
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
-    codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
-    drop(listener);
-
-    let unmanaged = h.root.join("unmanaged");
-    common::git(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "unmanaged",
-            unmanaged.to_str().unwrap(),
-        ],
-    );
-    let stale = h.root.join("stale");
-    common::git(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "stale",
-            stale.to_str().unwrap(),
-        ],
-    );
-    wt_sys::fsx::remove_path(&stale).unwrap();
-    codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
-
-    let h_empty = Harness::new();
-    let empty = h_empty.repo("empty", "");
-    h_empty.register(&empty);
-    codes.extend(finding_codes(&h_empty.json(&["doctor", "empty"])));
-
-    let h_rust = Harness::new();
-    let rust = h_rust.repo("rust", "");
-    common::write(
-        &rust.join("Cargo.toml"),
-        "[package]\nname='fixture'\nversion='0.1.0'\n",
-    );
-    h_rust.register(&rust);
-    codes.extend(finding_codes(&h_rust.json(&["doctor", "rust"])));
-    common::write_executable(&h_rust.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
-    codes.extend(finding_codes(&h_rust.json(&["doctor", "rust"])));
-
-    let h_node = Harness::new();
-    let node = h_node.repo("node", "");
-    common::write(&node.join("package.json"), "{\"name\":\"fixture\"}\n");
-    common::write(&node.join("package-lock.json"), "{}\n");
-    common::write_executable(&h_node.shims.join("npm"), "#!/bin/sh\nexit 0\n");
-    h_node.register(&node);
-    // The nudged tool absent, then installed.
-    codes.extend(finding_codes(&h_node.json(&["doctor", "node"])));
-    common::write_executable(&h_node.shims.join("pnpm"), "#!/bin/sh\nexit 0\n");
-    codes.extend(finding_codes(&h_node.json(&["doctor", "node"])));
-
-    for code in [
-        "BIN_DIR_MISSING",
-        "PATH_NOT_SHADOWED",
-        "EXCLUDE_MISSING",
-        "EXCLUDE_REPAIRED",
-        "ACTIVATION_IGNORED",
-        "GEOMETRY_CHANGED",
-        "SLOT_SQUATTED",
-        "PORT_SQUATTED",
-        "PORT_BOUND",
-        "UNMANAGED_WORKTREE",
-        "STALE_GIT_WORKTREE",
-        "NO_ADAPTER",
-        "NO_VERIFY",
-        "NO_COORDINATION",
-        "ADAPTER_TOOL_MISSING",
-        "ACCELERATOR_MISSING",
-        "ACCELERATOR_AVAILABLE",
-        "NO_LOCKFILE",
-    ] {
-        assert!(
-            codes.contains(code),
-            "missing manufactured doctor code {code}"
-        );
-    }
 }
 
 #[test]
@@ -4911,24 +2325,6 @@ fn render_write_failpoint_preserves_user_file_refusal() {
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn sync_mid_failpoint_reruns_to_ready() {
-    let h = Harness::new();
-    let repo = h.repo(
-        "repo",
-        "[task.prep]\nrun='true'\n[task.sync]\nrun='true'\nneeds=['prep']\n",
-    );
-    h.register(&repo);
-    h.wt()
-        .env("WT_FAILPOINT", "sync.mid:exit")
-        .args(["sync", "repo"])
-        .assert()
-        .code(86);
-    assert_eq!(h.json(&["sync", "repo"])["ok"], true);
-    assert_eq!(h.json(&["status", "repo"])["data"]["phase"], "ready");
-}
-
-#[cfg(feature = "failpoints")]
-#[test]
 fn remove_8_failpoint_reruns_to_tombstone() {
     let h = Harness::new();
     let repo = h.repo("repo", BASIC);
@@ -4946,205 +2342,6 @@ fn remove_8_failpoint_reruns_to_tombstone() {
 }
 
 #[cfg(feature = "failpoints")]
-#[test]
-fn resource_frozen_failpoint_reruns_from_probe_truth() {
-    let h = Harness::new();
-    let repo = h.repo("repo", RESOURCE);
-    h.register(&repo);
-    h.wt()
-        .env("WT_FAILPOINT", "resource.frozen:exit")
-        .args(["run", "service", "repo"])
-        .assert()
-        .code(86);
-    assert_eq!(h.json(&["run", "service", "repo"])["ok"], true);
-}
-
-#[cfg(feature = "failpoints")]
-#[test]
-fn resource_destroyed_failpoint_reruns_from_probe_truth() {
-    let h = Harness::new();
-    let repo = h.repo("repo", RESOURCE);
-    h.register(&repo);
-    h.json(&["run", "service", "repo"]);
-    h.wt()
-        .env("WT_FAILPOINT", "resource.destroyed:exit")
-        .args(["destroy", "service", "repo", "--yes"])
-        .assert()
-        .code(86);
-    assert_eq!(
-        h.json(&["destroy", "service", "repo", "--yes"])["data"]["after"],
-        "declared"
-    );
-}
-
-/// A76 §14.7: `setup` is the sole terminal-primary verb, and it says so in the
-/// two ways an automated caller can reach it — while `--dry-run`, which asks
-/// nothing, works anywhere.
-#[test]
-fn setup_refuses_json_and_a_terminal_free_invocation() {
-    let h = Harness::new();
-
-    let json = h.wt().args(["setup", "--json"]).output().unwrap();
-    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(envelope["error"]["code"], "JSON_UNSUPPORTED");
-    assert_eq!(json.status.code(), Some(2));
-
-    // Tests never have a terminal on stdin, which is exactly the condition.
-    let plain = h.wt().arg("setup").output().unwrap();
-    assert_eq!(plain.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&plain.stderr);
-    assert!(stderr.contains("CONFIRM_REQUIRED"), "{stderr}");
-    assert!(
-        stderr.contains("wt register") && stderr.contains("--dry-run"),
-        "the remedy must name what an agent can run instead: {stderr}"
-    );
-
-    let dry = h
-        .wt()
-        .args(["setup", "--dry-run", "--shell", "zsh"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        dry.status.code(),
-        Some(0),
-        "a dry run asks nothing and needs no terminal: {}",
-        String::from_utf8_lossy(&dry.stderr)
-    );
-}
-
-/// A76 §14.7, end to end without a terminal: the walk, the git batch, the
-/// grouping, the proposals and the default answers, printed as the commands
-/// that would produce them.
-#[test]
-fn setup_dry_run_plans_the_default_answers_as_commands() {
-    let h = Harness::new();
-    // `infocmp` decides the generated tmux file's `default-terminal`, and
-    // machines differ; the shim makes the answer the same everywhere.
-    common::write_executable(&h.shims.join("infocmp"), "#!/bin/sh\nexit 0\n");
-
-    // A checkout with a linked worktree, both untouched by wt.
-    let api = h.repo("api", "");
-    common::git(
-        &api,
-        &["worktree", "add", "-q", "-b", "feature", "../api-feature"],
-    );
-    let feature = h.repos.join("api-feature");
-    // A checkout wt already knows, whose own worktree is still adoptable.
-    let old = h.repo("old", "");
-    h.register(&old);
-    common::git(&old, &["worktree", "add", "-q", "-b", "wip", "../old-wip"]);
-    let wip = h.repos.join("old-wip");
-
-    let output = h
-        .wt()
-        .args(["setup", "--dry-run", "--shell", "zsh"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{stdout}\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let real = |path: &Path| {
-        wt_sys::fsx::canonicalize(path)
-            .unwrap()
-            .display()
-            .to_string()
-    };
-    let register = format!("wt register {} --label api", real(&api));
-    let adopt = format!("wt adopt {} --label api --name feature", real(&feature));
-    let adopt_wip = format!("wt adopt {} --label old --name wip", real(&wip));
-    for line in [&register, &adopt, &adopt_wip] {
-        assert!(
-            stdout.contains(line.as_str()),
-            "missing `{line}` in:\n{stdout}"
-        );
-    }
-    assert!(
-        stdout.find(&register).unwrap() < stdout.find(&adopt).unwrap(),
-        "a register precedes the adopt that needs its label:\n{stdout}"
-    );
-    assert!(
-        !stdout.contains(&format!("wt register {}", real(&old))),
-        "a registered checkout is not registered again:\n{stdout}"
-    );
-    // The origins are bare mirrors beside the checkouts; they are neither
-    // offered nor descended.
-    assert!(!stdout.contains("api-origin"), "{stdout}");
-
-    // The shell block is printed byte for byte, guard included, into the
-    // file the detected shell reads.
-    assert!(
-        stdout.contains(&format!("cat >> {}/.zshrc <<'WT_SETUP'", h.root.display())),
-        "{stdout}"
-    );
-    assert!(stdout.contains("eval \"$(wt shell-init zsh)\""), "{stdout}");
-    assert!(
-        stdout.contains("eval \"$(wt completions zsh)\""),
-        "{stdout}"
-    );
-    assert!(stdout.contains("# >>> wt >>>"), "{stdout}");
-
-    // tmux (the shim) is installed and unconfigured, so a configuration is
-    // written, describing the terminal wt is running under.
-    assert!(
-        stdout.contains(&format!(
-            "cat > {}/.config/tmux/tmux.conf <<'WT_SETUP'",
-            h.root.display()
-        )),
-        "{stdout}"
-    );
-    assert!(stdout.contains("xterm-256color:extkeys"), "{stdout}");
-    assert!(
-        stdout.contains("default-terminal \"tmux-256color\""),
-        "{stdout}"
-    );
-    // The bare mirror's HEAD/objects/refs must not have been taken for a
-    // worktree, and nothing was written.
-    assert!(!h.root.join(".zshrc").exists());
-    assert!(!h.root.join(".config/tmux/tmux.conf").exists());
-    assert!(
-        !h.root.join("wt-home/config.toml").exists()
-            || !std::fs::read_to_string(h.root.join("wt-home/config.toml"))
-                .unwrap()
-                .contains("trees_dir")
-    );
-}
-
-/// A76: a second run offers only what is new, and an rc file that already
-/// installs the guard is not appended to again.
-#[test]
-fn setup_dry_run_is_idempotent_once_everything_is_done() {
-    let h = Harness::new();
-    common::write_executable(&h.shims.join("infocmp"), "#!/bin/sh\nexit 0\n");
-    let api = h.repo("api", "");
-    h.register(&api);
-    common::write(&h.root.join(".zshrc"), "eval \"$(wt shell-init zsh)\"\n");
-    common::write(&h.root.join(".tmux.conf"), "set -g mouse on\n");
-
-    let output = h
-        .wt()
-        .args(["setup", "--dry-run", "--shell", "zsh"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(output.status.code(), Some(0), "{stdout}");
-    assert!(!stdout.contains("wt register"), "{stdout}");
-    assert!(
-        !stdout.contains("shell-init"),
-        "an installed guard is not installed twice:\n{stdout}"
-    );
-    assert!(
-        !stdout.contains("cat > "),
-        "an existing tmux configuration is never replaced:\n{stdout}"
-    );
-}
-
-/// A76: the guard is invisible from inside the door it breaks, so `doctor`
-/// reports its absence — and stops once any rc file installs it.
 #[test]
 fn doctor_reports_a_missing_shell_guard_until_one_is_installed() {
     let h = Harness::new();
@@ -5173,694 +2370,6 @@ fn doctor_reports_a_missing_shell_guard_until_one_is_installed() {
 
 /// A76: a label that claims nothing has no prefix for an rc file to displace,
 /// so the finding would be advice about a problem the reader cannot have.
-#[test]
-fn doctor_stays_quiet_about_the_shell_guard_when_nothing_is_claimed() {
-    let h = Harness::new();
-    let repo = h.repo("plain", "");
-    h.register(&repo);
-    let report = h.json(&["doctor", "plain"]);
-    assert!(!report["data"]["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["code"] == "SHELL_INIT_MISSING"));
-}
-
-/// A `cargo` that answers `metadata` with the fixture workspace — the
-/// package at `$PWD` with its library and build script, and one registry
-/// dependency at version 1.0.1 — and succeeds silently at everything else.
-fn install_cargo_with_metadata(h: &Harness, registry: &Path) {
-    common::write_executable(
-        &h.shims.join("cargo"),
-        &format!(
-            r#"#!/bin/sh
-if [ "$1" = "metadata" ]; then
-  cat <<EOF
-{{"workspace_root":"$PWD","packages":[
- {{"name":"fixture","source":null,"targets":[{{"name":"fixture","kind":["lib"],"src_path":"$PWD/src/lib.rs"}},{{"name":"build-script-build","kind":["custom-build"],"src_path":"$PWD/build.rs"}}]}},
- {{"name":"dep","source":"registry+https://github.com/rust-lang/crates.io-index","targets":[{{"name":"dep","kind":["lib"],"src_path":"{reg}/dep-1.0.1/src/lib.rs"}}]}}
-]}}
-EOF
-fi
-exit 0
-"#,
-            reg = registry.display()
-        ),
-    );
-}
-
-/// Writes one cargo unit: fingerprint directory, dep-info and an artifact.
-/// `fingerprint` is the unit's own hash (as cargo's little-endian hex),
-/// `deps` the hashes it records, `root` what its dep-info names.
-struct Unit<'a> {
-    package: &'a str,
-    hash: &'a str,
-    kind: &'a str,
-    fingerprint: u64,
-    deps: &'a [u64],
-    root: Option<&'a str>,
-    features: &'a str,
-    age_secs: u64,
-}
-
-#[allow(clippy::disallowed_types)]
-fn write_unit(profile: &Path, unit: &Unit) {
-    let dir = profile.join(format!(".fingerprint/{}-{}", unit.package, unit.hash));
-    let deps = unit
-        .deps
-        .iter()
-        .map(|dep| format!("[0,\"x\",false,{dep}]"))
-        .collect::<Vec<_>>()
-        .join(",");
-    common::write(
-        &dir.join(format!("{}.json", unit.kind)),
-        &format!(
-            r#"{{"rustc":1,"features":{},"target":2,"profile":3,"path":4,"deps":[{deps}],"local":[],"rustflags":[],"config":5,"compile_kind":0}}"#,
-            serde_json::to_string(unit.features).unwrap()
-        ),
-    );
-    let le = unit
-        .fingerprint
-        .to_le_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    common::write(&dir.join(unit.kind), &le);
-    let stamp = dir.join("invoked.timestamp");
-    common::write(&stamp, "");
-    let when = std::time::SystemTime::now() - Duration::from_secs(unit.age_secs);
-    std::fs::File::options()
-        .write(true)
-        .open(&stamp)
-        .unwrap()
-        .set_modified(when)
-        .unwrap();
-    let artifact = |path: &Path, body: &str| common::write(path, body);
-    if unit.kind.starts_with("build-script-") {
-        let build = profile.join(format!("build/{}-{}", unit.package, unit.hash));
-        artifact(
-            &build.join(format!("build_script_build-{}.d", unit.hash)),
-            &format!("x: {}\n", unit.root.unwrap()),
-        );
-        artifact(&build.join("build-script-build"), "exe");
-    } else if unit.kind.starts_with("run-") {
-        let build = profile.join(format!("build/{}-{}", unit.package, unit.hash));
-        artifact(&build.join("out/generated.rs"), "");
-        artifact(&build.join("output"), "");
-    } else {
-        artifact(
-            &profile.join(format!("deps/lib{}-{}.rlib", unit.package, unit.hash)),
-            "rlib",
-        );
-        artifact(
-            &profile.join(format!("deps/{}-{}.d", unit.package, unit.hash)),
-            &format!("x: {}\n", unit.root.unwrap()),
-        );
-    }
-}
-
-fn unit_exists(profile: &Path, package: &str, hash: &str) -> bool {
-    profile
-        .join(format!(".fingerprint/{package}-{hash}"))
-        .exists()
-}
-
-#[test]
-#[allow(clippy::disallowed_types)]
-fn sweep_reclaims_superseded_units_after_a_build_and_in_prune() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let registry = h.root.join("registry");
-    install_cargo_with_metadata(&h, &registry);
-    let repo = h.repo("repo", "");
-    common::write(
-        &repo.join("Cargo.toml"),
-        "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
-    );
-    common::write(&repo.join("Cargo.lock"), "# lock\n");
-    common::git(&repo, &["add", "-A"]);
-    common::git(&repo, &["commit", "-qm", "cargo fixture"]);
-    h.register(&repo);
-    let canonical = wt_sys::fsx::canonicalize(&repo).unwrap();
-    let profile = canonical.join("target/debug");
-    let old_dep = format!("{}/dep-1.0.0/src/lib.rs", registry.display());
-    let new_dep = format!("{}/dep-1.0.1/src/lib.rs", registry.display());
-    let fixtures = |profile: &Path| {
-        // The library, built twice: the older twin is superseded, and with
-        // it the dependency version only it was compiled against.
-        write_unit(
-            profile,
-            &Unit {
-                package: "fixture",
-                hash: "aaaaaaaaaaaaaaaa",
-                kind: "lib-fixture",
-                fingerprint: 10,
-                deps: &[1, 20],
-                root: Some("src/lib.rs"),
-                features: "[]",
-                age_secs: 10,
-            },
-        );
-        write_unit(
-            profile,
-            &Unit {
-                package: "fixture",
-                hash: "bbbbbbbbbbbbbbbb",
-                kind: "lib-fixture",
-                fingerprint: 11,
-                deps: &[1, 21],
-                root: Some("src/lib.rs"),
-                features: "[]",
-                age_secs: 5_000,
-            },
-        );
-        // A different feature set of the same library is another live
-        // thing, compiled against its own variant of the dependency.
-        write_unit(
-            profile,
-            &Unit {
-                package: "fixture",
-                hash: "0000000000000000",
-                kind: "lib-fixture",
-                fingerprint: 12,
-                deps: &[22],
-                root: Some("src/lib.rs"),
-                features: "[\"extra\"]",
-                age_secs: 9_000,
-            },
-        );
-        // The dependency at the version the lockfile names, twice — two
-        // variants that differ only in what they were compiled against,
-        // each named by a live library — and the version it no longer does.
-        write_unit(
-            profile,
-            &Unit {
-                package: "dep",
-                hash: "dddddddddddddddd",
-                kind: "lib-dep",
-                fingerprint: 20,
-                deps: &[],
-                root: Some(&new_dep),
-                features: "[]",
-                age_secs: 10,
-            },
-        );
-        write_unit(
-            profile,
-            &Unit {
-                package: "dep",
-                hash: "d2d2d2d2d2d2d2d2",
-                kind: "lib-dep",
-                fingerprint: 22,
-                deps: &[],
-                root: Some(&new_dep),
-                features: "[]",
-                age_secs: 5_000,
-            },
-        );
-        write_unit(
-            profile,
-            &Unit {
-                package: "dep",
-                hash: "cccccccccccccccc",
-                kind: "lib-dep",
-                fingerprint: 21,
-                deps: &[],
-                root: Some(&old_dep),
-                features: "[]",
-                age_secs: 10,
-            },
-        );
-        // The build script: its compile unit names build.rs, its run unit
-        // has no dep-info and lives because the live library names it.
-        write_unit(
-            profile,
-            &Unit {
-                package: "fixture",
-                hash: "eeeeeeeeeeeeeeee",
-                kind: "build-script-build-script-build",
-                fingerprint: 30,
-                deps: &[],
-                root: Some("build.rs"),
-                features: "[]",
-                age_secs: 10,
-            },
-        );
-        write_unit(
-            profile,
-            &Unit {
-                package: "fixture",
-                hash: "ffffffffffffffff",
-                kind: "run-build-script-build-script-build",
-                fingerprint: 1,
-                deps: &[30],
-                root: None,
-                features: "[]",
-                age_secs: 10,
-            },
-        );
-        write_unit(
-            profile,
-            &Unit {
-                package: "fixture",
-                hash: "9999999999999999",
-                kind: "run-build-script-build-script-build",
-                fingerprint: 2,
-                deps: &[30],
-                root: None,
-                features: "[]",
-                age_secs: 10,
-            },
-        );
-        // Incremental session directories: one used yesterday, one not for a month.
-        common::write(&profile.join("incremental/fixture-fresh/s-1/x"), "");
-        common::write(&profile.join("incremental/fixture-stale/s-1/x"), "");
-        let month_ago = std::time::SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60);
-        std::fs::File::open(profile.join("incremental/fixture-stale"))
-            .unwrap()
-            .set_modified(month_ago)
-            .unwrap();
-        // Codegen-unit objects of the live library: one its last compile
-        // wrote, one a finished incremental session left behind; and an
-        // artifact whose unit no longer exists at all.
-        let aged = |path: &Path, secs: u64| {
-            common::write(path, "o");
-            std::fs::File::options()
-                .write(true)
-                .open(path)
-                .unwrap()
-                .set_modified(std::time::SystemTime::now() - Duration::from_secs(secs))
-                .unwrap();
-        };
-        aged(
-            &profile.join("deps/fixture-aaaaaaaaaaaaaaaa.fixture.0f0f0f0f0f0f0f0f-cgu.0.rcgu.o"),
-            0,
-        );
-        aged(
-            &profile.join("deps/fixture-aaaaaaaaaaaaaaaa.fixture.0f0f0f0f0f0f0f0f-cgu.1.rcgu.o"),
-            5_000,
-        );
-        aged(&profile.join("deps/libfixture-1234567890abcdef.rlib"), 0);
-    };
-    fixtures(&profile);
-
-    let built = h.json(&["build", "repo"]);
-    let codes = built["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|notice| {
-            (
-                notice["code"].as_str().unwrap().to_owned(),
-                notice["message"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        codes.iter().any(|(code, message)| code == "SWEPT"
-            && message.contains("3 superseded units")
-            && message.contains("1 stale incremental directory")
-            && message.contains("2 stale files")),
-        "{codes:?}"
-    );
-    for (package, hash, live) in [
-        ("fixture", "aaaaaaaaaaaaaaaa", true),
-        ("fixture", "bbbbbbbbbbbbbbbb", false),
-        ("fixture", "0000000000000000", true),
-        ("dep", "dddddddddddddddd", true),
-        ("dep", "d2d2d2d2d2d2d2d2", true),
-        ("dep", "cccccccccccccccc", false),
-        ("fixture", "eeeeeeeeeeeeeeee", true),
-        ("fixture", "ffffffffffffffff", true),
-        ("fixture", "9999999999999999", false),
-    ] {
-        assert_eq!(
-            unit_exists(&profile, package, hash),
-            live,
-            "{package}-{hash}"
-        );
-    }
-    assert!(!profile
-        .join("deps/libfixture-bbbbbbbbbbbbbbbb.rlib")
-        .exists());
-    assert!(!profile.join("deps/fixture-bbbbbbbbbbbbbbbb.d").exists());
-    assert!(profile
-        .join("deps/libfixture-aaaaaaaaaaaaaaaa.rlib")
-        .exists());
-    assert!(!profile.join("build/fixture-9999999999999999").exists());
-    assert!(profile.join("build/fixture-ffffffffffffffff/out").exists());
-    assert!(profile.join("incremental/fixture-fresh").exists());
-    assert!(!profile.join("incremental/fixture-stale").exists());
-    assert!(profile
-        .join("deps/fixture-aaaaaaaaaaaaaaaa.fixture.0f0f0f0f0f0f0f0f-cgu.0.rcgu.o")
-        .exists());
-    assert!(!profile
-        .join("deps/fixture-aaaaaaaaaaaaaaaa.fixture.0f0f0f0f0f0f0f0f-cgu.1.rcgu.o")
-        .exists());
-    assert!(!profile
-        .join("deps/libfixture-1234567890abcdef.rlib")
-        .exists());
-
-    // Plain prune plans a sweep for whatever accumulated since, applies it
-    // with the rest, and reports what it reclaimed.
-    fixtures(&profile);
-    let planned = h.json(&["prune"]);
-    assert_eq!(planned["data"]["applied"], false);
-    let item = planned["data"]["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["action"] == "sweep")
-        .expect("a sweep item");
-    assert_eq!(item["target"], "repo");
-    assert!(item["reasons"][0]
-        .as_str()
-        .unwrap()
-        .starts_with("superseded-build-output (3 units"));
-    assert!(unit_exists(&profile, "fixture", "bbbbbbbbbbbbbbbb"));
-    let applied = h.json(&["prune", "--yes"]);
-    let item = applied["data"]["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["action"] == "sweep")
-        .unwrap();
-    assert_eq!(item["result"]["units"], 3);
-    assert_eq!(item["result"]["incremental"], 1);
-    assert!(!unit_exists(&profile, "fixture", "bbbbbbbbbbbbbbbb"));
-    assert!(h.json(&["prune"])["data"]["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|item| item["action"] != "sweep"));
-
-    // Nothing that matches the workspace at all is a refusal, never a wipe:
-    // the observation is about some other checkout.
-    for path in wt_sys::fsx::read_dir_paths(&profile.join("deps")).unwrap() {
-        if path.extension().is_some_and(|ext| ext == "d") {
-            common::write(&path, "x: /elsewhere/src/lib.rs\n");
-        }
-    }
-    common::write(
-        &profile.join("build/fixture-eeeeeeeeeeeeeeee/build_script_build-eeeeeeeeeeeeeeee.d"),
-        "x: /elsewhere/build.rs\n",
-    );
-    let built = h.json(&["build", "repo"]);
-    assert!(built["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|notice| notice["code"] == "SWEEP_SKIPPED"));
-    assert!(unit_exists(&profile, "fixture", "aaaaaaaaaaaaaaaa"));
-    assert!(unit_exists(&profile, "dep", "dddddddddddddddd"));
-
-    // A build in flight holds cargo's lock; the sweep stands down.
-    let cargo_lock = profile.join(".cargo-lock");
-    let held = wt_sys::fsx::try_lock_exclusive(&cargo_lock)
-        .unwrap()
-        .unwrap();
-    let built = h.json(&["build", "repo"]);
-    assert!(built["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|notice| notice["code"] == "SWEEP_SKIPPED"
-            && notice["message"]
-                .as_str()
-                .unwrap()
-                .contains("a build holds")));
-    drop(held);
-}
-
-fn cargo_repo(h: &Harness, name: &str) -> PathBuf {
-    let repo = h.repo(name, "");
-    common::write(
-        &repo.join("Cargo.toml"),
-        "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
-    );
-    common::write(&repo.join("Cargo.lock"), "# lock\n");
-    common::git(&repo, &["add", "-A"]);
-    common::git(&repo, &["commit", "-qm", "cargo fixture"]);
-    common::git(&repo, &["push", "-q", "origin", "main"]);
-    repo
-}
-
-/// Pushes one commit to the repository's origin from a second clone and
-/// returns its id.
-fn advance_origin(h: &Harness, name: &str, file: &str) -> String {
-    let origin = h.repos.join(format!("{name}-origin.git"));
-    let other = h.root.join(format!("{name}-other-{file}"));
-    common::git(
-        &h.root,
-        &[
-            "clone",
-            "-q",
-            origin.to_str().unwrap(),
-            other.to_str().unwrap(),
-        ],
-    );
-    common::write(&other.join(file), "upstream\n");
-    common::git(&other, &["add", "-A"]);
-    common::git(&other, &["commit", "-qm", "upstream change"]);
-    common::git(&other, &["push", "-q", "origin", "main"]);
-    common::git_stdout(&other, &["rev-parse", "HEAD"])
-        .trim()
-        .to_owned()
-}
-
-#[test]
-fn anchor_fast_forwards_a_clean_canonical_and_records_its_build() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
-    let repo = cargo_repo(&h, "repo");
-    h.register(&repo);
-    let before = common::git_stdout(&repo, &["rev-parse", "HEAD"])
-        .trim()
-        .to_owned();
-    let tip = advance_origin(&h, "repo", "one.txt");
-
-    let refreshed = h.json(&["anchor", "repo"]);
-    assert_eq!(refreshed["data"]["refreshed"], true);
-    assert_eq!(refreshed["data"]["fetched"], true);
-    assert_eq!(refreshed["data"]["moved"]["from"], before);
-    assert_eq!(refreshed["data"]["moved"]["to"], tip);
-    assert_eq!(refreshed["data"]["head"], tip);
-    assert_eq!(refreshed["data"]["build"], "ok");
-    assert_eq!(
-        common::git_stdout(&repo, &["rev-parse", "HEAD"]).trim(),
-        tip
-    );
-    assert!(repo.join("one.txt").exists());
-    let status = h.json(&["status", "repo"]);
-    assert_eq!(status["data"]["build"]["state"], "ok");
-    let target = wt_core::model::Target::parse("repo").unwrap();
-    let state = wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
-        &h.home.join(wt_core::model::tree_state_path(&target)),
-        "STATE_CORRUPT",
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        state.build.as_ref().unwrap().head.as_deref(),
-        Some(tip.as_str())
-    );
-    assert!(state.build.unwrap().log.ends_with(".wt/logs/wt-setup.log"));
-    assert!(h.json(&["doctor", "repo"])["data"]["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|finding| finding["code"] != "ANCHOR_COLD"));
-
-    // Current already: nothing moves, nothing builds.
-    let again = h.json(&["anchor", "repo"]);
-    assert!(again["data"]["moved"].is_null());
-    assert_eq!(again["data"]["build"], "fresh");
-
-    // A modified tracked file keeps the canonical where it is.
-    let tip2 = advance_origin(&h, "repo", "two.txt");
-    common::write(&repo.join("README.md"), "edited locally\n");
-    let dirty = h.json(&["anchor", "repo"]);
-    assert!(dirty["data"]["moved"].is_null());
-    assert_eq!(dirty["data"]["head"], tip);
-    assert!(dirty["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|notice| notice["code"] == "ANCHOR_DIRTY"));
-    assert!(h.json(&["doctor", "repo"])["data"]["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|finding| finding["code"] != "ANCHOR_COLD"));
-    common::git(&repo, &["checkout", "--", "README.md"]);
-
-    // Another branch checked out: the default branch is not what is here.
-    common::git(&repo, &["checkout", "-qb", "other"]);
-    let off = h.json(&["anchor", "repo"]);
-    assert!(off["data"]["moved"].is_null());
-    assert!(off["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|notice| notice["code"] == "ANCHOR_OFF_DEFAULT"));
-    common::git(&repo, &["checkout", "-q", "main"]);
-
-    // Local commits origin lacks: never reset.
-    common::write(&repo.join("local.txt"), "local\n");
-    common::git(&repo, &["add", "-A"]);
-    common::git(&repo, &["commit", "-qm", "local only"]);
-    let diverged = h.json(&["anchor", "repo"]);
-    assert!(diverged["data"]["moved"].is_null());
-    assert!(diverged["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|notice| notice["code"] == "ANCHOR_DIVERGED"));
-    assert!(repo.join("local.txt").exists());
-    common::git(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
-
-    // Clean again: the fast-forward catches up with both upstream commits.
-    let caught_up = h.json(&["anchor", "repo"]);
-    assert_eq!(caught_up["data"]["moved"]["to"], tip2);
-    assert_eq!(caught_up["data"]["build"], "ok");
-
-    // A refresh already under way is the reason not to start another.
-    let holder = wt_sys::lock::Holder::current("repo", "test", "now");
-    let lock = wt_sys::lock::anchor(&h.home.join("locks/repo/anchor.lock"), &holder).unwrap();
-    let busy = h.json(&["anchor", "repo"]);
-    assert_eq!(busy["data"]["refreshed"], false);
-    assert_eq!(busy["data"]["build"], "busy");
-    assert!(busy["notices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|notice| notice["code"] == "ANCHOR_BUSY"));
-    drop(lock);
-
-    let unknown = h.wt().args(["anchor", "nope", "--json"]).output().unwrap();
-    assert_eq!(unknown.status.code(), Some(3));
-
-    // A canonical that seeds trees but has no build of its commit is cold.
-    common::write(&repo.join(".wt/build.status"), "failed\n");
-    assert!(h.json(&["doctor", "repo"])["data"]["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["code"] == "ANCHOR_COLD"
-            && finding["remedy"]
-                .as_str()
-                .unwrap()
-                .contains("wt anchor repo")));
-}
-
-/// Polls until the file holds `needle`, returning its content.
-fn wait_for_contains(path: &Path, needle: &str) -> String {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let text = std::fs::read_to_string(path).unwrap_or_default();
-        if text.contains(needle) {
-            return text;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{} never contained {needle:?}; last content:\n{text}",
-            path.display()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-fn wait_for_file(path: &Path, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !path.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "{what} never appeared at {}",
-            path.display()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-#[test]
-fn lifecycle_verbs_refresh_the_anchor_only_for_labels_that_seed() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
-    let repo = cargo_repo(&h, "repo");
-    h.register(&repo);
-    let plain = h.repo("plain", "[task.build]\nrun = \"true\"\n");
-    h.register(&plain);
-    let anchor_log = repo.join(".wt/logs/wt-anchor.log");
-    let canonical_status = repo.join(".wt/build.status");
-
-    // `new` starts the tree's own build first, then the canonical's,
-    // detached: the canonical ends up built at its commit.
-    let tip = advance_origin(&h, "repo", "one.txt");
-    let created = h.json(&["new", "repo/work", "--no-sync"]);
-    assert!(created["data"]["build"]["log"].is_string());
-    wait_for_file(&anchor_log, "the anchor log");
-    wait_for_text(&canonical_status, "ok\n");
-    let target = wt_core::model::Target::parse("repo").unwrap();
-    let read_state = || {
-        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(
-            &h.home.join(wt_core::model::tree_state_path(&target)),
-            "STATE_CORRUPT",
-        )
-        .unwrap()
-        .unwrap()
-    };
-    // `new` brought the canonical to the tip it fetched before branching
-    // (§11.2); its refresh then skips the fetch, finds nothing to move, and
-    // builds the canonical at that commit.
-    assert_eq!(
-        common::git_stdout(&repo, &["rev-parse", "HEAD"]).trim(),
-        tip
-    );
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while read_state().build.and_then(|build| build.head).as_deref() != Some(tip.as_str()) {
-        assert!(
-            Instant::now() < deadline,
-            "new's refresh never built the canonical"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    wait_for_text(&canonical_status, "ok\n");
-    // The refresh writes its own report as it exits, after the build's
-    // status; wait for it rather than reading a half-written log.
-    let log = wait_for_contains(&anchor_log, "repo is at the default branch's tip");
-    assert!(!log.contains("fetch"), "{log}");
-
-    // `rm` refreshes with a fetch: the canonical catches up with a commit
-    // nothing else has fetched.
-    let tip2 = advance_origin(&h, "repo", "two.txt");
-    h.json(&["rm", "repo/work", "--yes"]);
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while read_state().build.unwrap().head.as_deref() != Some(tip2.as_str()) {
-        assert!(
-            Instant::now() < deadline,
-            "rm's refresh never moved the canonical"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    wait_for_text(&canonical_status, "ok\n");
-    assert_eq!(
-        common::git_stdout(&repo, &["rev-parse", "HEAD"]).trim(),
-        tip2
-    );
-    wait_for_contains(&anchor_log, "fetch  ok");
-
-    // A label whose adapters seed nothing has nothing to keep warm.
-    h.json(&["new", "plain/work", "--no-sync"]);
-    let plain_target = wt_core::model::Target::parse("plain/work").unwrap();
-    wait_for_text(&h.home.join("trees/plain/work/.wt/build.status"), "ok\n");
-    h.json(&["rm", "plain/work", "--yes"]);
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(!plain.join(".wt/logs/wt-anchor.log").exists());
-    assert!(!plain.join(".wt/build.status").exists());
-    let _ = plain_target;
-}
 
 #[test]
 fn clone_makes_a_hub_and_a_detached_canonical_that_new_branches_from() {
@@ -6078,6 +2587,963 @@ fn clone_makes_a_hub_and_a_detached_canonical_that_new_branches_from() {
 }
 
 #[test]
+fn section_11_2_branch_convention_names_the_branch_a_creation_does_not() {
+    let h = Harness::new();
+    configure_backend_none(&h);
+    let repo = h.repo(
+        "repo",
+        "branch = [\"{{meta.ticket}}_{{name()}}\", \"wip/{{name()}}\"]\n",
+    );
+    h.register(&repo);
+
+    let ticketed = h.json(&[
+        "new",
+        "repo/fix-scroll",
+        "--no-sync",
+        "--no-open",
+        "--meta",
+        "ticket=ABC-42",
+    ]);
+    assert_eq!(ticketed["data"]["tree"]["branch"], "ABC-42_fix-scroll");
+    assert_eq!(ticketed["data"]["tree"]["name"], "fix-scroll");
+
+    // No ticket: the next candidate decides, and nothing refuses.
+    let adhoc = h.json(&["new", "repo/poke", "--no-sync", "--no-open"]);
+    assert_eq!(adhoc["data"]["tree"]["branch"], "wip/poke");
+
+    // Naming the branch outright still wins, and re-running an address is
+    // idempotent against the recorded branch rather than the convention.
+    let named = h.json(&[
+        "new",
+        "repo/audit",
+        "--no-sync",
+        "--no-open",
+        "--branch",
+        "audit-only",
+        "--meta",
+        "ticket=ABC-43",
+    ]);
+    assert_eq!(named["data"]["tree"]["branch"], "audit-only");
+    let again = h.json(&[
+        "new",
+        "repo/fix-scroll",
+        "--no-sync",
+        "--no-open",
+        "--meta",
+        "ticket=ABC-42",
+    ]);
+    assert_eq!(again["data"]["created"], false);
+    // The branch was decided once, so a re-run that restates nothing is the
+    // same source — even after the metadata it was derived from changes.
+    let bare = h.json(&["new", "repo/fix-scroll", "--no-sync", "--no-open"]);
+    assert_eq!(bare["data"]["created"], false);
+    assert_eq!(bare["data"]["tree"]["branch"], "ABC-42_fix-scroll");
+    h.json(&["meta", "repo/fix-scroll", "ticket=ABC-99"]);
+    let edited = h.json(&["new", "repo/fix-scroll", "--no-sync", "--no-open"]);
+    assert_eq!(edited["data"]["created"], false);
+    assert_eq!(edited["data"]["tree"]["branch"], "ABC-42_fix-scroll");
+
+    // A metadata value git cannot spell as a branch is refused before the
+    // worktree is touched.
+    let output = h
+        .wt()
+        .args([
+            "new",
+            "repo/spacey",
+            "--no-sync",
+            "--no-open",
+            "--meta",
+            "ticket=ABC 44",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let refusal: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refusal["error"]["code"], "BRANCH_INVALID");
+    assert!(refusal["error"]["remedy"]
+        .as_str()
+        .unwrap()
+        .contains("--branch"));
+    assert_eq!(
+        h.json(&["list"])["data"]["trees"].as_array().unwrap().len(),
+        4
+    );
+}
+
+#[test]
+fn github_pull_requests_check_out_their_own_branch_and_track_it() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    let origin = repo.parent().unwrap().join("repo-origin.git");
+    let url = "https://github.com/o/repo.git";
+    common::git(
+        &repo,
+        &[
+            "config",
+            &format!("url.{}.insteadOf", origin.display()),
+            url,
+        ],
+    );
+    common::git(&repo, &["remote", "set-url", "origin", url]);
+    common::write(&repo.join("README.md"), "feature\n");
+    common::git(&repo, &["add", "README.md"]);
+    common::git(&repo, &["commit", "-qm", "feature"]);
+    common::git(
+        &repo,
+        &["push", "-q", "origin", "HEAD:refs/heads/feature/x"],
+    );
+    h.push_pull_ref(&repo, 8, "HEAD");
+    common::git(&repo, &["reset", "-q", "--hard", "HEAD^"]);
+    h.register(&repo);
+
+    // gh names the branch, so the worktree is that branch and tracks it:
+    // a plain `git push` from inside updates the pull request.
+    h.install_gh(
+        r#"{"headRefName":"feature/x","isCrossRepository":false,"headRepositoryOwner":{"login":"o"}}"#,
+        0,
+    );
+    let report = h.json(&[
+        "new",
+        "repo/pr-8",
+        "--from",
+        "https://github.com/o/repo/pull/8",
+        "--no-sync",
+    ]);
+    assert_eq!(report["data"]["tree"]["branch"], "feature/x");
+    assert_eq!(
+        report["notices"][0]["code"], "PR_BRANCH_TRACKED",
+        "{report}"
+    );
+    let path = PathBuf::from(report["data"]["tree"]["path"].as_str().unwrap());
+    assert_eq!(
+        common::git_stdout(&path, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+        "origin/feature/x"
+    );
+    assert_eq!(
+        common::git_stdout(&path, &["rev-parse", "HEAD"]),
+        common::git_stdout(&repo, &["rev-parse", "refs/remotes/origin/feature/x"])
+    );
+    let (cwd, argv) = h.gh_calls().unwrap();
+    assert_eq!(
+        argv,
+        "pr view 8 --json headRefName,isCrossRepository,headRepositoryOwner"
+    );
+    assert_eq!(
+        std::fs::canonicalize(cwd).unwrap(),
+        std::fs::canonicalize(&repo).unwrap()
+    );
+    // The bare `pr:N` spelling asks the same question of origin's forge,
+    // and lands on the same branch: one pull request, one worktree.
+    h.wt()
+        .args(["new", "repo/pr-8-again", "--from", "pr:8", "--no-sync"])
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("feature/x"));
+
+    // A detached checkout of the same pull request tracks nothing and is
+    // told where a push has to go.
+    let detached = h.json(&[
+        "new",
+        "repo/pr-8-detached",
+        "--from",
+        "pr:8",
+        "--detach",
+        "--no-sync",
+    ]);
+    assert!(detached["data"]["tree"]["branch"].is_null(), "{detached}");
+    assert_eq!(detached["notices"][0]["code"], "PR_BRANCH_UNTRACKED");
+    let message = detached["notices"][0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("this detached worktree mirrors"),
+        "{message}"
+    );
+    assert!(
+        message.contains("git push origin HEAD:feature/x"),
+        "{message}"
+    );
+
+    // A local branch already named like the head is checked out as it is,
+    // and the creation says both that it is behind and that it tracks
+    // nothing, rather than promising a push it cannot deliver.
+    common::git(
+        &repo,
+        &[
+            "push",
+            "-q",
+            "origin",
+            "refs/remotes/origin/feature/x:refs/heads/feature/z",
+        ],
+    );
+    h.push_pull_ref(&repo, 6, "refs/remotes/origin/feature/x");
+    common::git(&repo, &["branch", "feature/z", "HEAD"]);
+    h.install_gh(
+        r#"{"headRefName":"feature/z","isCrossRepository":false,"headRepositoryOwner":{"login":"o"}}"#,
+        0,
+    );
+    let stale = h.json(&["new", "repo/pr-6", "--from", "pr:6", "--no-sync"]);
+    assert_eq!(stale["data"]["tree"]["branch"], "feature/z");
+    let notices = stale["notices"].as_array().unwrap();
+    let codes: BTreeSet<_> = notices
+        .iter()
+        .map(|notice| notice["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        codes,
+        BTreeSet::from(["FROM_LOCAL_SHADOWS_REMOTE", "PR_BRANCH_UNTRACKED"]),
+        "{stale}"
+    );
+    assert!(notices.iter().any(|notice| notice["message"]
+        .as_str()
+        .unwrap()
+        .contains("git push origin HEAD:feature/z")));
+
+    // `--branch` naming an unrelated branch that tracks its own origin
+    // twin is not the pull request's branch, however well it tracks.
+    common::git(&repo, &["branch", "other", "HEAD"]);
+    common::git(&repo, &["push", "-q", "-u", "origin", "other"]);
+    h.install_gh(
+        r#"{"headRefName":"feature/x","isCrossRepository":false,"headRepositoryOwner":{"login":"o"}}"#,
+        0,
+    );
+    let other = h.json(&[
+        "new",
+        "repo/pr-8-other",
+        "--from",
+        "pr:8",
+        "--branch",
+        "other",
+        "--no-sync",
+    ]);
+    assert_eq!(other["data"]["tree"]["branch"], "other");
+    let notices = other["notices"].as_array().unwrap();
+    assert!(
+        notices
+            .iter()
+            .all(|notice| notice["code"] != "PR_BRANCH_TRACKED"),
+        "{other}"
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice["code"] == "PR_BRANCH_UNTRACKED"
+                && notice["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("branch other tracks origin/other, which is not")
+                && notice["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("git push origin HEAD:feature/x")),
+        "{other}"
+    );
+
+    // A re-run for an address that records the pull request never asks
+    // gh, so a broken gh cannot fail it.
+    h.install_gh("gh: command failed", 1);
+    h.forget_gh_calls();
+    let rerun = h.json(&[
+        "new",
+        "repo/pr-8",
+        "--from",
+        "https://github.com/o/repo/pull/8",
+        "--no-sync",
+    ]);
+    assert_eq!(rerun["data"]["tree"]["branch"], "feature/x");
+    assert!(h.gh_calls().is_none());
+
+    // An offline re-run keeps the recorded branch without asking gh.
+    h.forget_gh_calls();
+    let again = h.json(&[
+        "new",
+        "repo/pr-8",
+        "--from",
+        "https://github.com/o/repo/pull/8",
+        "--no-fetch",
+        "--no-sync",
+    ]);
+    assert_eq!(again["data"]["tree"]["branch"], "feature/x");
+    assert!(h.gh_calls().is_none());
+
+    // A fork's branch is not on origin, so the PR ref is mirrored and the
+    // creation says where a push would have to go instead.
+    h.push_pull_ref(&repo, 7, "HEAD");
+    h.install_gh(
+        r#"{"headRefName":"feature/y","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"}}"#,
+        0,
+    );
+    let fork = h.json(&["new", "repo/pr-7", "--from", "pr:7", "--no-sync"]);
+    assert_eq!(fork["data"]["tree"]["branch"], "pr/7");
+    assert_eq!(fork["notices"][0]["code"], "PR_BRANCH_UNTRACKED", "{fork}");
+    let message = fork["notices"][0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("branch pr/7 mirrors pull request 7"),
+        "{message}"
+    );
+    assert!(
+        message.contains("push to that fork's `feature/y` branch"),
+        "{message}"
+    );
+
+    // --no-fetch on a new address mirrors the already-fetched PR ref
+    // without asking gh, and names the flag that would track it.
+    h.forget_gh_calls();
+    let offline = h.json(&[
+        "new",
+        "repo/pr-7-offline",
+        "--from",
+        "pr:7",
+        "--branch",
+        "offline-7",
+        "--no-fetch",
+        "--no-sync",
+    ]);
+    assert_eq!(offline["data"]["tree"]["branch"], "offline-7");
+    assert_eq!(offline["notices"][0]["code"], "PR_BRANCH_UNTRACKED");
+    let message = offline["notices"][0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("branch offline-7 mirrors pull request 7"),
+        "{message}"
+    );
+    assert!(message.contains("retry without --no-fetch"), "{message}");
+    assert!(h.gh_calls().is_none());
+
+    // gh refusing is the creation refusing, with gh's reason and a way in.
+    h.install_gh(
+        "To get started with GitHub CLI, please run:  gh auth login",
+        4,
+    );
+    h.wt()
+        .args(["new", "repo/pr-9", "--from", "pr:9", "--no-sync"])
+        .assert()
+        .code(7)
+        .stderr(predicate::str::contains(
+            "gh could not look up pull request 9",
+        ))
+        .stderr(predicate::str::contains("run `gh auth login`"));
+    h.install_gh("GraphQL: Could not resolve to a PullRequest", 1);
+    h.wt()
+        .args(["new", "repo/pr-9", "--from", "pr:9", "--no-sync"])
+        .assert()
+        .code(7)
+        .stderr(predicate::str::contains("Could not resolve"))
+        .stderr(predicate::str::contains("gh auth status"));
+    assert!(h.json(&["ls"])["data"]["trees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|tree| tree["name"] != "pr-9"));
+}
+
+#[test]
+fn copy_populates_declared_paths_and_refuses_tracked_sources() {
+    let copied = Harness::new();
+    let repo = copied.repo("repo", "copy=['.env']\n");
+    common::write(&repo.join(".env"), "TOKEN=local-only\n");
+    copied.register(&repo);
+    let created = copied.json(&["new", "repo/work", "--no-sync", "--no-after-new"]);
+    let root = Path::new(created["data"]["tree"]["path"].as_str().unwrap());
+    assert_eq!(
+        wt_sys::fsx::read_string(&root.join(".env")).unwrap(),
+        Some("TOKEN=local-only\n".to_owned())
+    );
+
+    let absent = Harness::new();
+    let repo = absent.repo("repo", "copy=['missing.secret']\n");
+    absent.register(&repo);
+    let created = absent.json(&["new", "repo/work", "--no-sync"]);
+    assert!(created["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice["code"] == "COPY_ABSENT"));
+
+    let tracked = Harness::new();
+    let repo = tracked.repo("repo", "copy=['README.md']\n");
+    tracked.register(&repo);
+    tracked
+        .wt()
+        .args(["new", "repo/work", "--no-sync", "--json"])
+        .assert()
+        .code(5)
+        .stdout(predicate::str::contains("COPY_TRACKED"));
+    assert_eq!(
+        tracked.json(&["status", "repo/work"])["data"]["phase"],
+        "incomplete"
+    );
+}
+
+#[test]
+#[allow(clippy::disallowed_types)]
+fn cargo_sets_no_build_directory_and_seeds_a_tree_from_the_canonical_build() {
+    let h = Harness::new();
+    common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
+    let repo = h.repo("repo", "");
+    common::write(
+        &repo.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
+    );
+    common::write(&repo.join("Cargo.lock"), "# generated fixture lockfile\n");
+    common::git(&repo, &["add", "Cargo.toml", "Cargo.lock"]);
+    common::git(&repo, &["commit", "-qm", "add cargo fixture"]);
+    common::git(&repo, &["push", "-q", "origin", "main"]);
+    h.register(&repo);
+    // A built canonical: compiled dependencies, incremental state, and the
+    // uplifted binary — the whole output root travels with the snapshot.
+    let rlib = "target/debug/deps/libfixture-0123456789abcdef.rlib";
+    common::write(&repo.join(rlib), "rlib\n");
+    common::write(
+        &repo.join("target/debug/.fingerprint/fixture-0123456789abcdef/lib-fixture"),
+        "fingerprint\n",
+    );
+    common::write(&repo.join("target/debug/incremental/fixture-abc/s-1/x"), "");
+    common::write(&repo.join("target/debug/fixture"), "binary\n");
+    // A source file whose modification time is what cargo's freshness rule
+    // reads, and one with uncommitted changes the snapshot must not carry.
+    let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_876_400);
+    std::fs::File::options()
+        .write(true)
+        .open(repo.join("Cargo.toml"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    common::write(&repo.join("Cargo.lock"), "# edited, not committed\n");
+
+    let created = h.json(&["new", "repo/work", "--no-sync", "--no-after-new"]);
+    let canonical_env = h.json(&["env", "repo"])["data"]["env"].clone();
+    let linked_env = h.json(&["env", "repo/work"])["data"]["env"].clone();
+    // The whole build lives in the tree's own `target/`: no cargo directory
+    // variable of any kind, so a plain `cargo build` anywhere does the right
+    // thing and no two trees can address one another's units.
+    for env in [&canonical_env, &linked_env] {
+        assert!(env.get("CARGO_BUILD_BUILD_DIR").is_none());
+        assert!(env.get("CARGO_TARGET_DIR").is_none());
+    }
+    let linked = PathBuf::from(linked_env["WT_ROOT"].as_str().unwrap());
+    let codes = created["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|notice| notice["code"].as_str())
+        .collect::<Vec<_>>();
+    // Whatever the filesystem, the tree is the committed checkout: the
+    // canonical's uncommitted edit stays there.
+    assert_eq!(
+        std::fs::read_to_string(linked.join("Cargo.lock")).unwrap(),
+        "# generated fixture lockfile\n"
+    );
+    assert!(
+        common::git_stdout(&linked, &["status", "--porcelain", "--untracked-files=no"]).is_empty()
+    );
+    let seeded = if cfg!(target_os = "macos") {
+        assert!(codes.contains(&"SNAPSHOT_CLONED"), "{codes:?}");
+        assert_eq!(
+            std::fs::read_to_string(linked.join(rlib)).unwrap(),
+            "rlib\n"
+        );
+        assert!(linked
+            .join("target/debug/.fingerprint/fixture-0123456789abcdef/lib-fixture")
+            .exists());
+        assert!(linked
+            .join("target/debug/incremental/fixture-abc/s-1/x")
+            .exists());
+        assert!(linked.join("target/debug/fixture").exists());
+        // A clean tracked file keeps the canonical's modification time, so
+        // cargo finds the snapshot's units as fresh as the canonical's.
+        assert_eq!(
+            std::fs::metadata(linked.join("Cargo.toml"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            old
+        );
+        // Copy-on-write: a rebuild in the tree leaves the canonical as it was.
+        common::write(&linked.join(rlib), "rebuilt\n");
+        assert_eq!(std::fs::read_to_string(repo.join(rlib)).unwrap(), "rlib\n");
+        true
+    } else {
+        assert!(codes.contains(&"SNAPSHOT_SKIPPED"), "{codes:?}");
+        assert!(!linked.join("target").exists());
+        false
+    };
+    // Sizing follows the build output into the tree.
+    let listed = h.json(&["list", "repo", "--disk"]);
+    let work = listed["data"]["trees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tree| tree["target"] == "repo/work")
+        .unwrap()
+        .clone();
+    if seeded {
+        assert!(work["build_kb"].as_u64().unwrap() > 0);
+    } else {
+        assert!(work["build_kb"].is_null());
+    }
+
+    let synced = h.json(&["sync", "repo/work"]);
+    let inputs = synced["data"]["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|input| input["path"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(inputs, BTreeSet::from(["Cargo.lock", "Cargo.toml"]));
+
+    common::proof_capture(
+        "D1",
+        format!(
+            "CARGO_BUILD_BUILD_DIR set: false\nCARGO_TARGET_DIR set: false\nseeded from canonical: {seeded}\nlinked target: {}\nsync inputs: {}",
+            linked.join("target").display(),
+            inputs.iter().copied().collect::<Vec<_>>().join(", ")
+        ),
+    );
+}
+
+#[test]
+fn doctor_manufactures_git_environment_port_and_adapter_conditions() {
+    fn finding_codes(value: &serde_json::Value) -> BTreeSet<String> {
+        value["data"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|finding| finding["code"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    let mut codes = BTreeSet::new();
+    let h = Harness::new();
+    let repo = h.repo("repo", "ports=['http']\nbin=['missing-bin']\n");
+    let registered = h.register(&repo);
+    codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
+    wt_sys::fsx::create_private_dir(&repo.join("missing-bin")).unwrap();
+    codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
+
+    // PATH_NOT_SHADOWED is only observable from inside a door (A76), and only
+    // where a bin directory or a claimed command gives it a prefix to miss.
+    let inside_door = h
+        .wt()
+        .env("WT_TARGET", "repo")
+        .args(["doctor", "repo", "--json"])
+        .output()
+        .unwrap();
+    codes.extend(finding_codes(
+        &serde_json::from_slice(&inside_door.stdout).unwrap(),
+    ));
+
+    let exclude = repo.join(".git/info/exclude");
+    common::write(&exclude, "");
+    codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
+    common::write(&exclude, "# >>> wt managed >>>\n/.wt/\n");
+    codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
+
+    let invalid_activation = h
+        .wt()
+        .env("WT_ACTIVATION", "not-json")
+        .args(["doctor", "repo", "--json"])
+        .output()
+        .unwrap();
+    assert!(invalid_activation.status.success());
+    codes.extend(finding_codes(
+        &serde_json::from_slice(&invalid_activation.stdout).unwrap(),
+    ));
+
+    common::write(
+        &h.home.join("config.toml"),
+        "[ports]\nbase=21000\nstride=16\n",
+    );
+    let port = registered["data"]["tree"]["ports"][0]["port"]
+        .as_u64()
+        .unwrap() as u16;
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+    codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
+    drop(listener);
+
+    let unmanaged = h.root.join("unmanaged");
+    common::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "unmanaged",
+            unmanaged.to_str().unwrap(),
+        ],
+    );
+    let stale = h.root.join("stale");
+    common::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "stale",
+            stale.to_str().unwrap(),
+        ],
+    );
+    wt_sys::fsx::remove_path(&stale).unwrap();
+    codes.extend(finding_codes(&h.json(&["doctor", "repo"])));
+
+    let h_empty = Harness::new();
+    let empty = h_empty.repo("empty", "");
+    h_empty.register(&empty);
+    codes.extend(finding_codes(&h_empty.json(&["doctor", "empty"])));
+
+    let h_rust = Harness::new();
+    let rust = h_rust.repo("rust", "");
+    common::write(
+        &rust.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.1.0'\n",
+    );
+    h_rust.register(&rust);
+    codes.extend(finding_codes(&h_rust.json(&["doctor", "rust"])));
+    common::write_executable(&h_rust.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
+    codes.extend(finding_codes(&h_rust.json(&["doctor", "rust"])));
+
+    let h_node = Harness::new();
+    let node = h_node.repo("node", "");
+    common::write(&node.join("package.json"), "{\"name\":\"fixture\"}\n");
+    common::write(&node.join("package-lock.json"), "{}\n");
+    common::write_executable(&h_node.shims.join("npm"), "#!/bin/sh\nexit 0\n");
+    h_node.register(&node);
+    // The nudged tool absent, then installed.
+    codes.extend(finding_codes(&h_node.json(&["doctor", "node"])));
+    common::write_executable(&h_node.shims.join("pnpm"), "#!/bin/sh\nexit 0\n");
+    codes.extend(finding_codes(&h_node.json(&["doctor", "node"])));
+
+    for code in [
+        "BIN_DIR_MISSING",
+        "PATH_NOT_SHADOWED",
+        "EXCLUDE_MISSING",
+        "EXCLUDE_REPAIRED",
+        "ACTIVATION_IGNORED",
+        "GEOMETRY_CHANGED",
+        "SLOT_SQUATTED",
+        "PORT_SQUATTED",
+        "PORT_BOUND",
+        "UNMANAGED_WORKTREE",
+        "STALE_GIT_WORKTREE",
+        "NO_ADAPTER",
+        "NO_COORDINATION",
+        "ADAPTER_TOOL_MISSING",
+        "ACCELERATOR_MISSING",
+        "ACCELERATOR_AVAILABLE",
+        "NO_LOCKFILE",
+    ] {
+        assert!(
+            codes.contains(code),
+            "missing manufactured doctor code {code}"
+        );
+    }
+}
+
+#[test]
+fn setup_refuses_json_and_a_terminal_free_invocation() {
+    let h = Harness::new();
+
+    let json = h.wt().args(["setup", "--json"]).output().unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "JSON_UNSUPPORTED");
+    assert_eq!(json.status.code(), Some(2));
+
+    // Tests never have a terminal on stdin, which is exactly the condition.
+    let plain = h.wt().arg("setup").output().unwrap();
+    assert_eq!(plain.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&plain.stderr);
+    assert!(stderr.contains("CONFIRM_REQUIRED"), "{stderr}");
+    assert!(
+        stderr.contains("wt register") && stderr.contains("--dry-run"),
+        "the remedy must name what an agent can run instead: {stderr}"
+    );
+
+    let dry = h
+        .wt()
+        .args(["setup", "--dry-run", "--shell", "zsh"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        dry.status.code(),
+        Some(0),
+        "a dry run asks nothing and needs no terminal: {}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+}
+
+#[test]
+fn register_repair_restores_only_a_replaced_canonical_checkout() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        "[files.'.wt/generated']\ncontent='restored {{target()}}'\n[resource.service]\ncreate='true'\nexists='false'\ndestroy='true'\ntied_to='tree'\n",
+    );
+    let registered = h.register(&repo);
+    let tree_id = registered["data"]["tree"]["tree_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let registry_before = wt_sys::fsx::read_string(&h.home.join("registry.json"))
+        .unwrap()
+        .unwrap();
+    let target = wt_core::model::Target::canonical(wt_core::model::Label::new("repo").unwrap());
+    let state_path = h.home.join(wt_core::model::tree_state_path(&target));
+    let state_before =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+
+    wt_sys::fsx::remove_path(&repo.join(".wt/tree_id")).unwrap();
+    wt_sys::fsx::remove_path(&repo.join(".wt/generated")).unwrap();
+    let doctor = h.json(&["doctor", "repo"]);
+    let replaced = doctor["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "TREE_REPLACED")
+        .unwrap();
+    assert!(replaced["remedy"].as_str().unwrap().contains("wt register"));
+    assert!(replaced["remedy"].as_str().unwrap().contains("--repair"));
+
+    // Reaching the same condition through an ordinary command must point at
+    // the same escape. `remove` and `adopt` both refuse a canonical tree, so
+    // naming them here would send the reader to two dead ends.
+    let refused = h.wt().args(["env", "repo"]).output().unwrap();
+    assert_eq!(refused.status.code(), Some(5));
+    let remedy = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(remedy.contains("--repair"), "door remedy was: {remedy}");
+    assert!(!remedy.contains("wt adopt"), "door remedy was: {remedy}");
+
+    let other = h.repo("other", "");
+    h.wt()
+        .args([
+            "register",
+            other.to_str().unwrap(),
+            "--label",
+            "repo",
+            "--repair",
+            "--json",
+        ])
+        .assert()
+        .code(5)
+        .stdout(predicate::str::contains("REPAIR_REFUSED"))
+        .stdout(predicate::str::contains(
+            "not repo's registered canonical checkout",
+        ));
+
+    let repaired = h.json(&[
+        "register",
+        repo.to_str().unwrap(),
+        "--label",
+        "repo",
+        "--repair",
+    ]);
+    assert_eq!(repaired["data"]["registered"], false);
+    assert_eq!(
+        wt_sys::fsx::read_string(&repo.join(".wt/tree_id")).unwrap(),
+        Some(format!("{tree_id}\n"))
+    );
+    assert_eq!(
+        wt_sys::fsx::read_string(&repo.join(".wt/generated")).unwrap(),
+        Some("# generated by wt for repo. If you edit this file, wt stops re-rendering it; delete it to let wt regenerate it, or set files.\".wt/generated\" = false in .wt/config.toml\nrestored repo".to_owned())
+    );
+    assert_eq!(
+        wt_sys::fsx::read_string(&h.home.join("registry.json"))
+            .unwrap()
+            .unwrap(),
+        registry_before
+    );
+    let state_after =
+        wt_sys::fsx::read_json::<wt_core::lifecycle::TreeState>(&state_path, "STATE_CORRUPT")
+            .unwrap()
+            .unwrap();
+    assert_eq!(state_after.tree_id, state_before.tree_id);
+    assert_eq!(state_after.phase, state_before.phase);
+    assert_eq!(state_after.sync, state_before.sync);
+    assert_eq!(state_after.resources, state_before.resources);
+
+    h.wt()
+        .args([
+            "register",
+            repo.to_str().unwrap(),
+            "--label",
+            "repo",
+            "--repair",
+            "--json",
+        ])
+        .assert()
+        .code(5)
+        .stdout(predicate::str::contains("is not replaced"));
+}
+
+#[test]
+fn ready_exec_stays_inside_the_door_subprocess_budget() {
+    let h = Harness::new();
+    let repo = h.repo("repo", BASIC);
+    let registered = h.register(&repo);
+    let trace = h.root.join("spawn.jsonl");
+    let lock_trace = h.root.join("locks.jsonl");
+    let budget_trace = h.root.join("budget.jsonl");
+    let label = registered["data"]["tree"]["label"].as_str().unwrap();
+    let name = registered["data"]["tree"]["name"].as_str().unwrap();
+    let state = h.home.join(format!("state/{label}/{name}.json"));
+    let state_before = std::fs::read(&state).unwrap();
+    h.wt()
+        .env("WT_SPAWN_TRACE", &trace)
+        .env("WT_LOCK_TRACE_FILE", &lock_trace)
+        .env("WT_BUDGET_TRACE", &budget_trace)
+        .args(["exec", "repo", "--", "true"])
+        .assert()
+        .success();
+    let records = std::fs::read_to_string(trace).unwrap();
+    let values = records
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values
+            .iter()
+            .filter(|value| value["program"] == "git")
+            .count(),
+        1
+    );
+    assert_eq!(values.len(), 2, "one git query plus the requested child");
+    let locks = std::fs::read_to_string(lock_trace).unwrap();
+    let locks = locks
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(locks.len(), 2, "tree shared plus the door-holder flock");
+    assert_eq!(locks[0]["mode"], "shared");
+    assert_eq!(locks[1]["mode"], "exclusive");
+    let budget = std::fs::read_to_string(budget_trace).unwrap();
+    let kinds = budget
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            "registry_read",
+            "identity_read",
+            "identity_read",
+            "state_read",
+            "render_hash_compare",
+        ]
+    );
+    assert_eq!(std::fs::read(state).unwrap(), state_before);
+}
+
+#[test]
+fn sync_and_which_have_stable_data_shapes() {
+    let h = Harness::new();
+    let repo = h.repo("repo", "sync_inputs=['README.md']\n");
+    h.register(&repo);
+    let synced = h.json(&["sync", "repo"]);
+    assert_eq!(synced["data"]["ran"], false);
+    assert!(synced["data"]["steps"].as_array().unwrap().is_empty());
+    let which = h.json(&["which", "repo", "true"]);
+    assert!(which["data"]["path"].as_str().is_some());
+}
+
+#[test]
+fn sync_without_adapter_work_never_bricks_the_canonical_tree() {
+    let h = Harness::new();
+    let repo = h.repo("repo", "");
+    h.register(&repo);
+    h.wt().args(["sync", "repo", "--json"]).assert().success();
+    assert_eq!(h.json(&["status", "repo"])["data"]["phase"], "ready");
+    h.wt()
+        .args(["exec", "repo", "--", "true"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn prune_records_then_new_creates_a_fresh_incarnation() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        r#"
+[resource.service]
+tied_to="tree"
+exists="test -f .wt/service"
+create="touch .wt/service"
+destroy="rm -f .wt/service"
+"#,
+    );
+    h.register(&repo);
+    let created = h.json(&["new", "repo/work", "--no-sync"]);
+    let tree = PathBuf::from(created["data"]["tree"]["path"].as_str().unwrap());
+    h.wt()
+        .current_dir(&tree)
+        .args(["with", "service", "--json"])
+        .assert()
+        .success();
+    let old_id = created["data"]["tree"]["tree_id"].as_str().unwrap();
+    let path = created["data"]["tree"]["path"].as_str().unwrap();
+    wt_sys::fsx::remove_path(Path::new(path)).unwrap();
+    let pruned = h.json(&["prune", "--records", "repo/work", "--yes"]);
+    assert_eq!(pruned["data"]["items"][0]["result"]["remaining"], 0);
+    let recreated = h.json(&["new", "repo/work", "--no-sync"]);
+    assert_ne!(recreated["data"]["tree"]["tree_id"], old_id);
+}
+
+#[test]
+fn sync_rechecks_tracked_render_paths_even_when_they_have_records() {
+    let h = Harness::new();
+    let repo = h.repo("repo", "[files.'.wt/generated']\ncontent='generated'\n");
+    h.register(&repo);
+    common::git(&repo, &["add", "-f", ".wt/generated"]);
+    common::git(&repo, &["commit", "-qm", "track generated path"]);
+    h.wt()
+        .args(["sync", "repo", "--json"])
+        .assert()
+        .code(5)
+        .stdout(predicate::str::contains("RENDER_ONTO_TRACKED"));
+    assert_eq!(h.json(&["status", "repo"])["data"]["phase"], "failed");
+}
+
+#[test]
+fn missing_bins_are_silent_at_doors_and_reported_by_doctor() {
+    let h = Harness::new();
+    let repo = h.repo("repo", "bin=['missing-bin']\n");
+    h.register(&repo);
+    h.wt()
+        .args(["exec", "repo", "--", "true"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
+    assert!(h.json(&["env", "repo"])["notices"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(h.json(&["doctor", "repo"])["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "BIN_DIR_MISSING"));
+}
+
+#[test]
+fn doctor_stays_quiet_about_the_shell_guard_when_nothing_is_claimed() {
+    let h = Harness::new();
+    let repo = h.repo("plain", "");
+    h.register(&repo);
+    let report = h.json(&["doctor", "plain"]);
+    assert!(!report["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "SHELL_INIT_MISSING"));
+}
+
+#[test]
 fn new_brings_the_local_default_branch_to_origin_before_branching() {
     let h = Harness::new();
     configure_backend_none(&h);
@@ -6153,115 +3619,5 @@ fn new_brings_the_local_default_branch_to_origin_before_branching() {
     assert_eq!(
         common::git_stdout(&tree_d, &["rev-parse", "HEAD"]).trim(),
         local
-    );
-}
-
-#[test]
-#[allow(clippy::disallowed_types)]
-fn sweep_follows_any_task_that_changes_build_output() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    let registry = h.root.join("registry");
-    install_cargo_with_metadata(&h, &registry);
-    // A custom recipe that produces output — a new unit under the fingerprint
-    // directory — one that produces nothing, and one that produces and fails.
-    let repo = h.repo(
-        "repo",
-        "[task.churn]\nrun = 'mkdir -p target/debug/.fingerprint/churn-0123456789abcdef'\n\
-         [task.quiet]\nrun = 'true'\n\
-         [task.broken]\nrun = 'mkdir -p target/debug/.fingerprint/broken-fedcba9876543210 && exit 3'\n",
-    );
-    common::write(
-        &repo.join("Cargo.toml"),
-        "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
-    );
-    common::write(&repo.join("Cargo.lock"), "# lock\n");
-    common::git(&repo, &["add", "-A"]);
-    common::git(&repo, &["commit", "-qm", "cargo fixture"]);
-    h.register(&repo);
-    let canonical = wt_sys::fsx::canonicalize(&repo).unwrap();
-    let profile = canonical.join("target/debug");
-    let twins = |profile: &Path| {
-        for (hash, fingerprint, age_secs) in [
-            ("aaaaaaaaaaaaaaaa", 10, 10),
-            ("bbbbbbbbbbbbbbbb", 11, 5_000),
-        ] {
-            write_unit(
-                profile,
-                &Unit {
-                    package: "fixture",
-                    hash,
-                    kind: "lib-fixture",
-                    fingerprint,
-                    deps: &[],
-                    root: Some("src/lib.rs"),
-                    features: "[]",
-                    age_secs,
-                },
-            );
-        }
-    };
-    let swept = |envelope: &serde_json::Value| {
-        envelope["notices"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|notice| notice["code"] == "SWEPT")
-    };
-    twins(&profile);
-
-    // A custom task, not `build`, sweeps the superseded twin.
-    assert!(swept(&h.json(&["run", "churn", "repo"])));
-    assert!(!unit_exists(&profile, "fixture", "bbbbbbbbbbbbbbbb"));
-
-    // Output that appeared outside any wt task is swept by the next task,
-    // whatever it produced; a task after which nothing changed sweeps nothing.
-    twins(&profile);
-    assert!(swept(&h.json(&["run", "quiet", "repo"])));
-    assert!(!unit_exists(&profile, "fixture", "bbbbbbbbbbbbbbbb"));
-    assert!(!swept(&h.json(&["run", "quiet", "repo"])));
-
-    // A task that produced output and failed still sweeps; the notice rides
-    // on the error envelope.
-    twins(&profile);
-    let output = h
-        .wt()
-        .args(["run", "broken", "repo", "--json"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(envelope["error"]["code"], "TASK_FAILED");
-    assert!(swept(&envelope), "{envelope}");
-    assert!(!unit_exists(&profile, "fixture", "bbbbbbbbbbbbbbbb"));
-}
-
-#[test]
-fn anchor_warms_the_canonical_with_the_warm_task_when_one_is_declared() {
-    let h = Harness::new();
-    configure_backend_none(&h);
-    common::write_executable(&h.shims.join("cargo"), "#!/bin/sh\nexit 0\n");
-    // `warm` names the configurations trees inherit — here, a recipe that
-    // leaves its mark — while `build` stays the product build.
-    let repo = h.repo(
-        "repo",
-        "[task.warm]\nrun = 'touch warmed'\n[task.build]\nrun = 'touch built'\n",
-    );
-    common::write(
-        &repo.join("Cargo.toml"),
-        "[package]\nname='fixture'\nversion='0.1.0'\nedition='2021'\n",
-    );
-    common::git(&repo, &["add", "-A"]);
-    common::git(&repo, &["commit", "-qm", "cargo fixture"]);
-    h.register(&repo);
-
-    let refreshed = h.json(&["anchor", "repo", "--no-fetch"]);
-    assert_eq!(refreshed["data"]["build"], "ok");
-    assert!(repo.join("warmed").exists());
-    assert!(!repo.join("built").exists());
-    assert_eq!(h.json(&["status", "repo"])["data"]["build"]["state"], "ok");
-    assert_eq!(
-        h.json(&["anchor", "repo", "--no-fetch"])["data"]["build"],
-        "fresh"
     );
 }

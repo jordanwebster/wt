@@ -1,5 +1,5 @@
 //! The anchor refresh (SPEC §11.10): keep a label's canonical checkout at
-//! the default branch's tip and built, so it is worth seeding from (§11.8).
+//! the default branch's tip and warm, so it is worth seeding from (§11.8).
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -10,9 +10,9 @@ use wt_core::report::{AnchorData, MovedReport, Notice, NoticeLevel};
 use wt_core::{CoreError, ExitClass};
 use wt_sys::lock;
 
-use crate::cli::{AliasRun, Anchor};
+use crate::cli::{Anchor, HookRun};
 
-use super::{build, Context, Output};
+use super::{build, hooks, sweep, Context, Output};
 
 /// How far below a foreground process a detached refresh runs.
 const NICE: i32 = 10;
@@ -40,7 +40,7 @@ pub(crate) fn run(context: &mut Context, args: Anchor) -> Result<Output, CoreErr
                 fetched: None,
                 moved: None,
                 head: None,
-                build: "busy".to_owned(),
+                warm: "busy".to_owned(),
                 swept: None,
             })?
             .with_notices([Notice {
@@ -68,7 +68,7 @@ pub(crate) fn run(context: &mut Context, args: Anchor) -> Result<Output, CoreErr
             &context.git_lock_path(&gitdir_id),
             &holder,
             super::context::duration(
-                context.settings.locks.repo_git.as_deref(),
+                context.settings.waits.repo_git.as_deref(),
                 Duration::from_secs(60),
             ),
         )?;
@@ -95,35 +95,31 @@ pub(crate) fn run(context: &mut Context, args: Anchor) -> Result<Output, CoreErr
     };
     let head = git.head_oid_in(path)?;
     let config = context.load_config(&tree)?;
-    let task = warm_task(&context.task_catalog(&tree, &config)?);
+    let warm = config.hooks.warm.is_some();
     let mut swept = None;
-    let build = if let Some(task) = task {
+    let warm_status = if warm {
         if build::is_fresh(context, &tree, &head)? {
             "fresh"
         } else {
-            let result = build::run_build(
+            let result = hooks::run(
                 context,
-                AliasRun {
-                    target: Some(target.to_string()),
-                    wait: None,
-                    timeout: None,
-                    dry_run: false,
-                    no_log: false,
-                    args: Vec::new(),
+                HookRun {
+                    kind: "warm".to_owned(),
+                    target: target.to_string(),
                 },
-                Some(build::Slot::for_tree(&tree)),
-                task,
             );
             match result {
-                Ok((output, report)) => {
-                    swept = report;
+                Ok(output) => {
+                    swept = sweep::sweep_tree(context, &tree, true)
+                        .ok()
+                        .map(|passes| sweep::total(&passes));
                     notices.extend(output.notices);
                     "ok"
                 }
                 Err(error) => {
                     notices.push(Notice {
                         level: NoticeLevel::Warn,
-                        code: "BUILD_FAILED".to_owned(),
+                        code: "HOOK_FAILED".to_owned(),
                         subject: Some(target.to_string()),
                         message: format!("{}; remedy: {}", error.message, error.remedy),
                     });
@@ -140,7 +136,7 @@ pub(crate) fn run(context: &mut Context, args: Anchor) -> Result<Output, CoreErr
         fetched,
         moved,
         head: Some(head),
-        build: build.to_owned(),
+        warm: warm_status.to_owned(),
         swept,
     })?
     .with_notices(notices))
@@ -268,25 +264,12 @@ fn move_canonical(
     }
 }
 
-/// The task the anchor keeps the canonical warm with: `warm` when the
-/// repository declares one — the union of the configurations its trees
-/// use, typically an aggregate over `build` and the test builds — else
-/// `build` (§11.10).
-fn warm_task(
-    catalog: &std::collections::BTreeMap<String, wt_core::task::Node>,
-) -> Option<&'static str> {
-    ["warm", "build"]
-        .into_iter()
-        .find(|task| catalog.contains_key(*task))
-}
-
-/// Whether a canonical that seeds trees lacks a build of its current
-/// commit — the condition a refresh exists to end (§11.10). A label whose
-/// adapters declare no output, or that has neither a warm nor a build
-/// task, is never cold.
+/// Whether a canonical that seeds trees lacks a successful `warm` hook for
+/// its current commit — the condition a refresh exists to end (§11.10).
+/// A label with no output roots or no `warm` hook is never cold.
 pub(crate) fn is_cold(context: &Context, tree: &TreeRec) -> Result<bool, CoreError> {
     let config = context.load_config(tree)?;
-    if config.outputs.is_empty() || warm_task(&context.task_catalog(tree, &config)?).is_none() {
+    if config.outputs.is_empty() || config.hooks.warm.is_none() {
         return Ok(false);
     }
     let Some(head) = build::head_of(context, &super::context::target_of(tree)) else {

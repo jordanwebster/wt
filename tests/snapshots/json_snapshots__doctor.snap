@@ -1,6 +1,5 @@
 ---
 source: tests/json_snapshots.rs
-assertion_line: 130
 expression: "normalize(value, &h.root)"
 ---
 {
@@ -15,7 +14,7 @@ expression: "normalize(value, &h.root)"
       {
         "code": "NO_ADAPTER",
         "message": "no built-in adapter matched this checkout",
-        "remedy": "configure tasks explicitly or add a supported project manifest",
+        "remedy": "configure hooks and resources explicitly or add a supported project manifest",
         "severity": "info",
         "subject": "repo"
       },

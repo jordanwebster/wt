@@ -11,7 +11,7 @@ expression: "normalize(value, &h.root)"
     "details": null,
     "exit": 2,
     "message": "passthrough doors have no JSON envelope",
-    "remedy": "use `wt env --json` or `wt run --json`"
+    "remedy": "use a structured wt verb when JSON output is required"
   },
   "notices": [],
   "ok": false,

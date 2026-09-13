@@ -145,13 +145,7 @@ pub struct SyncTreeReport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct VerifyTreeReport {
-    pub ok: bool,
-    pub at: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct BuildTreeReport {
+pub struct HookTreeReport {
     pub state: String,
     pub started: String,
     pub log: String,
@@ -160,7 +154,8 @@ pub struct BuildTreeReport {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResourceReport {
     pub scope: String,
-    pub task: String,
+    #[serde(rename = "resource")]
+    pub resource: String,
     pub tied_to: String,
     pub name: String,
     pub state: String,
@@ -204,8 +199,7 @@ pub struct TreeReport {
     pub upstream: Option<UpstreamReport>,
     pub behind_default: Option<u32>,
     pub sync: SyncTreeReport,
-    pub verify: Option<VerifyTreeReport>,
-    pub build: Option<BuildTreeReport>,
+    pub after_new: Option<HookTreeReport>,
     pub session: String,
     pub session_name: String,
     pub agent: Option<String>,
@@ -229,28 +223,6 @@ pub struct StepReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DryRunStepReport {
-    pub id: String,
-    pub scope: String,
-    pub origin: String,
-    pub cwd: String,
-    pub run: Option<crate::config::Command>,
-    pub exists: Option<crate::config::Command>,
-    pub lock: Option<String>,
-    pub sys_locks: Vec<String>,
-    pub resource: bool,
-    pub tied_to: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DryRunData {
-    pub task: String,
-    pub args: Vec<String>,
-    pub args_target: Option<String>,
-    pub steps: Vec<DryRunStepReport>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConfigErrorReport {
     pub path: String,
     pub line: u64,
@@ -259,37 +231,23 @@ pub struct ConfigErrorReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TaskInfoReport {
-    pub id: String,
-    pub scope: String,
-    pub origin: String,
-    pub cwd: String,
-    pub needs: Vec<String>,
-    pub resource: bool,
-    pub tied_to: Option<String>,
-    pub lock: Option<String>,
-    pub description: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StatusData {
     #[serde(flatten)]
     pub tree: TreeReport,
-    pub tasks: Vec<TaskInfoReport>,
     pub config_errors: Vec<ConfigErrorReport>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DeclaredResourceReport {
     pub scope: String,
-    pub task: String,
+    #[serde(rename = "resource")]
+    pub resource: String,
     pub tied_to: String,
     pub snapshot_keys: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DeclaredReport {
-    pub tasks: Vec<String>,
     pub resources: Vec<DeclaredResourceReport>,
     pub env: Vec<String>,
     pub files: Vec<String>,
@@ -331,10 +289,10 @@ pub struct AnchorData {
     pub moved: Option<MovedReport>,
     /// The canonical's commit after the refresh.
     pub head: Option<String>,
-    /// `ok` or `failed` when the build ran, `fresh` when the recorded build
-    /// already covered this commit, `none` when the label has no build
-    /// task, `busy` when nothing ran.
-    pub build: String,
+    /// `ok` or `failed` when the warm hook ran, `fresh` when the recorded
+    /// result already covered this commit, `none` when no hook is declared,
+    /// and `busy` when nothing ran.
+    pub warm: String,
     pub swept: Option<SweepReport>,
 }
 
@@ -374,7 +332,8 @@ pub struct ForgetData {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DestroyedReport {
     pub scope: String,
-    pub task: String,
+    #[serde(rename = "resource")]
+    pub resource: String,
     pub state: String,
     pub child: Option<ChildReport>,
 }
@@ -386,18 +345,12 @@ pub struct ArtifactReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct NewVerifyReport {
-    pub ok: bool,
-    pub steps: Vec<StepReport>,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NewData {
     pub tree: TreeReport,
     pub created: bool,
     pub resumed: bool,
     pub sync: Option<Vec<StepReport>>,
-    pub verify: Option<NewVerifyReport>,
-    pub build: Option<crate::lifecycle::BuildState>,
+    pub after_new: Option<crate::lifecycle::BuildState>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AdoptData {
@@ -430,11 +383,9 @@ pub struct SyncInputReport {
     pub hash: String,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RunData {
+pub struct EnsureData {
     pub target: String,
-    pub task: String,
-    pub args: Vec<String>,
-    pub args_target: Option<String>,
+    pub resource: String,
     pub child: Option<ChildReport>,
     pub log: Option<String>,
     pub displaced: Option<String>,
@@ -450,7 +401,7 @@ pub struct MetaData {
 pub struct ResourceActionData {
     pub target: String,
     pub scope: String,
-    pub task: String,
+    pub resource: String,
     pub before: String,
     pub after: String,
     pub child: Option<ChildReport>,
@@ -524,15 +475,8 @@ pub struct HolderReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ListLockReport {
-    pub name: String,
-    pub label: String,
-    pub holder: HolderReport,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ListData {
     pub trees: Vec<TreeReport>,
-    pub locks: Vec<ListLockReport>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PathData {
@@ -547,11 +491,6 @@ pub struct WhichData {
     pub in_bin: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TasksData {
-    pub target: String,
-    pub tasks: Vec<TaskInfoReport>,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConfigData {
     pub target: String,
     pub entries: Vec<ConfigEntryReport>,
@@ -563,32 +502,6 @@ pub struct ConfigEntryReport {
     pub scope: String,
     pub layer: String,
     pub value: Value,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LocksData {
-    pub locks: Vec<LockReport>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LockReport {
-    pub level: u8,
-    pub name: String,
-    pub path: String,
-    pub held: bool,
-    pub holder: Option<HolderReport>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub held_slots: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slots: Option<u16>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub holders: Vec<SlotHolderReport>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SlotHolderReport {
-    pub slot: u16,
-    pub path: String,
-    pub holder: Option<HolderReport>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PruneData {
@@ -624,10 +537,10 @@ pub fn sort_trees(trees: &mut [TreeReport]) {
     });
     for tree in trees {
         tree.resources.sort_by(|left, right| {
-            (tied_order(&left.tied_to), &left.scope, &left.task).cmp(&(
+            (tied_order(&left.tied_to), &left.scope, &left.resource).cmp(&(
                 tied_order(&right.tied_to),
                 &right.scope,
-                &right.task,
+                &right.resource,
             ))
         });
     }
@@ -662,7 +575,6 @@ pub enum ArrayOrder {
     Notices,
     Findings,
     Targets,
-    Locks,
     ConfigEntries,
     ConfigErrors,
     Canonical,
@@ -694,7 +606,7 @@ pub fn sort_array(values: &mut [Value], order: ArrayOrder) {
             (
                 tied_order(&text(value, "tied_to")),
                 text(value, "scope"),
-                text(value, "task"),
+                text(value, "resource"),
             )
         }),
         ArrayOrder::LexicalStrings => {
@@ -717,9 +629,6 @@ pub fn sort_array(values: &mut [Value], order: ArrayOrder) {
             (severity, text(value, "code"), text(value, "subject"))
         }),
         ArrayOrder::Targets => values.sort_by_key(|value| text(value, "target")),
-        ArrayOrder::Locks => {
-            values.sort_by_key(|value| (number(value, "level"), text(value, "name")))
-        }
         ArrayOrder::ConfigEntries => values.sort_by_key(|value| {
             (
                 text(value, "key"),
@@ -811,18 +720,14 @@ mod tests {
                 changed: Vec::new(),
                 drift: Vec::new(),
             },
-            verify: Some(VerifyTreeReport {
-                ok: true,
-                at: "TIME".to_owned(),
-            }),
-            build: None,
+            after_new: None,
             session: "no".to_owned(),
             session_name: "session".to_owned(),
             agent: None,
             meta: BTreeMap::from([("ticket".to_owned(), "ABC-123".to_owned())]),
             resources: vec![ResourceReport {
                 scope: ".".to_owned(),
-                task: "db".to_owned(),
+                resource: "db".to_owned(),
                 tied_to: "tree".to_owned(),
                 name: "repo_db".to_owned(),
                 state: "declared".to_owned(),
@@ -874,20 +779,6 @@ mod tests {
         }
     }
 
-    fn task_info() -> TaskInfoReport {
-        TaskInfoReport {
-            id: "test".to_owned(),
-            scope: ".".to_owned(),
-            origin: "repo".to_owned(),
-            cwd: ".".to_owned(),
-            needs: vec!["build".to_owned()],
-            resource: false,
-            tied_to: None,
-            lock: Some("tests".to_owned()),
-            description: Some("run tests".to_owned()),
-        }
-    }
-
     fn config_error() -> ConfigErrorReport {
         ConfigErrorReport {
             path: ".wt.toml".to_owned(),
@@ -900,21 +791,12 @@ mod tests {
     fn destroyed() -> DestroyedReport {
         DestroyedReport {
             scope: ".".to_owned(),
-            task: "db".to_owned(),
+            resource: "db".to_owned(),
             state: "dropped".to_owned(),
             child: Some(ChildReport {
                 code: Some(0),
                 signal: None,
             }),
-        }
-    }
-
-    fn holder() -> HolderReport {
-        HolderReport {
-            pid: 42,
-            target: "repo/work".to_owned(),
-            verb: "run".to_owned(),
-            since: "TIME".to_owned(),
         }
     }
 
@@ -940,10 +822,9 @@ mod tests {
             resumed: false,
             tree: t.clone(),
             declared: DeclaredReport {
-                tasks: vec!["test".to_owned()],
                 resources: vec![DeclaredResourceReport {
                     scope: ".".to_owned(),
-                    task: "db".to_owned(),
+                    resource: "db".to_owned(),
                     tied_to: "tree".to_owned(),
                     snapshot_keys: vec!["PATH".to_owned(), "WT_ROOT".to_owned()],
                 }],
@@ -984,11 +865,7 @@ mod tests {
                 created: true,
                 resumed: false,
                 sync: Some(vec![step("sync")]),
-                verify: Some(NewVerifyReport {
-                    ok: true,
-                    steps: vec![step("test")],
-                }),
-                build: None,
+                after_new: None,
             },
         );
         snap(
@@ -1023,46 +900,10 @@ mod tests {
                 }],
             },
         );
-        snap(
-            "run",
-            RunData {
-                target: "repo/work".into(),
-                task: "test".into(),
-                args: vec!["test_file.rs".into()],
-                args_target: Some("test".into()),
-                child: Some(ChildReport {
-                    code: Some(0),
-                    signal: None,
-                }),
-                log: Some(".wt/logs/test.log".to_owned()),
-                displaced: None,
-                steps: vec![step("test")],
-            },
-        );
-        snap(
-            "run_dry",
-            DryRunData {
-                task: "test".into(),
-                args: vec!["test_file.rs".into()],
-                args_target: Some("test".into()),
-                steps: vec![DryRunStepReport {
-                    id: "test".into(),
-                    scope: ".".into(),
-                    origin: "repo".into(),
-                    cwd: ".".into(),
-                    run: Some(crate::config::Command::Shell("cargo test".into())),
-                    exists: None,
-                    lock: None,
-                    sys_locks: Vec::new(),
-                    resource: false,
-                    tied_to: None,
-                }],
-            },
-        );
         let resource_action = ResourceActionData {
             target: "repo/work".into(),
             scope: ".".into(),
-            task: "db".into(),
+            resource: "db".into(),
             before: "declared".into(),
             after: "present".into(),
             child: None,
@@ -1119,18 +960,12 @@ mod tests {
             "list",
             ListData {
                 trees: vec![t.clone()],
-                locks: vec![ListLockReport {
-                    name: "repo/work".to_owned(),
-                    label: "repo".to_owned(),
-                    holder: holder(),
-                }],
             },
         );
         snap(
             "status",
             StatusData {
                 tree: t,
-                tasks: vec![task_info()],
                 config_errors: vec![config_error()],
             },
         );
@@ -1151,36 +986,14 @@ mod tests {
             },
         );
         snap(
-            "tasks",
-            TasksData {
-                target: "repo/work".into(),
-                tasks: vec![task_info()],
-            },
-        );
-        snap(
             "config",
             ConfigData {
                 target: "repo/work".into(),
                 entries: vec![ConfigEntryReport {
-                    key: "task.test".to_owned(),
+                    key: "resource.cache".to_owned(),
                     scope: ".".to_owned(),
                     layer: "repo".to_owned(),
-                    value: serde_json::json!({"needs":["build"]}),
-                }],
-            },
-        );
-        snap(
-            "locks",
-            LocksData {
-                locks: vec![LockReport {
-                    level: 1,
-                    name: "repo/work".to_owned(),
-                    path: "/home/locks/repo/work.lock".to_owned(),
-                    held: true,
-                    holder: Some(holder()),
-                    held_slots: None,
-                    slots: None,
-                    holders: Vec::new(),
+                    value: serde_json::json!({"needs":["database"]}),
                 }],
             },
         );
@@ -1268,9 +1081,9 @@ mod tests {
         sort_array(&mut notices, ArrayOrder::Notices);
         assert_eq!(notices[0]["level"], "warn");
         let mut resources = vec![
-            serde_json::json!({"tied_to":"machine","scope":".","task":"m"}),
-            serde_json::json!({"tied_to":"repo","scope":".","task":"a"}),
-            serde_json::json!({"tied_to":"tree","scope":"z","task":"z"}),
+            serde_json::json!({"tied_to":"machine","scope":".","resource":"m"}),
+            serde_json::json!({"tied_to":"repo","scope":".","resource":"a"}),
+            serde_json::json!({"tied_to":"tree","scope":"z","resource":"z"}),
         ];
         sort_array(&mut resources, ArrayOrder::Resources);
         assert_eq!(resources[0]["tied_to"], "tree");
@@ -1304,14 +1117,6 @@ mod tests {
                     serde_json::json!({"target":"a"}),
                 ],
                 serde_json::json!({"target":"a"}),
-            ),
-            (
-                ArrayOrder::Locks,
-                vec![
-                    serde_json::json!({"level":2,"name":"a"}),
-                    serde_json::json!({"level":1,"name":"z"}),
-                ],
-                serde_json::json!({"level":1,"name":"z"}),
             ),
             (
                 ArrayOrder::ConfigEntries,

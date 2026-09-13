@@ -1,0 +1,45 @@
+output = [
+  { path = ".mypy_cache" },
+  { path = ".ruff_cache" },
+  { path = "node_modules" },
+]
+
+[hooks]
+after_new = "wt with deps"
+warm = "make mypy"
+
+[resource.deps]
+tied_to = "repo"
+name = "fixture-deps"
+exists = 'test -f "$WT_SELF.ready"'
+create = 'touch "$WT_SELF.ready"'
+destroy = 'rm -f "$WT_SELF.ready"'
+
+[resource.image]
+tied_to = "repo"
+name = "fixture-image"
+exists = 'test -f "$WT_SELF.ready"'
+create = 'touch "$WT_SELF.ready"'
+destroy = 'rm -f "$WT_SELF.ready"'
+
+[resource.db]
+tied_to = "tree"
+needs = ["deps"]
+name = "fixture-{{name_snake()}}-db"
+exists = 'test -f "$WT_SELF.ready"'
+create = 'touch "$WT_SELF.ready"'
+destroy = 'rm -f "$WT_SELF.ready"'
+
+[resource.serve]
+tied_to = "tree"
+arena = "repo"
+capacity = 1
+name = "fixture-{{name_snake()}}-serve"
+exists = 'test -f "$WT_SELF.ready"'
+create = 'touch "$WT_SELF.ready"'
+destroy = 'rm -f "$WT_SELF.ready"'
+
+[resource.container]
+tied_to = "machine"
+count = 4
+wait = "10m"

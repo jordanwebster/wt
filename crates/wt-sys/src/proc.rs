@@ -170,9 +170,9 @@ pub fn owned_command_fast_path() -> Option<i32> {
             )
         },
     );
-    let progress = recorded_build_progress(root, &target).unwrap_or_default();
+    let progress = recorded_hook_progress(root, &target).unwrap_or_default();
     Some(shim_refusal(format!(
-        "COMMAND_NOT_BUILT: `{}` belongs to tree `{target}` but was not found; searched: {searched}; run `wt build {target}`{explicit}{progress}",
+        "COMMAND_NOT_BUILT: `{}` belongs to tree `{target}` but was not found; searched: {searched}; run the repository's build command in that tree{explicit}{progress}",
         name.to_string_lossy()
     )))
 }
@@ -208,7 +208,7 @@ fn matching_path_shim(name: &std::ffi::OsStr) -> Option<PathBuf> {
         })
 }
 
-fn recorded_build_progress(root: &Path, target: &str) -> Option<String> {
+fn recorded_hook_progress(root: &Path, target: &str) -> Option<String> {
     if std::fs::read_to_string(root.join(".wt/build.status"))
         .ok()?
         .trim()
@@ -226,7 +226,9 @@ fn recorded_build_progress(root: &Path, target: &str) -> Option<String> {
         return None;
     }
     let log = build.get("log")?.as_str()?;
-    Some(format!("; the build is in progress; watch log `{log}`"))
+    Some(format!(
+        "; the after_new hook is in progress; watch log `{log}`"
+    ))
 }
 
 fn shim_refusal(message: String) -> i32 {
@@ -571,7 +573,37 @@ pub fn process_alive(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Runs a child like [`run`] and writes a header only to the task log.
+/// Stable identity for a process lifetime, used with a pid to detect reuse.
+pub fn process_start(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        return stat
+            .rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .nth(19)
+            .map(str::to_owned);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .filter(|value| !value.is_empty())
+    }
+}
+
+pub fn process_matches(pid: u32, start: &str) -> bool {
+    !start.is_empty() && process_start(pid).as_deref() == Some(start)
+}
+
+/// Runs a child like [`run`] and writes a header only to the recipe log.
 pub fn run_with_header(
     request: &CommandRequest,
     log: Option<&Path>,
@@ -583,7 +615,7 @@ pub fn run_with_header(
     let mut log = log.map(open_log).transpose()?;
     if let (Some(file), Some(header)) = (&mut log, log_header) {
         file.write_all(header)
-            .map_err(io_error("write task log header"))?;
+            .map_err(io_error("write recipe log header"))?;
     }
     let process_group = !std::io::stdin().is_terminal();
     let mut command = build_command(request, process_group);
@@ -1018,7 +1050,8 @@ fn drain_available<R: Read>(
         let bytes = &buffer[..count];
         captured.extend_from_slice(bytes);
         if let Some(file) = log {
-            file.write_all(bytes).map_err(io_error("write task log"))?;
+            file.write_all(bytes)
+                .map_err(io_error("write recipe log"))?;
         }
         match sink {
             Sink::Stdout => std::io::stdout()
@@ -1239,7 +1272,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempdir().unwrap();
-        let log = dir.path().join("task.log");
+        let log = dir.path().join("recipe.log");
         let output = run(
             &shell("printf out; printf err >&2"),
             Some(&log),

@@ -12,7 +12,7 @@ expression: envelope
   "data": {
     "target": "repo/work",
     "scope": ".",
-    "task": "db",
+    "resource": "db",
     "before": "declared",
     "after": "present",
     "child": null

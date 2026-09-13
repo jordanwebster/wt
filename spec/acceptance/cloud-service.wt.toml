@@ -1,0 +1,11 @@
+ports = ["postgres", "server", "frontend"]
+
+[hooks]
+after_new = "dotnet restore service.sln && npm --prefix frontend ci && npm --prefix website ci"
+
+[resource.deps]
+tied_to = "tree"
+name = "cloud-fixture-{{name_snake()}}"
+exists = "docker compose -p $WT_SELF -f compose.dev.yml ps --status running -q postgres | grep -q ."
+create = "docker compose -p $WT_SELF -f compose.dev.yml up -d --wait"
+destroy = "docker compose -p $WT_SELF -f compose.dev.yml down -v"

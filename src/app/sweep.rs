@@ -64,8 +64,8 @@ pub(crate) fn sweep_tree(
             },
         });
     }
-    // The next task compares against what the directories hold now, so a
-    // pass that stood down is retried by the next task and one that ran is
+    // The next sweep compares against what the directories hold now, so a
+    // pass that stood down is retried and one that ran is
     // not repeated for nothing.
     if apply && passes.iter().all(|pass| pass.skipped.is_none()) {
         store_sample(context, tree)?;
@@ -78,8 +78,8 @@ pub(crate) fn sweep_tree(
 /// the fingerprint directory's own modification time, its entry count, and
 /// its newest entry. Cargo creates a unit's fingerprint directory when it
 /// first compiles the unit and deletes and rewrites the fingerprint file on
-/// every recompile, so anything that produced output — a wt task, or a
-/// build run by hand in the tree — moves the sample, and a task that
+/// every recompile, so anything that produced output — a hook, or a
+/// build run by hand in the tree — moves the sample, and a command that
 /// produced nothing leaves it alone.
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Sample(Vec<(String, u64, usize, u64)>);
@@ -129,50 +129,10 @@ fn sample_path(tree: &wt_core::model::TreeRec) -> PathBuf {
     Path::new(tree.path.as_str()).join(".wt/sweep.sample")
 }
 
-fn stored_sample(tree: &wt_core::model::TreeRec) -> Result<Option<Sample>, CoreError> {
-    Ok(wt_sys::fsx::read_string(&sample_path(tree))?
-        .and_then(|text| serde_json::from_str(&text).ok()))
-}
-
 fn store_sample(context: &Context, tree: &wt_core::model::TreeRec) -> Result<(), CoreError> {
     let sample = sample(context, tree)?;
     let text = serde_json::to_string(&sample).expect("a sample serializes");
     wt_sys::fsx::write_store(&sample_path(tree), text.as_bytes())
-}
-
-/// Sweeps after a task wt ran — always after `build`, and after any other
-/// task when the build directories changed since the last sweep — and
-/// turns the passes into notices; a sweep never fails the task that
-/// preceded it. The report of a sweep that ran is left in the context for
-/// verbs that report it.
-pub(crate) fn after_task(
-    context: &mut Context,
-    tree: &wt_core::model::TreeRec,
-    always: bool,
-) -> Vec<Notice> {
-    let timed = wt_sys::trace::span("span", "sweep");
-    let target = super::context::target_of(tree).to_string();
-    let result = (|| {
-        if !always {
-            let current = sample(context, tree)?;
-            if stored_sample(tree)? == Some(current) {
-                return Ok::<_, CoreError>(Vec::new());
-            }
-        }
-        let passes = sweep_tree(context, tree, true)?;
-        context.last_sweep = Some(total(&passes));
-        Ok(notices(&target, &passes))
-    })()
-    .unwrap_or_else(|error| {
-        vec![Notice {
-            level: NoticeLevel::Warn,
-            code: "SWEEP_SKIPPED".to_owned(),
-            subject: Some(target.clone()),
-            message: format!("build output was not swept: {}", error.message),
-        }]
-    });
-    timed.finish();
-    result
 }
 
 pub(crate) fn notices(target: &str, passes: &[Pass]) -> Vec<Notice> {
@@ -745,7 +705,7 @@ mod tests {
         );
         // A codegen unit's object: the unit hash, not the codegen-unit hash.
         assert_eq!(
-            unit_hash("amux-391077e733a30568.00gl9pq6dplm4nifnwqr6oca9.09885ma.rcgu.o"),
+            unit_hash("fixture-391077e733a30568.00gl9pq6dplm4nifnwqr6oca9.09885ma.rcgu.o"),
             Some("391077e733a30568".to_owned())
         );
         assert_eq!(

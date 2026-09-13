@@ -11,62 +11,22 @@ hint = "pnpm shares one content-addressed store across trees; `pnpm import` conv
 lockfile = ["package-lock.json", "npm-shrinkwrap.json"]
 requires = "npm"
 sync_inputs = ["package-lock.json", "npm-shrinkwrap.json", "package.json"]
-
-[tools.npm.task.sync]
-run = "npm ci"
-[tools.npm.task.test]
-run = '''if [ "$#" -gt 0 ]; then npm test -- "$@"; else npm test; fi'''
-[tools.npm.task.lint]
-run = "npm run lint"
-[tools.npm.task.fmt]
-run = "npm run format"
-[tools.npm.task.build]
-run = "npm run build"
+sync = "npm ci"
 
 [tools.pnpm]
 lockfile = ["pnpm-lock.yaml"]
 requires = "pnpm"
 sync_inputs = ["pnpm-lock.yaml", "package.json"]
-
-[tools.pnpm.task.sync]
-run = "pnpm install --frozen-lockfile"
-[tools.pnpm.task.test]
-run = '''if [ "$#" -gt 0 ]; then pnpm test "$@"; else pnpm test; fi'''
-[tools.pnpm.task.lint]
-run = "pnpm run lint"
-[tools.pnpm.task.fmt]
-run = "pnpm run format"
-[tools.pnpm.task.build]
-run = "pnpm run build"
+sync = "pnpm install --frozen-lockfile"
 
 [tools.yarn]
 lockfile = ["yarn.lock"]
 requires = "yarn"
 sync_inputs = ["yarn.lock", "package.json"]
-
-[tools.yarn.task.sync]
-run = "yarn install --immutable"
-[tools.yarn.task.test]
-run = '''if [ "$#" -gt 0 ]; then yarn test "$@"; else yarn test; fi'''
-[tools.yarn.task.lint]
-run = "yarn run lint"
-[tools.yarn.task.fmt]
-run = "yarn run format"
-[tools.yarn.task.build]
-run = "yarn run build"
+sync = "yarn install --immutable"
 
 [tools.bun]
 lockfile = ["bun.lockb", "bun.lock"]
 requires = "bun"
 sync_inputs = ["bun.lockb", "bun.lock", "package.json"]
-
-[tools.bun.task.sync]
-run = "bun install --frozen-lockfile"
-[tools.bun.task.test]
-run = '''if [ "$#" -gt 0 ]; then bun test "$@"; else bun test; fi'''
-[tools.bun.task.lint]
-run = "bun run lint"
-[tools.bun.task.fmt]
-run = "bun run format"
-[tools.bun.task.build]
-run = "bun run build"
+sync = "bun install --frozen-lockfile"

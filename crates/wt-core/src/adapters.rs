@@ -4,10 +4,10 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{AdapterChoice, Command, Config, Task, ValueOrFalse},
+    config::{AdapterChoice, Command, Config, Hooks, Recipe, ValueOrFalse},
     error::CoreError,
     model::{RelDir, RelPath},
-    task::{Node, Origin},
+    recipe_plan::{Node, Origin},
     ExitClass,
 };
 
@@ -60,7 +60,10 @@ pub struct Tool {
     pub output: Vec<OutputSpec>,
     pub env: IndexMap<String, String>,
     pub commands: Vec<String>,
-    pub task: IndexMap<String, Task>,
+    /// Private lifecycle command used only by `wt sync`.
+    pub sync: Option<Command>,
+    pub after_new: Option<Command>,
+    pub warm: Option<Command>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -103,6 +106,7 @@ pub struct AdapterContribution {
     pub requirements: Vec<String>,
     pub nudges: Vec<Nudge>,
     pub selected_tools: BTreeSet<String>,
+    pub hooks: Hooks,
 }
 
 pub fn builtins() -> Result<Vec<Adapter>, CoreError> {
@@ -114,7 +118,7 @@ pub fn builtins() -> Result<Vec<Adapter>, CoreError> {
                     ExitClass::Internal,
                     "ADAPTER_INVALID",
                     format!("built-in adapter `{id}` is invalid: {error}"),
-                    "reinstall a valid wt build",
+                    "reinstall a valid wt binary",
                 )
             })
         })
@@ -213,6 +217,12 @@ pub fn contribution(hits: &[AdapterHit]) -> Result<AdapterContribution, CoreErro
         }
         append_unique(&mut contributed.commands, &tool.commands);
         append_unique(&mut contributed.sync_inputs, &tool.sync_inputs);
+        if contributed.hooks.after_new.is_none() {
+            contributed.hooks.after_new.clone_from(&tool.after_new);
+        }
+        if contributed.hooks.warm.is_none() {
+            contributed.hooks.warm.clone_from(&tool.warm);
+        }
         // A tool detected under a configured scope has its output relative
         // to that scope: `backend/target`, not the repository's `target/`.
         for spec in &tool.output {
@@ -226,7 +236,7 @@ pub fn contribution(hits: &[AdapterHit]) -> Result<AdapterContribution, CoreErro
                             "built-in adapter `{}` names unknown output kind `{other}`",
                             hit.adapter
                         ),
-                        "reinstall a valid wt build",
+                        "reinstall a valid wt binary",
                     ))
                 }
             };
@@ -271,6 +281,15 @@ pub fn apply_contribution(
         append_unique(&mut config.sync_inputs, std::slice::from_ref(&path));
     }
     append_unique(&mut config.outputs, &contribution.outputs);
+    if config.hooks.after_new.is_none() {
+        config
+            .hooks
+            .after_new
+            .clone_from(&contribution.hooks.after_new);
+    }
+    if config.hooks.warm.is_none() {
+        config.hooks.warm.clone_from(&contribution.hooks.warm);
+    }
     Ok(())
 }
 
@@ -344,69 +363,43 @@ fn matches_name(pattern: &str, names: &BTreeSet<String>) -> bool {
     }
 }
 
-pub fn private_id(adapter: &str, tool: &str, dir: &str, task: &str) -> String {
-    format!("@{adapter}/{tool}@{dir}/{task}")
+pub fn private_id(adapter: &str, tool: &str, dir: &str, recipe: &str) -> String {
+    format!("@{adapter}/{tool}@{dir}/{recipe}")
 }
 
 pub fn compose(
     hits: &[AdapterHit],
-    layer_tasks: &BTreeMap<(String, String), (Origin, Task)>,
-    package_scripts: &BTreeMap<String, BTreeSet<String>>,
+    layer_recipes: &BTreeMap<(String, String), (Origin, Recipe)>,
+    _package_scripts: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<BTreeMap<String, Node>, CoreError> {
     let adapters: BTreeMap<String, Adapter> = builtins()?
         .into_iter()
         .map(|adapter| (adapter.name.clone(), adapter))
         .collect();
     let mut catalog = BTreeMap::new();
-    let mut scoped_public = BTreeSet::new();
-    let mut public_task_ids = BTreeSet::new();
+    let mut sync_nodes = Vec::new();
     for hit in hits {
         let tool = &adapters[&hit.adapter].tools[&hit.tool];
-        for (task_id, task) in &tool.task {
-            if hit.adapter == "node"
-                && task_id != "sync"
-                && !(hit.tool == "npm" && task_id == "test")
-                && !package_scripts
-                    .get(&hit.dir)
-                    .is_some_and(|scripts| scripts.contains(task_id))
-            {
-                continue;
+        if tool.sync.is_some() || hit.sync_override.is_some() {
+            let mut recipe = Recipe {
+                command: hit.sync_override.clone().or_else(|| tool.sync.clone()),
+                ..Recipe::default()
+            };
+            if hit.adapter == "submodules" {
+                recipe.sys_locks.push("RepoGit".to_owned());
             }
-            let mut task = task.clone();
-            if hit.adapter == "submodules" && task_id == "sync" {
-                task.sys_locks.push("RepoGit".to_owned());
-            }
-            if task_id == "sync" && hit.sync_override.is_some() {
-                task.run.clone_from(&hit.sync_override);
-            }
-            let private = private_id(&hit.adapter, &hit.tool, &hit.dir, task_id);
-            let node = Node::from_task(
+            let private = private_id(&hit.adapter, &hit.tool, &hit.dir, "sync");
+            let node = Node::from_recipe(
                 private.clone(),
                 RelDir::new(&hit.dir)?,
                 Origin::Adapter,
-                &task,
+                &recipe,
             );
             catalog.insert(private.clone(), node);
-            public_task_ids.insert(task_id.clone());
-            if hit.dir != "." {
-                let public = format!("{}/{task_id}", hit.dir);
-                if !layer_tasks.contains_key(&(hit.dir.clone(), task_id.clone())) {
-                    let alias = Node::from_task(
-                        public.clone(),
-                        RelDir::new(&hit.dir)?,
-                        Origin::Composite,
-                        &Task {
-                            needs: Some(vec![private]),
-                            ..Task::default()
-                        },
-                    );
-                    catalog.insert(public.clone(), alias);
-                }
-                scoped_public.insert(public);
-            }
+            sync_nodes.push(private);
         }
     }
-    for ((scope, id), (origin, task)) in layer_tasks {
+    for ((scope, id), (origin, recipe)) in layer_recipes {
         let public = if scope == "." {
             id.clone()
         } else {
@@ -414,76 +407,29 @@ pub fn compose(
         };
         catalog.insert(
             public.clone(),
-            Node::from_task(public.clone(), RelDir::new(scope)?, *origin, task),
+            Node::from_recipe(public.clone(), RelDir::new(scope)?, *origin, recipe),
         );
-        public_task_ids.insert(id.clone());
-        if scope != "." {
-            scoped_public.insert(public);
-        }
     }
-    for task_id in public_task_ids {
-        if layer_tasks.contains_key(&(".".to_owned(), task_id.clone())) {
-            continue;
-        }
-        let submodule = hits
-            .iter()
-            .find(|hit| hit.dir == "." && hit.adapter == "submodules")
-            .map(|hit| private_id(&hit.adapter, &hit.tool, ".", &task_id))
-            .filter(|id| catalog.contains_key(id));
-        let roots = hits
-            .iter()
-            .filter(|hit| hit.dir == "." && hit.adapter != "submodules")
-            .map(|hit| private_id(&hit.adapter, &hit.tool, ".", &task_id))
-            .filter(|id| catalog.contains_key(id));
-        let scopes = scoped_public
-            .iter()
-            .filter(|id| id.rsplit_once('/').is_some_and(|(_, id)| id == task_id))
-            .cloned();
-        let mut needs = Vec::new();
-        needs.extend(submodule);
-        needs.extend(roots);
-        needs.extend(scopes);
-        let mut seen = BTreeSet::new();
-        needs.retain(|need| seen.insert(need.clone()));
-        if !needs.is_empty() {
-            let composite = Node::from_task(
-                task_id.clone(),
-                RelDir::new(".")?,
-                Origin::Composite,
-                &Task {
-                    needs: Some(needs),
-                    ..Task::default()
-                },
-            );
-            catalog.insert(task_id, composite);
-        }
-    }
-    if !catalog.contains_key("verify") {
-        let selected = ["test", "build"]
-            .into_iter()
-            .find(|id| catalog.contains_key(*id));
-        if let Some(selected) = selected {
-            let verify = Node::from_task(
-                "verify".to_owned(),
-                RelDir::new(".")?,
-                Origin::Composite,
-                &Task {
-                    needs: Some(vec![selected.to_owned()]),
-                    ..Task::default()
-                },
-            );
-            catalog.insert("verify".to_owned(), verify);
-        }
-    }
+    // `wt sync` remains a lifecycle verb even when no adapter has dependency
+    // work to do. Its private root therefore exists as a no-op aggregate.
+    catalog.insert(
+        "sync".to_owned(),
+        Node::from_recipe(
+            "sync".to_owned(),
+            RelDir::new(".")?,
+            Origin::Composite,
+            &Recipe {
+                needs: Some(sync_nodes),
+                ..Recipe::default()
+            },
+        ),
+    );
     Ok(catalog)
 }
 
 pub fn composition_notices(catalog: &BTreeMap<String, Node>) -> Vec<String> {
-    if catalog.contains_key("verify") {
-        Vec::new()
-    } else {
-        vec!["NO_VERIFY".to_owned()]
-    }
+    let _ = catalog;
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -543,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn orbitcloud_composition_is_overridden_at_root() {
+    fn adapter_sync_commands_compose_at_root() {
         let hits = vec![
             AdapterHit {
                 adapter: "dotnet".to_owned(),
@@ -573,18 +519,9 @@ mod tests {
         ]);
         let before = compose(&hits, &BTreeMap::new(), &scripts).unwrap();
         assert_eq!(before["sync"].needs.len(), 3);
-        let custom = Task {
-            run: Some(Command::Shell("custom".to_owned())),
-            ..Task::default()
-        };
-        let after = compose(
-            &hits,
-            &BTreeMap::from([((".".to_owned(), "sync".to_owned()), (Origin::Repo, custom))]),
-            &scripts,
-        )
-        .unwrap();
-        assert_eq!(after["sync"].run, Some(Command::Shell("custom".to_owned())));
-        assert!(after.contains_key("frontend/sync"));
+        assert!(before.contains_key("@dotnet/dotnet@./sync"));
+        assert!(before.contains_key("@node/npm@frontend/sync"));
+        assert!(before.contains_key("@node/npm@website/sync"));
     }
 
     #[test]
@@ -635,15 +572,17 @@ mod tests {
             .any(|output| output.path.as_str() == "target"));
         let configured =
             crate::config::parse("output = [{ path = 'node_modules' }]", "repo").unwrap();
-        assert_eq!(configured.outputs[0].kind, crate::config::OutputKind::Opaque);
+        assert_eq!(
+            configured.outputs[0].kind,
+            crate::config::OutputKind::Opaque
+        );
         assert!(!configured.outputs[0].adapter);
-        assert!(crate::config::parse(
-            "output = [{ path = 'target', kind = 'cargo' }]",
-            "repo"
-        )
-        .unwrap_err()
-        .message
-        .contains("adapter-owned"));
+        assert!(
+            crate::config::parse("output = [{ path = 'target', kind = 'cargo' }]", "repo")
+                .unwrap_err()
+                .message
+                .contains("adapter-owned")
+        );
         assert!(crate::config::parse("seed = ['target']", "repo").is_err());
         // Under a configured scope the output follows the scope.
         let scoped = contribution(&[AdapterHit {
@@ -659,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn composition_supports_private_tasks_dynamic_composites_and_no_verify() {
+    fn composition_contains_only_private_sync_and_declared_resources() {
         let hit = AdapterHit {
             adapter: "node".to_owned(),
             tool: "npm".to_owned(),
@@ -667,23 +606,23 @@ mod tests {
             notice: None,
             sync_override: None,
         };
-        let scripts =
-            BTreeMap::from([("frontend".to_owned(), BTreeSet::from(["build".to_owned()]))]);
-        let layer_tasks = BTreeMap::from([(
+        let scripts = BTreeMap::new();
+        let layer_recipes = BTreeMap::from([(
             ("frontend".to_owned(), "e2e".to_owned()),
             (
                 Origin::Repo,
-                Task {
-                    run: Some(Command::Shell("npm run e2e".to_owned())),
-                    ..Task::default()
+                Recipe {
+                    command: Some(Command::Shell("npm run e2e".to_owned())),
+                    ..Recipe::default()
                 },
             ),
         )]);
-        let catalog = compose(&[hit], &layer_tasks, &scripts).unwrap();
-        assert!(catalog.contains_key("@node/npm@frontend/build"));
-        assert_eq!(catalog["e2e"].needs, ["frontend/e2e"]);
-        let no_verify = compose(&[], &layer_tasks, &BTreeMap::new()).unwrap();
-        assert_eq!(composition_notices(&no_verify), ["NO_VERIFY"]);
+        let catalog = compose(&[hit], &layer_recipes, &scripts).unwrap();
+        assert!(catalog.contains_key("@node/npm@frontend/sync"));
+        assert!(catalog.contains_key("sync"));
+        assert!(catalog.contains_key("frontend/e2e"));
+        assert!(!catalog.contains_key("build"));
+        assert!(composition_notices(&catalog).is_empty());
     }
 
     #[test]
@@ -715,15 +654,15 @@ mod tests {
         assert_eq!(
             catalog["sync"].needs,
             [
-                "@submodules/git@./sync",
                 "@cargo/cargo@./sync",
-                "frontend/sync",
+                "@node/npm@frontend/sync",
+                "@submodules/git@./sync",
             ]
         );
     }
 
     #[test]
-    fn npm_test_is_unconditional_but_other_node_scripts_are_detected() {
+    fn adapters_do_not_contribute_work_commands() {
         let hit = AdapterHit {
             adapter: "node".to_owned(),
             tool: "npm".to_owned(),
@@ -732,44 +671,8 @@ mod tests {
             sync_override: None,
         };
         let catalog = compose(&[hit], &BTreeMap::new(), &BTreeMap::new()).unwrap();
-        assert!(catalog.contains_key("@node/npm@./test"));
+        assert!(catalog.contains_key("@node/npm@./sync"));
+        assert!(!catalog.contains_key("@node/npm@./test"));
         assert!(!catalog.contains_key("@node/npm@./build"));
-    }
-
-    #[test]
-    fn built_in_test_recipes_forward_only_where_argument_placement_is_unambiguous() {
-        let adapters = builtins()
-            .unwrap()
-            .into_iter()
-            .map(|adapter| (adapter.name.clone(), adapter))
-            .collect::<BTreeMap<_, _>>();
-        let cases = [
-            ("cargo", "cargo", "cargo test", "cargo test"),
-            ("cargo", "cargo-nightly-fmt", "cargo test", "cargo test"),
-            ("node", "npm", "npm test --", "npm test"),
-            ("node", "pnpm", "pnpm test", "pnpm test"),
-            ("node", "yarn", "yarn test", "yarn test"),
-            ("node", "bun", "bun test", "bun test"),
-            ("dotnet", "dotnet", "dotnet test", "dotnet test"),
-            ("python", "uv", "uv run pytest", "uv run pytest"),
-            ("python", "poetry", "poetry run pytest", "poetry run pytest"),
-            ("python", "pip", ".venv/bin/pytest", ".venv/bin/pytest"),
-        ];
-        for (adapter, tool, with_args, without_args) in cases {
-            let Some(Command::Shell(recipe)) =
-                adapters[adapter].tools[tool].task["test"].run.as_ref()
-            else {
-                panic!("{adapter}/{tool} test must be a shell recipe");
-            };
-            assert_eq!(
-                recipe,
-                &format!("if [ \"$#\" -gt 0 ]; then {with_args} \"$@\"; else {without_args}; fi"),
-                "{adapter}/{tool}"
-            );
-        }
-        assert_eq!(
-            adapters["go"].tools["go"].task["test"].run,
-            Some(Command::Shell("go test ./...".to_owned()))
-        );
     }
 }

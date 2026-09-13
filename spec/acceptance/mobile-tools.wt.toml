@@ -1,0 +1,52 @@
+bin = ["target/debug"]
+commands = ["mobilectl"]
+
+[env]
+MOBILE_CONFIG = "{{root()}}/.wt/mobile/profile.yaml"
+MOBILE_LOG = "{{root()}}/.wt/mobile/service.log"
+MOBILE_STRICT = "1"
+
+[files.".wt/mobile/installation.yaml"]
+marker = "#"
+content = """
+host_name: {{name_short()}}
+root: {{root()}}/.wt/mobile
+front_door_socket: {{root()}}/.wt/mobile/service.sock
+keymaps_dir: {{root()}}/.wt/mobile/keymaps
+prevent_idle_sleep: false
+"""
+
+[hooks]
+after_new = "python3 scripts/configure-tree.py {{root()}}/.wt/mobile {{name()}} && just compile"
+warm = "just warm"
+
+[resource.daemon]
+tied_to = "tree"
+name = "{{name_short()}}"
+exists = 'test -S "{{root()}}/.wt/mobile/service.sock" && mobilectl status >/dev/null 2>&1'
+create = "mobilectl service start"
+destroy = "mobilectl service stop"
+
+[resource.iphone]
+tied_to = "machine"
+count = 2
+name = "fixture-phone-{{index()}}"
+exists = 'python3 scripts/devices.py exists "$WT_SELF"'
+create = 'python3 scripts/devices.py create "$WT_SELF" phone-large'
+destroy = 'xcrun simctl delete "$WT_SELF"'
+acquire = 'python3 scripts/devices.py acquire "$WT_SELF"'
+keep = "2m"
+idle = "30m"
+wait = "45m"
+
+[resource.iphone-small]
+tied_to = "machine"
+count = 1
+name = "fixture-small-{{index()}}"
+exists = 'python3 scripts/devices.py exists "$WT_SELF"'
+create = 'python3 scripts/devices.py create "$WT_SELF" phone-small'
+destroy = 'xcrun simctl delete "$WT_SELF"'
+acquire = 'python3 scripts/devices.py acquire "$WT_SELF"'
+keep = "2m"
+idle = "30m"
+wait = "45m"

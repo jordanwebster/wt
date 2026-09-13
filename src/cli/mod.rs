@@ -31,7 +31,7 @@ impl Shell {
     name = "wt",
     version,
     about = "Worktree manager for humans and coding agents",
-    override_help = "Worktree manager for humans and coding agents\n\nUsage: wt [OPTIONS] <COMMAND>\n\nEveryday:\n  new          Create or resume a linked worktree\n  open         Open or attach to an agent session\n  edit         Open a tree in the configured editor\n  test         Run the test task\n  lint         Run the lint task\n  fmt          Run the format task\n  build        Run the build task\n  run          Run a declared task\n  ls           List registered trees [aliases: list]\n  status       Report one tree's state and tasks\n  rm           Tear down and remove a linked tree [aliases: remove]\n\nSetup:\n  setup        Find repositories and settle wt's environment\n  clone        Clone a repository into a hub wt owns and register it\n  register     Register a canonical checkout\n  adopt        Adopt an existing git worktree\n  shell-init   Print shell helper initialisation\n  completions  Print dynamic shell completions\n\nWorking inside a tree:\n  exec         Run a one-shot command through a passthrough door\n  shell        Start an interactive shell door\n  env          Print a tree's assembled environment\n  path         Print a tree root\n  which        Resolve a command through a tree door's PATH\n  tasks        List effective tasks\n  config       Show effective configuration origins\n  meta         Show or edit a tree's user metadata\n\nUpkeep:\n  sync         Synchronise a tree's dependencies\n  anchor       Refresh a repository's canonical checkout: fetch, fast-forward, build, sweep\n  doctor       Diagnose registered state and tooling\n  prune        Report or clean stale tree records\n  close        Close agent sessions\n  forget       Forget wt's records for a linked tree without removing it\n  destroy      Destroy a declared resource\n  refresh      Destroy and recreate a declared resource\n  locks        List wt coordination locks\n  unregister   Tear down and forget a registered repository\n\nOptions:\n      --json           Emit one stable JSON envelope\n      --yes            Consent to destructive operations without prompting\n      --quiet          Suppress optional notices\n      --verbose        Show notices even when stderr is not a terminal\n      --color <COLOR>  Control coloured terminal output [default: auto] [possible values: auto, always, never]\n      --home <DIR>     Use an alternate wt state directory\n  -h, --help           Print help\n  -V, --version        Print version\n\nExample: wt register . && wt new repo/feature"
+    override_help = "Worktree manager for humans and coding agents\n\nUsage: wt [OPTIONS] <COMMAND>\n\nEveryday:\n  new          Create or resume a linked worktree\n  open         Open or attach to an agent session\n  edit         Open a tree in the configured editor\n  with         Ensure resources and lease pools for one command\n  leases       List pool instances, slots, and holders\n  ls           List registered trees [aliases: list]\n  status       Report one tree's state\n  rm           Tear down and remove a linked tree [aliases: remove]\n\nSetup:\n  setup        Find repositories and settle wt's environment\n  clone        Clone a repository into a hub wt owns and register it\n  register     Register a canonical checkout\n  adopt        Adopt an existing git worktree\n  shell-init   Print shell helper initialisation\n  completions  Print dynamic shell completions\n\nWorking inside a tree:\n  exec         Run a one-shot command through a passthrough door\n  shell        Start an interactive shell door\n  env          Print a tree's assembled environment\n  path         Print a tree root\n  which        Resolve a command through a tree door's PATH\n  config       Show effective configuration origins\n  meta         Show or edit a tree's user metadata\n\nUpkeep:\n  sync         Synchronise a tree's dependencies\n  anchor       Refresh and warm a repository's canonical checkout\n  doctor       Diagnose registered state and tooling\n  prune        Report or clean stale state\n  close        Close agent sessions\n  forget       Forget wt's records for a linked tree without removing it\n  destroy      Destroy a declared resource\n  refresh      Destroy and recreate a declared resource\n  unregister   Tear down and forget a registered repository\n\nOptions:\n      --json           Emit one stable JSON envelope\n      --yes            Consent to destructive operations without prompting\n      --quiet          Suppress optional notices\n      --verbose        Show notices even when stderr is not a terminal\n      --color <COLOR>  Control coloured terminal output [default: auto] [possible values: auto, always, never]\n      --home <DIR>     Use an alternate wt state directory\n  -h, --help           Print help\n  -V, --version        Print version\n\nExample: wt register . && wt new repo/feature"
 )]
 pub struct Cli {
     /// Emit one stable JSON envelope.
@@ -58,30 +58,21 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Run a lifecycle hook in a prepared tree.
+    #[command(name = "__hook", hide = true)]
+    Hook(HookRun),
     /// Create or resume a linked worktree.
     New(New),
     /// Open or attach to an agent session.
     Open(Open),
     /// Open a tree in the configured editor.
     Edit(Edit),
-    /// Run the test task.
-    #[command(after_help = "Example: wt test project/feature")]
-    Test(AliasRun),
-    /// Run the lint task.
-    #[command(after_help = "Example: wt lint project/feature")]
-    Lint(AliasRun),
-    /// Run the format task.
-    #[command(after_help = "Example: wt fmt project/feature")]
-    Fmt(AliasRun),
-    /// Run the build task.
-    #[command(after_help = "Example: wt build project/feature")]
-    Build(AliasRun),
-    /// Run a declared task.
-    Run(Run),
+    /// Ensure resources and optionally lease pools for one command.
+    With(With),
     /// List registered trees.
     #[command(name = "ls", visible_alias = "list")]
     List(List),
-    /// Report one tree's state and tasks.
+    /// Report one tree's state and resources.
     Status(Status),
     /// Tear down and remove a linked tree.
     #[command(name = "rm", visible_alias = "remove")]
@@ -103,7 +94,7 @@ pub enum Command {
 
     /// Run a one-shot command through a passthrough door.
     #[command(
-        override_help = "Run a one-shot command through a passthrough door.\n\nUsage: wt exec [OPTIONS] [TARGET] -- <CMD>...\n\nArguments:\n  [TARGET]  Registered tree target\n  <CMD>...  Command and arguments to execute\n\nOptions:\n      --yes            Consent without prompting\n      --quiet          Suppress optional notices\n      --verbose        Show notices when stderr is not a terminal\n      --color <COLOR>  Control coloured output [default: auto] [possible values: auto, always, never]\n      --home <DIR>     Use an alternate wt state directory\n  -h, --help           Print help\n\nPassthrough door; not a task (see `wt run`); no `--json` (A20).\n\nExample: wt exec project/feature -- env"
+        override_help = "Run a one-shot command through a passthrough door.\n\nUsage: wt exec [OPTIONS] [TARGET] -- <CMD>...\n\nArguments:\n  [TARGET]  Registered tree target\n  <CMD>...  Command and arguments to execute\n\nOptions:\n      --yes            Consent without prompting\n      --quiet          Suppress optional notices\n      --verbose        Show notices when stderr is not a terminal\n      --color <COLOR>  Control coloured output [default: auto] [possible values: auto, always, never]\n      --home <DIR>     Use an alternate wt state directory\n  -h, --help           Print help\n\nPassthrough door; no `--json`.\n\nExample: wt exec project/feature -- env"
     )]
     Exec(Exec),
     /// Start an interactive shell door.
@@ -114,8 +105,6 @@ pub enum Command {
     Path(TargetArg),
     /// Resolve a command through a tree door's PATH.
     Which(Which),
-    /// List effective tasks.
-    Tasks(Tasks),
     /// Show effective configuration origins.
     Config(Config),
     /// Show or edit a tree's user metadata.
@@ -123,7 +112,7 @@ pub enum Command {
 
     /// Synchronise a tree's dependencies.
     Sync(Sync),
-    /// Refresh a repository's canonical checkout: fetch, fast-forward, build, sweep.
+    /// Refresh and warm a repository's canonical checkout.
     Anchor(Anchor),
     /// Diagnose registered state and tooling.
     Doctor(Doctor),
@@ -138,8 +127,8 @@ pub enum Command {
     /// Destroy and recreate a declared resource.
     #[command(after_help = "Example: wt refresh daemon project/feature --yes")]
     Refresh(ResourceAction),
-    /// List wt coordination locks.
-    Locks(Locks),
+    /// List resource-pool leases.
+    Leases(Leases),
     /// Tear down and forget a registered repository.
     Unregister(Unregister),
 }
@@ -147,14 +136,11 @@ pub enum Command {
 impl Command {
     pub const fn name(&self) -> &'static str {
         match self {
+            Self::Hook(_) => "__hook",
             Self::New(_) => "new",
             Self::Open(_) => "open",
             Self::Edit(_) => "edit",
-            Self::Test(_) => "test",
-            Self::Lint(_) => "lint",
-            Self::Fmt(_) => "fmt",
-            Self::Build(_) => "build",
-            Self::Run(_) => "run",
+            Self::With(_) => "with",
             Self::List(_) => "list",
             Self::Status(_) => "status",
             Self::Remove(_) => "remove",
@@ -169,7 +155,6 @@ impl Command {
             Self::Env(_) => "env",
             Self::Path(_) => "path",
             Self::Which(_) => "which",
-            Self::Tasks(_) => "tasks",
             Self::Config(_) => "config",
             Self::Meta(_) => "meta",
             Self::Sync(_) => "sync",
@@ -180,7 +165,7 @@ impl Command {
             Self::Forget(_) => "forget",
             Self::Destroy(_) => "destroy",
             Self::Refresh(_) => "refresh",
-            Self::Locks(_) => "locks",
+            Self::Leases(_) => "leases",
             Self::Unregister(_) => "unregister",
         }
     }
@@ -197,6 +182,7 @@ mod tests {
         let mut command = Cli::command();
         let names = command
             .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
             .map(|subcommand| subcommand.get_name().to_owned())
             .collect::<Vec<_>>();
         let help = command.render_help().to_string();
@@ -225,6 +211,12 @@ pub struct Register {
     /// Restore a canonical checkout's missing wt identity marker.
     #[arg(long)]
     pub repair: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct HookRun {
+    pub kind: String,
+    pub target: String,
 }
 
 #[derive(Debug, Args)]
@@ -276,15 +268,13 @@ pub struct New {
     #[arg(long)]
     pub no_sync: bool,
     #[arg(long)]
-    pub verify: bool,
-    #[arg(long)]
     pub no_fetch: bool,
     #[arg(long)]
     pub no_open: bool,
     #[arg(long)]
     pub no_attach: bool,
-    #[arg(long)]
-    pub no_build: bool,
+    #[arg(long = "no-after-new")]
+    pub no_after_new: bool,
     /// Attach opaque metadata to the new tree.
     #[arg(long = "meta", value_name = "k=v")]
     pub meta: Vec<String>,
@@ -343,63 +333,24 @@ pub struct TargetArg {
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = "Example: wt run test project/feature --json")]
-pub struct Run {
-    pub task: String,
-    pub target: Option<String>,
-    #[arg(long)]
-    pub wait: Option<String>,
-    #[arg(long)]
-    pub timeout: Option<String>,
-    #[arg(long)]
-    pub dry_run: bool,
-    #[arg(long)]
-    pub no_log: bool,
+#[command(after_help = "Example: wt with database -- just test")]
+pub struct With {
+    #[arg(required = true, num_args = 1..)]
+    pub resources: Vec<String>,
     #[arg(long)]
     pub take: bool,
     #[arg(last = true)]
-    pub args: Vec<String>,
-}
-
-#[derive(Debug, Args)]
-#[command(after_help = "Example: wt test project/feature")]
-pub struct AliasRun {
-    pub target: Option<String>,
-    #[arg(long)]
-    pub wait: Option<String>,
-    #[arg(long)]
-    pub timeout: Option<String>,
-    #[arg(long)]
-    pub dry_run: bool,
-    #[arg(long)]
-    pub no_log: bool,
-    #[arg(last = true)]
-    pub args: Vec<String>,
-}
-
-impl AliasRun {
-    pub fn into_run(self, task: &str) -> Run {
-        Run {
-            task: task.to_owned(),
-            target: self.target,
-            wait: self.wait,
-            timeout: self.timeout,
-            dry_run: self.dry_run,
-            no_log: self.no_log,
-            take: false,
-            args: self.args,
-        }
-    }
+    pub cmd: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Runs by itself after `wt new`, `wt rm` and `wt sync` for repositories whose build a new tree is seeded from.\n\nExample: wt anchor project"
+    after_help = "Runs by itself after `wt new`, `wt rm` and `wt sync` for repositories whose output roots seed a new tree.\n\nExample: wt anchor project"
 )]
 pub struct Anchor {
     /// The registered repository whose canonical checkout to refresh.
     pub label: String,
-    /// Skip the fetch: fast-forward to what origin's default branch already is, then build.
+    /// Skip the fetch: fast-forward to what origin's default branch already is, then warm.
     #[arg(long)]
     pub no_fetch: bool,
 }
@@ -508,7 +459,7 @@ pub struct Prune {
 #[derive(Debug, Args)]
 #[command(after_help = "Example: wt destroy daemon project/feature --yes")]
 pub struct ResourceAction {
-    pub task: String,
+    pub resource: String,
     pub target: Option<String>,
 }
 
@@ -518,14 +469,6 @@ pub struct Doctor {
     pub label: Option<String>,
     #[arg(long)]
     pub probe: bool,
-}
-
-#[derive(Debug, Args)]
-#[command(after_help = "Example: wt tasks project/feature --private")]
-pub struct Tasks {
-    pub target: Option<String>,
-    #[arg(long)]
-    pub private: bool,
 }
 
 #[derive(Debug, Args)]
@@ -544,8 +487,8 @@ pub struct Which {
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = "Example: wt locks project")]
-pub struct Locks {
+#[command(after_help = "Example: wt leases repo")]
+pub struct Leases {
     pub label: Option<String>,
 }
 
@@ -558,14 +501,11 @@ pub struct Script {
 
 pub fn parse() -> Cli {
     let names = [
+        "__hook",
         "new",
         "open",
         "edit",
-        "test",
-        "lint",
-        "fmt",
-        "build",
-        "run",
+        "with",
         "ls",
         "list",
         "status",
@@ -582,7 +522,6 @@ pub fn parse() -> Cli {
         "env",
         "path",
         "which",
-        "tasks",
         "config",
         "meta",
         "sync",
@@ -593,7 +532,7 @@ pub fn parse() -> Cli {
         "forget",
         "destroy",
         "refresh",
-        "locks",
+        "leases",
         "unregister",
     ];
     let args = std::env::args().skip(1).collect::<Vec<_>>();

@@ -1,0 +1,4 @@
+ports = ["metro"]
+
+[env]
+RCT_METRO_PORT = "{{ports.metro}}"

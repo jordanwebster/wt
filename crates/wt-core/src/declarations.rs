@@ -15,12 +15,12 @@ pub fn reconcile(
     refresh_skipped: &BTreeSet<String>,
 ) {
     let declared_keys: BTreeSet<_> = declared.keys().chain(refresh_skipped).cloned().collect();
-    for (scoped_task, record) in records.iter_mut() {
-        record.undeclared = !declared_keys.contains(scoped_task);
+    for (scoped_resource, record) in records.iter_mut() {
+        record.undeclared = !declared_keys.contains(scoped_resource);
     }
-    for (scoped_task, snapshot) in &mut declared {
+    for (scoped_resource, snapshot) in &mut declared {
         strip_tree_specific_env(snapshot);
-        match records.get_mut(scoped_task) {
+        match records.get_mut(scoped_resource) {
             Some(record) => {
                 record.declaration = snapshot.clone();
                 record.key = snapshot.key.clone();
@@ -28,7 +28,7 @@ pub fn reconcile(
             }
             None => {
                 records.insert(
-                    scoped_task.clone(),
+                    scoped_resource.clone(),
                     ResourceRecord::declared(snapshot.clone()),
                 );
             }
@@ -57,7 +57,7 @@ mod tests {
         resource::{ExpandedCommand, ResourceKey, ResourceState, SnapshotRoots},
     };
 
-    fn snapshot(task: &str, tied_to: TiedTo, tree: &str) -> ResourceSnapshot {
+    fn snapshot(resource: &str, tied_to: TiedTo, tree: &str) -> ResourceSnapshot {
         ResourceSnapshot {
             schema: 1,
             key: ResourceKey {
@@ -65,16 +65,20 @@ mod tests {
                 tied_to,
                 name: (tied_to == TiedTo::Tree).then(|| tree.to_owned()),
                 scope: RelDir::new(".").unwrap(),
-                task: task.to_owned(),
+                resource: resource.to_owned(),
             },
-            exclusive: None,
-            name: format!("repo_{task}"),
+            arena: None,
+            capacity: None,
+            name: format!("repo_{resource}"),
             cwd_rel: RelDir::new(".").unwrap(),
             exists: None,
             destroy: ExpandedCommand::Shell {
                 shell: "drop".to_owned(),
             },
-            run: None,
+            create: None,
+            acquire: None,
+            keep: None,
+            idle: None,
             env: EnvMap::from([
                 ("WT_ROOT".to_owned(), format!("/{tree}")),
                 ("WT_LABEL".to_owned(), "repo".to_owned()),
@@ -93,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_replaces_only_declarations_and_marks_missing_tasks() {
+    fn reconcile_replaces_only_declarations_and_marks_missing_resources() {
         let old = snapshot("db", TiedTo::Tree, "old");
         let mut record = ResourceRecord::declared(old.clone());
         record.instance = Some(old);
