@@ -1654,3 +1654,91 @@ computable; free space on the volume is, and if capacity ever needs
 managing that is the quantity to manage. And no typed retention classes
 on output roots: nothing measured needed one, and a root nested under a
 declared one (`target/embed`) is already swept as part of it.
+
+## A83. wt owns resources and leases, hooks warm trees, and the task runner is removed
+
+The task surface had grown around a distinction the repositories did not
+make. Every task in the measured amux configuration delegated to `just`, while
+wt supplied environment, coordination, logging, and lifecycle around the
+child. The task graph, aggregates, task-to-task `needs`, aliases for `test`,
+`lint`, `fmt`, and `build`, and trailing-argument rules therefore duplicated a
+task runner without adding a separate ownership boundary. The boundary that
+does matter is narrower: wt owns state that spans or outlives a process, while
+the repository's task runner owns the work. `wt with <resources...> [--
+<command...>]` is the whole interface between them. With no command it ensures
+durable resources; with a command it also leases pooled resources, runs one
+child in the tree environment, tees output to `.wt/logs/`, and releases every
+lease when the child ends. Pools are acquired once each in sorted pool-name
+order, which makes an acquisition cycle impossible. A token pool has no useful
+ensure operation and is refused when no command is supplied.
+
+One `[resource.<name>]` declaration now describes durable state, counted
+instances, or pure capacity. `create` names the idempotent creation recipe;
+`needs` connects resources only; and `arena` plus `capacity` describe the slot
+an existing resource occupies. `count` makes indexed instances with independent
+frozen destroy snapshots and permits `{{index()}}` in `name`. A declaration
+with only `count` and lease sizing is a token pool: it has no material instance
+and refuses instance recipes. Every lease runs `acquire`; after release a live
+instance remains warm for `keep`, then `park` runs, and `prune` may destroy a
+parked instance after `discard`. Selection prefers the most recently released
+unused live instance, then a parked instance, then an uncreated instance, and
+only then waits up to the pool's `wait`. No state records which tree last used
+an instance because cleaning happens on every lease. `wt lease` and `wt
+release` create and remove tree holders; arena occupancy creates resource
+holders; `wt with ... -- <command>` creates process holders. Process identity
+is the pid plus its start time and a live flock. `--take` may evict a tree or
+resource holder through its frozen snapshot, but never a running process.
+`wt leases` reports instances, slots, holders, process identity, liveness, and
+release times.
+
+Scope still decides lifetime. Tree resources are destroyed by `wt rm`, repo
+resources by unregistering the repository, and machine resources only by
+request or after their declaration disappears. Repo and machine instance
+records preserve the frozen recipes needed to destroy state after the current
+configuration changes. Machine pools are shared by name rather than label, so
+all declaring repositories must agree on lifecycle recipes. Their sizing keys
+(`count`, `keep`, `discard`, and `wait`) come from a machine-level user
+declaration when present; otherwise repository declarations must agree and a
+conflict tells the user to set the machine value once.
+
+The lifecycle conventions formerly hidden in task names are explicit hooks.
+`hooks.after_new` runs detached in the new tree, is logged, and supplies the
+status claimed-command shims use as their build gate. `hooks.warm` is what the
+anchor runs in the canonical after `new`, `rm`, and `sync`. Adapters may
+provide hook defaults but no longer contribute tasks. A configured `output`
+root is also accepted in repository and user layers. It defaults to the opaque
+kind, is cloned as a whole directory during `new`, is included in `ls --disk`
+and anchor coldness decisions, and is never swept; only adapter output carries
+ecosystem knowledge for sweeping. Absolute paths embedded in an opaque cache
+are the user's responsibility, and wt imposes no size limit on the canonical's
+copy.
+
+The replacement is intentionally a cutover, not a compatibility period.
+`[task]`, `[locks]`, `exclusive`, task `run`, `lock`, and `needs`, resource
+`run`, and resource `reset` are configuration errors that name their new
+spelling or model. The `run`, `test`, `lint`, `fmt`, `build`, `tasks`, and
+`locks` verbs no longer exist. Existing resource snapshots survive a state
+schema migration, and exclusive holders become arena holders. This addendum
+supersedes A57–A61.
+
+The observations that fixed the shape were concrete. Simulator state leaked
+between two recipes in the same tree, so cleaning on a change of tree would
+not suffice and `acquire` runs for every lease. A released simulator is cheap
+on disk but expensive in RAM, which requires separate `keep` and `park`
+transitions rather than destruction on release. The apollo repository needs a
+four-slot process semaphore with no lifecycle recipes, establishing token
+pools as accounting rather than pretend resources. Its shared database and
+port-80 service also showed that durable resources, resource-held arena slots,
+and process slots need the same holder model. Finally, configured Python and
+Node cache roots need snapshot warmth but have no safe ecosystem-independent
+sweep rule; accepting them as opaque outputs preserves the measured clone
+benefit without guessing at their contents.
+
+Where this design leaves a detail open, the implementation chooses the
+smallest model: pool names are normalized once for environment-variable export;
+one named pool contributes one lease and duplicate names are errors; indexed
+instances use one-based external indices to match `{{index()}}` and the target
+configurations; and lazy parking is best-effort on ordinary invocations but is
+awaited by `doctor` and `prune`, where its result is part of the command's
+truth. No run history, derived budget, recipe overlay, alternate task-runner
+verb, per-lease clean flag, or last-tree record is introduced.
