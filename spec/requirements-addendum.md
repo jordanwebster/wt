@@ -1747,16 +1747,20 @@ sweep rule; accepting them as opaque outputs preserves the measured clone
 benefit without guessing at their contents.
 
 Where this design leaves a detail open, the implementation chooses the
-smallest model: pool names are normalized once for environment-variable export;
-one named pool contributes one lease and duplicate names are errors; indexed
+smallest model: pool names are normalized once for environment-variable export,
+and two names that normalize to the same key are refused; one named pool
+contributes one lease and duplicate names are errors; token slots are exposed as
+`<pool>-<one-based-slot>`; omitted ownership remains repository scope; indexed
 instances use one-based external indices to match `{{index()}}` and the target
 configurations; an omitted pool wait is thirty minutes; omitted `keep` means no
 reservation and omitted `idle` means no automatic destruction; keep deadlines
 are stored as Unix milliseconds; and lazy idle teardown is best-effort and
 detached on ordinary invocations but awaited by `doctor` and `prune`, where its
-result is part of the command's truth. The only tree identity stored on an
+result is part of the command's truth. If a later pool cannot be acquired, every
+earlier acquisition is unwound immediately and an instance released before the
+child starts becomes free without a keep. The only tree identity stored on an
 instance is the owner and deadline of its current keep. To avoid retaining the
 removed table names for unrelated tuning, settings recipe timeouts live under
-`[recipes]` and internal coordination waits under `[waits]`. No run history, derived
-budget, recipe overlay, alternate task-runner verb, per-lease clean flag, or
-previous-user record is introduced.
+`[recipes]` and internal coordination waits under `[waits]`. No run history,
+derived budget, recipe overlay, alternate task-runner verb, per-lease clean
+flag, or previous-user record is introduced.
