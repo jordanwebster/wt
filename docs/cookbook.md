@@ -1,6 +1,6 @@
 # wt cookbook
 
-These examples use neutral fixture names. Recipes are ordinary shell commands;
+These examples use the orbit example project from the README. Recipes are ordinary shell commands;
 replace them with the repository's own scripts.
 
 ## Prepare a tree-owned service
@@ -8,7 +8,7 @@ replace them with the repository's own scripts.
 ```toml
 [resource.service]
 tied_to = "tree"
-name = "fixture-{{name_short()}}"
+name = "orbit-{{name_short()}}"
 exists = 'test -S ".wt/$WT_SELF.sock"'
 create = 'scripts/service start "$WT_SELF"'
 destroy = 'scripts/service stop "$WT_SELF"'
@@ -53,7 +53,7 @@ one slot per distinct pool, and applies each pool's own wait bound.
 [resource.browser]
 tied_to = "machine"
 count = 3
-name = "fixture-browser-{{index()}}"
+name = "orbit-browser-{{index()}}"
 exists = 'scripts/browser exists "$WT_SELF"'
 create = 'scripts/browser create "$WT_SELF"'
 acquire = 'scripts/browser clean-and-start "$WT_SELF"'
@@ -81,7 +81,7 @@ After it expires the instance is free, and after `idle` it is destroyed.
 tied_to = "tree"
 arena = "repo"
 capacity = 1
-name = "fixture-front-{{name_short()}}"
+name = "orbit-front-{{name_short()}}"
 exists = 'test -f ".wt/$WT_SELF.ready"'
 create = 'scripts/front start "$WT_SELF"'
 destroy = 'scripts/front stop "$WT_SELF"'

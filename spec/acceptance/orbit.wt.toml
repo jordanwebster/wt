@@ -1,36 +1,36 @@
 bin = ["target/debug"]
-commands = ["mobilectl"]
+commands = ["orbit"]
 
 [env]
-MOBILE_CONFIG = "{{root()}}/.wt/mobile/profile.yaml"
-MOBILE_LOG = "{{root()}}/.wt/mobile/service.log"
-MOBILE_STRICT = "1"
+ORBIT_CONFIG = "{{root()}}/.wt/orbit/profile.yaml"
+ORBIT_LOG = "{{root()}}/.wt/orbit/orbit.log"
+ORBIT_INVARIANT_FATAL = "1"
 
-[files.".wt/mobile/installation.yaml"]
+[files.".wt/orbit/installation.yaml"]
 marker = "#"
 content = """
 host_name: {{name_short()}}
-root: {{root()}}/.wt/mobile
-front_door_socket: {{root()}}/.wt/mobile/service.sock
-keymaps_dir: {{root()}}/.wt/mobile/keymaps
+root: {{root()}}/.wt/orbit
+front_door_socket: {{root()}}/.wt/orbit/orbit.sock
+keymaps_dir: {{root()}}/.wt/orbit/keymaps
 prevent_idle_sleep: false
 """
 
 [hooks]
-after_new = "python3 scripts/configure-tree.py {{root()}}/.wt/mobile {{name()}} && just compile"
+after_new = "python3 scripts/configure-tree.py {{root()}}/.wt/orbit {{name()}} && just compile"
 warm = "just warm"
 
 [resource.daemon]
 tied_to = "tree"
 name = "{{name_short()}}"
-exists = 'test -S "{{root()}}/.wt/mobile/service.sock" && mobilectl status >/dev/null 2>&1'
-create = "mobilectl service start"
-destroy = "mobilectl service stop"
+exists = 'test -S "{{root()}}/.wt/orbit/orbit.sock" && orbit status >/dev/null 2>&1'
+create = "orbit service start"
+destroy = "orbit service stop"
 
 [resource.iphone]
 tied_to = "machine"
 count = 2
-name = "fixture-phone-{{index()}}"
+name = "orbit-phone-{{index()}}"
 exists = 'python3 scripts/devices.py exists "$WT_SELF"'
 create = 'python3 scripts/devices.py create "$WT_SELF" phone-large'
 destroy = 'xcrun simctl delete "$WT_SELF"'
@@ -42,7 +42,7 @@ wait = "45m"
 [resource.iphone-small]
 tied_to = "machine"
 count = 1
-name = "fixture-small-{{index()}}"
+name = "orbit-small-{{index()}}"
 exists = 'python3 scripts/devices.py exists "$WT_SELF"'
 create = 'python3 scripts/devices.py create "$WT_SELF" phone-small'
 destroy = 'xcrun simctl delete "$WT_SELF"'

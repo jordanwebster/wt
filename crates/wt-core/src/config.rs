@@ -1373,24 +1373,24 @@ mod tests {
     fn parses_all_acceptance_files_unchanged() {
         for (name, source) in [
             (
-                "mobile-tools",
-                include_str!("../../../spec/acceptance/mobile-tools.wt.toml"),
+                "orbit",
+                include_str!("../../../spec/acceptance/orbit.wt.toml"),
             ),
             (
-                "cloud-service",
-                include_str!("../../../spec/acceptance/cloud-service.wt.toml"),
+                "orbitcloud",
+                include_str!("../../../spec/acceptance/orbitcloud.wt.toml"),
             ),
             (
-                "rust-tool",
-                include_str!("../../../spec/acceptance/rust-tool.wt.toml"),
+                "orbittool",
+                include_str!("../../../spec/acceptance/orbittool.wt.toml"),
             ),
             (
-                "mobile-app",
-                include_str!("../../../spec/acceptance/mobile-app.wt.toml"),
+                "orbitapp",
+                include_str!("../../../spec/acceptance/orbitapp.wt.toml"),
             ),
             (
-                "monolith",
-                include_str!("../../../spec/acceptance/monolith.wt.toml"),
+                "orbitmono",
+                include_str!("../../../spec/acceptance/orbitmono.wt.toml"),
             ),
         ] {
             let config = parse_current(source, name).unwrap();

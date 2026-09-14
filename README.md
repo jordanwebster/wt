@@ -122,7 +122,7 @@ A counted resource with recipes is an instance pool:
 [resource.device]
 tied_to = "machine"
 count = 2
-name = "fixture-device-{{index()}}"
+name = "orbit-device-{{index()}}"
 exists = 'scripts/device exists "$WT_SELF"'
 create = 'scripts/device create "$WT_SELF"'
 acquire = 'scripts/device clean-and-start "$WT_SELF"'

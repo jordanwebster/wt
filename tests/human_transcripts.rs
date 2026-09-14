@@ -324,5 +324,8 @@ fn display(bytes: &[u8]) -> String {
 fn harness_never_uses_operator_state() {
     let h = Harness::new();
     assert!(h.home.starts_with(&h.root));
-    assert!(!h.home.starts_with(Path::new("/Users/jlw/.wt")));
+    let operator_home = std::env::var_os("HOME")
+        .map(|home| Path::new(&home).join(".wt"))
+        .expect("HOME is set");
+    assert!(!h.home.starts_with(&operator_home));
 }

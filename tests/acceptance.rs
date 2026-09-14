@@ -3,25 +3,22 @@ mod common;
 use common::Harness;
 
 const FIXTURES: [(&str, &str); 5] = [
+    ("orbit", include_str!("../spec/acceptance/orbit.wt.toml")),
     (
-        "mobile-tools",
-        include_str!("../spec/acceptance/mobile-tools.wt.toml"),
+        "orbitcloud",
+        include_str!("../spec/acceptance/orbitcloud.wt.toml"),
     ),
     (
-        "cloud-service",
-        include_str!("../spec/acceptance/cloud-service.wt.toml"),
+        "orbittool",
+        include_str!("../spec/acceptance/orbittool.wt.toml"),
     ),
     (
-        "rust-tool",
-        include_str!("../spec/acceptance/rust-tool.wt.toml"),
+        "orbitapp",
+        include_str!("../spec/acceptance/orbitapp.wt.toml"),
     ),
     (
-        "mobile-app",
-        include_str!("../spec/acceptance/mobile-app.wt.toml"),
-    ),
-    (
-        "monolith",
-        include_str!("../spec/acceptance/monolith.wt.toml"),
+        "orbitmono",
+        include_str!("../spec/acceptance/orbitmono.wt.toml"),
     ),
 ];
 
@@ -43,7 +40,7 @@ fn target_configurations_render_without_running_their_recipes() {
 
 #[test]
 fn pooled_device_fixture_uses_frozen_names_keep_and_idle_only() {
-    let mobile = include_str!("../spec/acceptance/mobile-tools.wt.toml");
+    let mobile = include_str!("../spec/acceptance/orbit.wt.toml");
     assert!(mobile.contains("$WT_SELF"));
     assert_eq!(mobile.matches("keep = \"2m\"").count(), 2);
     assert_eq!(mobile.matches("idle = \"30m\"").count(), 2);

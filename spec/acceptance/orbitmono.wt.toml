@@ -10,14 +10,14 @@ warm = "make mypy"
 
 [resource.deps]
 tied_to = "repo"
-name = "fixture-deps"
+name = "orbitmono-deps"
 exists = 'test -f "$WT_SELF.ready"'
 create = 'touch "$WT_SELF.ready"'
 destroy = 'rm -f "$WT_SELF.ready"'
 
 [resource.image]
 tied_to = "repo"
-name = "fixture-image"
+name = "orbitmono-image"
 exists = 'test -f "$WT_SELF.ready"'
 create = 'touch "$WT_SELF.ready"'
 destroy = 'rm -f "$WT_SELF.ready"'
@@ -25,7 +25,7 @@ destroy = 'rm -f "$WT_SELF.ready"'
 [resource.db]
 tied_to = "tree"
 needs = ["deps"]
-name = "fixture-{{name_snake()}}-db"
+name = "orbitmono-{{name_snake()}}-db"
 exists = 'test -f "$WT_SELF.ready"'
 create = 'touch "$WT_SELF.ready"'
 destroy = 'rm -f "$WT_SELF.ready"'
@@ -34,7 +34,7 @@ destroy = 'rm -f "$WT_SELF.ready"'
 tied_to = "tree"
 arena = "repo"
 capacity = 1
-name = "fixture-{{name_snake()}}-serve"
+name = "orbitmono-{{name_snake()}}-serve"
 exists = 'test -f "$WT_SELF.ready"'
 create = 'touch "$WT_SELF.ready"'
 destroy = 'rm -f "$WT_SELF.ready"'

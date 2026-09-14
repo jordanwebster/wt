@@ -1390,7 +1390,7 @@ tracks, is the failure this addendum exists to end.
 ## A79. A tree's build lives in its own `target/` and is seeded from the canonical by clone
 
 The per-tree build directory under `$WT_HOME/cache` (A64) was measured in
-production against the trees it served: one active mobile-tool tree held 39 GB
+production against the trees it served: one active orbit tree held 39 GB
 after a day of agent work, and removing it took 78 seconds. The size was not
 the directory's fault — cargo keeps one artifact set per build configuration
 and never deletes a superseded one — but the directory had lost its reason to
@@ -1659,7 +1659,7 @@ declared one (`target/embed`) is already swept as part of it.
 ## A83. wt owns resources and leases, hooks warm trees, and the task runner is removed
 
 The task surface had grown around a distinction the repositories did not
-make. Every work command in the measured mobile-tool fixture delegated to its
+make. Every work command in the orbit fixture delegated to its
 repository runner, while
 wt supplied environment, coordination, logging, and lifecycle around the
 child. The task graph, aggregates, task-to-task `needs`, aliases for `test`,
@@ -1737,7 +1737,7 @@ not suffice and `acquire` runs for every lease. Consecutive commands from one
 tree must not queue behind a newcomer, so keeping is an implicit reservation
 rather than a cooperative command or a soft preference. The measured resources
 create in under a minute, so a separate dormant state buys nothing: `idle`
-destroys unused instances, while a cheap resume belongs inside `acquire`. The monolith fixture needs a
+destroys unused instances, while a cheap resume belongs inside `acquire`. The orbitmono fixture needs a
 four-slot process semaphore with no lifecycle recipes, establishing token
 pools as accounting rather than pretend resources. Its shared database and
 port-80 service also showed that durable resources, resource-held arena slots,
