@@ -3675,3 +3675,51 @@ fn a_door_that_became_its_child_can_open_another_door() {
     );
     assert_eq!(after.len(), 1, "{after:?}");
 }
+
+#[test]
+fn machine_recipes_run_from_the_invoking_checkout() {
+    // A machine pool's recipes are the repository's own scripts. They run
+    // from the checkout whose door invoked them, and a frozen instance
+    // reached without a door, as prune does, still finds a checkout.
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo(
+        "gadget-fixture",
+        "[resource.gadget]\ntied_to=\"machine\"\nname=\"gadget-fixture\"\nexists=\"test -f gadget.ready\"\ncreate=\"sh scripts/make-gadget.sh\"\ndestroy=\"rm -f gadget.ready\"\n",
+    );
+    common::write(
+        &repo.join("scripts/make-gadget.sh"),
+        "#!/bin/sh\ntouch gadget.ready\n",
+    );
+    common::git(&repo, &["add", "-A"]);
+    common::git(&repo, &["commit", "-qm", "the gadget script"]);
+    h.register(&repo);
+    let made = h.json(&[
+        "new",
+        "gadget-fixture/work",
+        "--no-sync",
+        "--no-after-new",
+        "--no-open",
+    ]);
+    let tree = PathBuf::from(made["data"]["tree"]["path"].as_str().unwrap());
+    h.wt()
+        .current_dir(&tree)
+        .args(["with", "gadget", "--json"])
+        .assert()
+        .success();
+    assert!(
+        tree.join("gadget.ready").exists(),
+        "the create recipe ran from the invoking tree"
+    );
+    assert!(!repo.join("gadget.ready").exists());
+    h.wt()
+        .args(["rm", "gadget-fixture/work", "--force", "--json"])
+        .assert()
+        .success();
+    // The creating tree is gone; destroy falls back to the registered
+    // checkout rather than failing to find a directory.
+    h.wt()
+        .args(["destroy", "gadget", "gadget-fixture", "--yes", "--json"])
+        .assert()
+        .success();
+}

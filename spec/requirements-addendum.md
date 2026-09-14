@@ -1706,7 +1706,11 @@ resources by unregistering the repository, and machine resources only by
 request or after their declaration disappears. Repo and machine instance
 records preserve the frozen recipes needed to destroy state after the current
 configuration changes. Machine pools are shared by name rather than label, so
-all declaring repositories must agree on lifecycle recipes. Their sizing keys
+all declaring repositories must agree on lifecycle recipes. Those recipes are
+the repository's own scripts, so they run from a checkout: the one whose
+door invoked them, or for a frozen instance the checkout that created it,
+then the registered checkout, then the wt home when no checkout remains,
+where a recipe naming its tools by absolute path still works. Their sizing keys
 (`count`, `keep`, `idle`, and `wait`) come from a machine-level user
 declaration when present; otherwise repository declarations must agree and a
 conflict tells the user to set the machine value once.

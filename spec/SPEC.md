@@ -82,6 +82,10 @@ when the effective configuration does not declare one.
 - pooling: `count`, `wait`, `keep`, `idle`.
 
 `destroy` requires `exists` and `tied_to`. `ready_within` requires `exists`.
+`cwd` is relative to the checkout a recipe runs from: the tree for a tree
+resource, the registered checkout for a repo resource, and for a machine
+resource the checkout whose door invoked it, or the checkout that created
+a frozen instance, then the registered checkout, then `$WT_HOME`.
 `arena` and `capacity` appear together and capacity is positive. `count` is
 positive. Durations use a non-negative integer plus `ms`, `s`, `m`, or `h`.
 

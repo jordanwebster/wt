@@ -917,6 +917,19 @@ pub(crate) fn newest_resources_first(mut records: Vec<ResourceRecord>) -> Vec<Re
     records
 }
 
+/// The registered checkout of the repository a stored record belongs to. A
+/// machine record belongs to no repository, so it gets the wt home, and the
+/// snapshot's own rules decide what that means for the recipe's directory.
+fn stored_repo_root(context: &Context, record: &ResourceRecord) -> PathBuf {
+    record
+        .key
+        .label
+        .as_ref()
+        .and_then(|label| context.registry.labels.get(label))
+        .map(|repo| PathBuf::from(repo.path.as_str()))
+        .unwrap_or_else(|| context.home.clone())
+}
+
 fn execute_stored_probe(
     context: &Context,
     record: &ResourceRecord,
@@ -926,15 +939,7 @@ fn execute_stored_probe(
         record.effective_snapshot(),
         SnapshotAction::Exists,
         &context.parent_env,
-        Path::new(
-            context.registry.labels[record
-                .key
-                .label
-                .as_ref()
-                .expect("stored tree records carry a label")]
-            .path
-            .as_str(),
-        ),
+        &stored_repo_root(context, record),
         ExecutionOptions {
             tree_replaced,
             deadlines: wt_sys::snapshot::Deadlines::from_settings(&context.settings.recipes)?,
@@ -960,15 +965,7 @@ fn execute_stored_effect(
         record.effective_snapshot(),
         SnapshotAction::Destroy,
         &context.parent_env,
-        Path::new(
-            context.registry.labels[record
-                .key
-                .label
-                .as_ref()
-                .expect("stored tree records carry a label")]
-            .path
-            .as_str(),
-        ),
+        &stored_repo_root(context, record),
         ExecutionOptions {
             tree_replaced,
             deadlines: wt_sys::snapshot::Deadlines::from_settings(&context.settings.recipes)?,

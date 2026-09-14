@@ -153,6 +153,18 @@ pub fn execute_observed(
             }
             current_repo_root.join(snapshot.cwd_rel.as_str())
         }
+        // A machine resource's recipes are the declaring repository's
+        // scripts, so they run from a checkout: the one whose door is
+        // running them, which is what a fresh snapshot records, or for a
+        // frozen instance the checkout that created it. Prune and doctor
+        // reach a frozen instance with no door; when its checkout is gone
+        // they use the registered checkout, and when that is gone too the
+        // wt home, where a recipe that names its tools by absolute path
+        // still works.
+        TiedTo::Machine if !tree_missing => tree_root.join(snapshot.cwd_rel.as_str()),
+        TiedTo::Machine if current_repo_root.is_dir() => {
+            current_repo_root.join(snapshot.cwd_rel.as_str())
+        }
         TiedTo::Machine => Path::new(&snapshot.roots.home).join(snapshot.cwd_rel.as_str()),
     };
     let request = CommandRequest::expanded(command, cwd, environment)?;

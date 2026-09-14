@@ -70,7 +70,10 @@ destroy = 'rm -f ".wt/$WT_SELF.ready"'
 `tied_to` is `tree`, `repo`, or `machine`. Tree instances are destroyed by
 `wt rm`; repository instances by `wt unregister`; machine instances survive
 until explicitly destroyed or pruned after their declaration disappears.
-Lifecycle recipes receive the frozen instance name in `$WT_SELF`.
+Lifecycle recipes receive the frozen instance name in `$WT_SELF`, and they
+run from a checkout, so a recipe may be one of the repository's own scripts:
+a tree resource's from its tree, a repo resource's from the registered
+checkout, and a machine resource's from the checkout that invoked it.
 
 ```sh
 wt with database                 # ensure durable state
