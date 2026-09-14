@@ -574,29 +574,31 @@ pub fn process_alive(pid: u32) -> bool {
 }
 
 /// Stable identity for a process lifetime, used with a pid to detect reuse.
+#[cfg(target_os = "linux")]
 pub fn process_start(pid: u32) -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        return stat
-            .rsplit_once(')')?
-            .1
-            .split_whitespace()
-            .nth(19)
-            .map(str::to_owned);
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let output = std::process::Command::new("ps")
-            .args(["-o", "lstart=", "-p", &pid.to_string()])
-            .output()
-            .ok()?;
-        output
-            .status
-            .success()
-            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-            .filter(|value| !value.is_empty())
-    }
+    // Field 22 of /proc/<pid>/stat is the start time in clock ticks since
+    // boot; the split skips the parenthesised command name, which may itself
+    // contain spaces.
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)
+        .map(str::to_owned)
+}
+
+/// Stable identity for a process lifetime, used with a pid to detect reuse.
+#[cfg(not(target_os = "linux"))]
+pub fn process_start(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 pub fn process_matches(pid: u32, start: &str) -> bool {
