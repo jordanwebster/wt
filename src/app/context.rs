@@ -202,12 +202,25 @@ impl Context {
             .join(format!("locks/{}/{}.lock", target.label, target.name))
     }
 
+    /// One holder file per door entry, not per process. A passthrough door
+    /// replaces itself with its child and hands it the door's lock fds, so a
+    /// wt verb reached through an exec chain runs under the pid of the door
+    /// that spawned it while that door's lock is still held in the same
+    /// process. Named by pid alone, its own door file would be the one it
+    /// already holds and it would wait on itself; the timestamp keeps each
+    /// entry distinct. Holders are read from the record inside the file, never
+    /// from the name, and `lock::door` sweeps entries whose process is gone.
     pub fn door_lock_path(&self, target: &Target) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
         self.home.join(format!(
-            "locks/{}/{}.doors/{}.lock",
+            "locks/{}/{}.doors/{}-{}.lock",
             target.label,
             target.name,
-            std::process::id()
+            std::process::id(),
+            nanos
         ))
     }
 

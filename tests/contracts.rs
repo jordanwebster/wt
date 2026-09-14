@@ -3621,3 +3621,57 @@ fn new_brings_the_local_default_branch_to_origin_before_branching() {
         local
     );
 }
+
+#[test]
+fn a_door_that_became_its_child_can_open_another_door() {
+    // `wt exec` replaces itself with the child and hands it the door's lock
+    // fds, so a verb reached through an exec chain runs under the pid of the
+    // door that spawned it. Its own door entry must not collide with the one
+    // it inherited, and the inherited entry, which no token ever drops, is
+    // swept by the next door once its process is gone.
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo("door-fixture", "[resource.slot]\ncount=1\nwait='500ms'\n");
+    h.register(&repo);
+    let doors = h.home.join("locks/door-fixture/canonical.doors");
+    let output = h
+        .wt()
+        .current_dir(&repo)
+        .args([
+            "exec",
+            "door-fixture",
+            "--",
+            env!("CARGO_BIN_EXE_wt"),
+            "with",
+            "slot",
+            "--",
+            "sh",
+            "-c",
+            "printf '%s' \"$WT_LEASE_SLOT\"",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("slot-1"));
+    let inherited = wt_sys::fsx::read_dir_paths(&doors).unwrap();
+    assert_eq!(
+        inherited.len(),
+        1,
+        "only the exec'd door's own entry outlives the chain: {inherited:?}"
+    );
+    h.wt()
+        .args(["exec", "door-fixture", "--", "true"])
+        .assert()
+        .success();
+    let after = wt_sys::fsx::read_dir_paths(&doors).unwrap();
+    assert!(
+        !after.contains(&inherited[0]),
+        "the next door sweeps the dead entry: {after:?}"
+    );
+    assert_eq!(after.len(), 1, "{after:?}");
+}

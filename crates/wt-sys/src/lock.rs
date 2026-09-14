@@ -328,6 +328,9 @@ pub fn state_rmw(path: &Path, holder: &Holder, wait: Duration) -> Result<RmwToke
 
 /// Creates and exclusively holds a per-door holder file until the token drops.
 pub fn door(path: &Path, holder: &Holder) -> Result<DoorToken> {
+    if let Some(directory) = path.parent() {
+        sweep_dead_doors(directory)?;
+    }
     let guard = acquire_inner(
         path,
         Level::Tree,
@@ -340,6 +343,26 @@ pub fn door(path: &Path, holder: &Holder) -> Result<DoorToken> {
         guard: Some(guard),
         path: path.to_path_buf(),
     })
+}
+
+/// Removes door files left by processes that no longer exist. A door file is
+/// unlinked when its token drops, but a door that replaced itself with its
+/// child never drops the token, so its file outlives the process. Only a file
+/// that is not locked and whose recorded holder is gone is removed: a file
+/// with no record yet belongs to an entry still being taken.
+fn sweep_dead_doors(directory: &Path) -> Result<()> {
+    for path in fsx::read_dir_paths(directory)? {
+        if path.extension().is_none_or(|extension| extension != "lock") || is_held(&path)? {
+            continue;
+        }
+        let Some(holder) = read_holder(&path)? else {
+            continue;
+        };
+        if !crate::proc::process_alive(holder.pid) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    Ok(())
 }
 
 /// Reads a holder record without taking or mutating the lock.
