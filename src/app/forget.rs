@@ -52,7 +52,23 @@ pub(crate) fn run(context: &mut Context, args: Forget) -> Result<Output, CoreErr
     refuse_resources(context, &tree, &target)?;
     refuse_session(context, &tree)?;
 
-    let state = context.read_state(&target)?.ok_or_else(|| {
+    let artifacts = detach(context, &tree, &target, &holder, "forgotten", true)?;
+    Output::data(ForgetData {
+        target: target.to_string(),
+        forgotten: true,
+        artifacts,
+    })
+}
+
+pub(crate) fn detach(
+    context: &mut Context,
+    tree: &wt_core::model::TreeRec,
+    target: &wt_core::model::Target,
+    holder: &wt_sys::lock::Holder,
+    reason: &str,
+    remove_artifacts: bool,
+) -> Result<Vec<ArtifactReport>, CoreError> {
+    let state = context.read_state(target)?.ok_or_else(|| {
         CoreError::new(
             ExitClass::State,
             "STATE_CORRUPT",
@@ -62,35 +78,44 @@ pub(crate) fn run(context: &mut Context, args: Forget) -> Result<Output, CoreErr
     })?;
     let root = Path::new(tree.path.as_str());
     let mut artifacts = Vec::new();
-    for item in &state.materialized {
-        if item.kind != MaterializedKind::Rendered
-            || item.path == ".wt"
-            || item.path.starts_with(".wt/")
-        {
-            continue;
+    if remove_artifacts {
+        for item in &state.materialized {
+            if item.kind != MaterializedKind::Rendered
+                || item.path == ".wt"
+                || item.path.starts_with(".wt/")
+            {
+                continue;
+            }
+            let relative = wt_core::model::RelPath::new(&item.path)?;
+            let owned = item.hash.as_ref().is_some_and(|hash| {
+                wt_sys::fsx::read_nofollow(root, &relative)
+                    .is_ok_and(|bytes| wt_core::render::content_hash(&bytes) == *hash)
+            });
+            let action = if owned && wt_sys::fsx::remove_nofollow(root, &relative)? {
+                "deleted"
+            } else {
+                "kept"
+            };
+            artifacts.push(ArtifactReport {
+                path: item.path.clone(),
+                action: action.to_owned(),
+            });
         }
-        let relative = wt_core::model::RelPath::new(&item.path)?;
-        let owned = item.hash.as_ref().is_some_and(|hash| {
-            wt_sys::fsx::read_nofollow(root, &relative)
-                .is_ok_and(|bytes| wt_core::render::content_hash(&bytes) == *hash)
-        });
-        let action = if owned && wt_sys::fsx::remove_nofollow(root, &relative)? {
-            "deleted"
-        } else {
-            "kept"
-        };
+        let wt_dir = root.join(".wt");
+        let deleted = wt_sys::fsx::remove_path(&wt_dir)?;
         artifacts.push(ArtifactReport {
-            path: item.path.clone(),
-            action: action.to_owned(),
+            path: wt_dir.to_string_lossy().into_owned(),
+            action: if deleted { "deleted" } else { "kept" }.to_owned(),
+        });
+    } else {
+        let marker = wt_core::model::RelPath::new(".wt/tree_id")?;
+        let deleted = wt_sys::fsx::remove_nofollow(root, &marker)?;
+        artifacts.push(ArtifactReport {
+            path: marker.to_string(),
+            action: if deleted { "deleted" } else { "kept" }.to_owned(),
         });
     }
-    let wt_dir = root.join(".wt");
-    let deleted = wt_sys::fsx::remove_path(&wt_dir)?;
-    artifacts.push(ArtifactReport {
-        path: wt_dir.to_string_lossy().into_owned(),
-        action: if deleted { "deleted" } else { "kept" }.to_owned(),
-    });
-    wt_sys::fsx::remove_path(&context.state_path(&target))?;
+    wt_sys::fsx::remove_path(&context.state_path(target))?;
     let tombstone = Tombstone {
         label: tree.label.clone(),
         name: tree.name.clone(),
@@ -100,9 +125,9 @@ pub(crate) fn run(context: &mut Context, args: Forget) -> Result<Output, CoreErr
         path: tree.path.clone(),
         materialized: Vec::new(),
         removed_at: wt_sys::fsx::timestamp()?,
-        reason: "forgotten".to_owned(),
+        reason: reason.to_owned(),
     };
-    context.mutate_registry(&holder, |registry| {
+    context.mutate_registry(holder, |registry| {
         registry
             .trees
             .retain(|record| record.tree_id != tree.tree_id);
@@ -111,11 +136,7 @@ pub(crate) fn run(context: &mut Context, args: Forget) -> Result<Output, CoreErr
     })?;
     door::recompute_exclude(context, &tree.label)?;
     artifacts.sort_by(|left, right| left.path.cmp(&right.path));
-    Output::data(ForgetData {
-        target: target.to_string(),
-        forgotten: true,
-        artifacts,
-    })
+    Ok(artifacts)
 }
 
 fn refuse_resources(

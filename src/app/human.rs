@@ -2,8 +2,8 @@ use serde_json::Value;
 use wt_core::doctor::Severity;
 use wt_core::report::{
     AdoptData, AnchorData, CloneData, ConfigData, DoctorData, ForgetData, ListData, NewData,
-    Notice, PruneData, RegisterData, RemoveData, ResourceActionData, SessionsData, StatusData,
-    SyncData, UnregisterData, WhichData,
+    Notice, PrepareData, PruneData, RegisterData, ReleaseData, RemoveData, ResourceActionData,
+    SessionsData, StatusData, SyncData, UnregisterData, WhichData,
 };
 
 use crate::cli::Command;
@@ -15,6 +15,7 @@ pub(crate) enum HumanKind {
     Unregister,
     Clone,
     New,
+    Prepare,
     Adopt,
     List,
     Status,
@@ -29,6 +30,7 @@ pub(crate) enum HumanKind {
     Open,
     Edit,
     Close,
+    Release,
     Forget,
     Remove,
     Prune,
@@ -50,6 +52,7 @@ impl From<&Command> for HumanKind {
             Command::Unregister(_) => Self::Unregister,
             Command::Clone(_) => Self::Clone,
             Command::New(_) => Self::New,
+            Command::Prepare(_) => Self::Prepare,
             Command::Adopt(_) => Self::Adopt,
             Command::List(_) => Self::List,
             Command::Status(_) => Self::Status,
@@ -64,6 +67,7 @@ impl From<&Command> for HumanKind {
             Command::Open(_) => Self::Open,
             Command::Edit(_) => Self::Edit,
             Command::Close(_) => Self::Close,
+            Command::Release(_) => Self::Release,
             Command::Forget(_) => Self::Forget,
             Command::Remove(_) => Self::Remove,
             Command::Prune(_) => Self::Prune,
@@ -85,12 +89,14 @@ impl HumanKind {
             Self::Unregister => render_unregister(decode(value), notices),
             Self::Clone => render_clone(decode(value), notices),
             Self::New => render_new(decode(value), notices),
+            Self::Prepare => render_prepare(decode(value), notices),
             Self::Adopt => render_adopt(decode(value), notices),
             Self::List => render_list(decode(value), notices),
             Self::Status => render_status(decode(value), notices),
             Self::Sync => render_sync(decode(value), notices),
             Self::Anchor => render_anchor(decode(value), notices),
             Self::Open | Self::Close => render_sessions(decode(value), notices),
+            Self::Release => render_release(decode(value), notices),
             Self::Remove => render_remove(decode(value), notices),
             Self::Prune => render_prune(decode(value), notices),
             Self::Destroy => render_resource("Resource destroyed", value, notices),
@@ -240,6 +246,32 @@ fn render_adopt(data: AdoptData, notices: &[Notice]) -> String {
     block(
         headline,
         vec![("path", data.tree.path), ("phase", data.tree.phase)],
+        notices,
+    )
+}
+
+fn render_prepare(data: PrepareData, notices: &[Notice]) -> String {
+    let headline = if data.adopted {
+        format!("Prepared {}", data.tree.target)
+    } else if data.resumed {
+        format!("Resumed preparation of {}", data.tree.target)
+    } else {
+        format!("{} is prepared", data.tree.target)
+    };
+    let sync = data
+        .sync
+        .as_ref()
+        .map_or_else(|| "skipped".to_owned(), |steps| format_steps(steps));
+    block(
+        headline,
+        vec![
+            ("path", data.tree.path),
+            (
+                "branch",
+                data.tree.branch.unwrap_or_else(|| "detached".to_owned()),
+            ),
+            ("sync", sync),
+        ],
         notices,
     )
 }
@@ -559,6 +591,25 @@ fn render_remove(data: RemoveData, notices: &[Notice]) -> String {
     }
     if let Some(branch) = data.branch_kept {
         facts.push(("kept", format!("branch {branch}")));
+    }
+    if data.session_closed {
+        facts.push(("session", "closed".to_owned()));
+    }
+    block(headline, facts, notices)
+}
+
+fn render_release(data: ReleaseData, notices: &[Notice]) -> String {
+    let headline = if data.released {
+        format!("Released {}", data.target)
+    } else {
+        format!("Did not release {}", data.target)
+    };
+    let mut facts = Vec::new();
+    if !data.destroyed.is_empty() {
+        facts.push(("destroyed", data.destroyed.len().to_string()));
+    }
+    if !data.artifacts.is_empty() {
+        facts.push(("artifacts", data.artifacts.len().to_string()));
     }
     if data.session_closed {
         facts.push(("session", "closed".to_owned()));

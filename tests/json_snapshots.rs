@@ -68,6 +68,32 @@ fn every_verb_has_a_normalized_json_contract_snapshot() {
     snapshot(&h, "remove", &["remove", "repo/work", "--yes"]);
     snapshot(&h, "prune", &["prune", "--yes"]);
 
+    let prepared_path = h.root.join("prepared");
+    common::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "prepared",
+            prepared_path.to_str().unwrap(),
+        ],
+    );
+    snapshot(
+        &h,
+        "prepare",
+        &[
+            "prepare",
+            prepared_path.to_str().unwrap(),
+            "--name",
+            "prepared",
+            "--no-sync",
+            "--no-after-new",
+        ],
+    );
+    snapshot_at(&h, "release", &["release"], &prepared_path);
+
     let adopted_path = h.root.join("adopted");
     common::git(
         &repo,

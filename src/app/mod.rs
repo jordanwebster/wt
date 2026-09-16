@@ -22,9 +22,11 @@ mod meta;
 mod new;
 mod open;
 mod path;
+mod prepare;
 mod prune;
 mod refresh;
 mod register;
+mod release;
 mod remove;
 mod setup;
 mod shell;
@@ -329,6 +331,7 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Unregister(args) => unregister::run(context, args),
         Command::Clone(args) => clone_repo::run(context, args),
         Command::New(args) => new::run(context, args),
+        Command::Prepare(args) => prepare::run(context, args),
         Command::Adopt(args) => adopt::run(context, args),
         Command::List(args) => list::run(context, args),
         Command::Status(args) => status::run(context, args),
@@ -343,6 +346,7 @@ fn dispatch(context: &mut Context, cli: Cli) -> Result<Output, CoreError> {
         Command::Open(args) => open::run(context, args),
         Command::Edit(args) => edit::run(context, args),
         Command::Close(args) => close::run(context, args),
+        Command::Release(args) => release::run(context, args),
         Command::Forget(args) => forget::run(context, args),
         Command::Remove(args) => remove::run(context, args),
         Command::Prune(args) => prune::run(context, args),

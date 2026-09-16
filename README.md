@@ -48,8 +48,9 @@ copy-on-write clone when the filesystem supports it, `wt ls --disk` includes
 their size, and wt never inspects or sweeps their contents. Adapter-owned roots
 may have an ecosystem-specific sweeper.
 
-`after_new` starts detached in each new tree, writes `.wt/logs/wt-setup.log`, and
-gates claimed command shims until it succeeds or fails. `warm` runs in the
+`after_new` starts detached in each new or prepared tree, writes
+`.wt/logs/wt-setup.log`, and gates claimed command shims until it succeeds or
+fails. `warm` runs in the
 canonical checkout when the anchor refreshes it. The anchor is triggered by
 `new`, `rm`, and `sync` when the effective configuration has output roots.
 
@@ -68,8 +69,9 @@ destroy = 'rm -f ".wt/$WT_SELF.ready"'
 ```
 
 `tied_to` is `tree`, `repo`, or `machine`. Tree instances are destroyed by
-`wt rm`; repository instances by `wt unregister`; machine instances survive
-until explicitly destroyed or pruned after their declaration disappears.
+`wt rm` or `wt release`; repository instances by `wt unregister`; machine
+instances survive until explicitly destroyed or pruned after their declaration
+disappears.
 Lifecycle recipes receive the frozen instance name in `$WT_SELF`, and they
 run from a checkout, so a recipe may be one of the repository's own scripts:
 a tree resource's from its tree, a repo resource's from the registered

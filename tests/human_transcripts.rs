@@ -174,6 +174,32 @@ fn every_successful_verb_uses_intentional_human_text() {
     human(&h, &["close", "repo"], b"");
     human(&h, &["new", "repo/work", "--no-sync"], b"");
 
+    let prepared = h.root.join("prepared");
+    common::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "prepared",
+            prepared.to_str().unwrap(),
+        ],
+    );
+    human(
+        &h,
+        &[
+            "prepare",
+            prepared.to_str().unwrap(),
+            "--name",
+            "prepared",
+            "--no-sync",
+            "--no-after-new",
+        ],
+        b"",
+    );
+    human_at(&h, &["release"], b"", &prepared);
+
     let adopted = h.root.join("adopted");
     common::git(
         &repo,

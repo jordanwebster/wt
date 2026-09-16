@@ -36,7 +36,7 @@ expression: "normalize(value, &h.root)"
       "disk_kb": null,
       "geometry": {
         "base": 20000,
-        "port_base": 20032,
+        "port_base": 20048,
         "stride": 16
       },
       "label": "clone",
@@ -48,7 +48,7 @@ expression: "normalize(value, &h.root)"
       "resources": [],
       "session": "no",
       "session_name": "clone",
-      "slot": 2,
+      "slot": 3,
       "sync": {
         "at": null,
         "changed": [],

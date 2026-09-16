@@ -31,7 +31,7 @@ impl Shell {
     name = "wt",
     version,
     about = "Worktree manager for humans and coding agents",
-    override_help = "Worktree manager for humans and coding agents\n\nUsage: wt [OPTIONS] <COMMAND>\n\nEveryday:\n  new          Create or resume a linked worktree\n  open         Open or attach to an agent session\n  edit         Open a tree in the configured editor\n  with         Ensure resources and lease pools for one command\n  leases       List pool instances, slots, and holders\n  ls           List registered trees [aliases: list]\n  status       Report one tree's state\n  rm           Tear down and remove a linked tree [aliases: remove]\n\nSetup:\n  setup        Find repositories and settle wt's environment\n  clone        Clone a repository into a hub wt owns and register it\n  register     Register a canonical checkout\n  adopt        Adopt an existing git worktree\n  shell-init   Print shell helper initialisation\n  completions  Print dynamic shell completions\n\nWorking inside a tree:\n  exec         Run a one-shot command through a passthrough door\n  shell        Start an interactive shell door\n  env          Print a tree's assembled environment\n  path         Print a tree root\n  which        Resolve a command through a tree door's PATH\n  config       Show effective configuration origins\n  meta         Show or edit a tree's user metadata\n\nUpkeep:\n  sync         Synchronise a tree's dependencies\n  anchor       Refresh and warm a repository's canonical checkout\n  doctor       Diagnose registered state and tooling\n  prune        Report or clean stale state\n  close        Close agent sessions\n  forget       Forget wt's records for a linked tree without removing it\n  destroy      Destroy a declared resource\n  refresh      Destroy and recreate a declared resource\n  unregister   Tear down and forget a registered repository\n\nOptions:\n      --json           Emit one stable JSON envelope\n      --yes            Consent to destructive operations without prompting\n      --quiet          Suppress optional notices\n      --verbose        Show notices even when stderr is not a terminal\n      --color <COLOR>  Control coloured terminal output [default: auto] [possible values: auto, always, never]\n      --home <DIR>     Use an alternate wt state directory\n  -h, --help           Print help\n  -V, --version        Print version\n\nExample: wt register . && wt new repo/feature"
+    override_help = "Worktree manager for humans and coding agents\n\nUsage: wt [OPTIONS] <COMMAND>\n\nEveryday:\n  new          Create or resume a linked worktree\n  prepare      Adopt and initialise an existing linked worktree\n  open         Open or attach to an agent session\n  edit         Open a tree in the configured editor\n  with         Ensure resources and lease pools for one command\n  leases       List pool instances, slots, and holders\n  ls           List registered trees [aliases: list]\n  status       Report one tree's state\n  rm           Tear down and remove a linked tree [aliases: remove]\n\nSetup:\n  setup        Find repositories and settle wt's environment\n  clone        Clone a repository into a hub wt owns and register it\n  register     Register a canonical checkout\n  adopt        Adopt an existing git worktree\n  shell-init   Print shell helper initialisation\n  completions  Print dynamic shell completions\n\nWorking inside a tree:\n  exec         Run a one-shot command through a passthrough door\n  shell        Start an interactive shell door\n  env          Print a tree's assembled environment\n  path         Print a tree root\n  which        Resolve a command through a tree door's PATH\n  config       Show effective configuration origins\n  meta         Show or edit a tree's user metadata\n\nUpkeep:\n  sync         Synchronise a tree's dependencies\n  anchor       Refresh and warm a repository's canonical checkout\n  doctor       Diagnose registered state and tooling\n  prune        Report or clean stale state\n  close        Close agent sessions\n  release      Tear down wt state without removing a linked tree\n  forget       Forget wt's records for a linked tree without removing it\n  destroy      Destroy a declared resource\n  refresh      Destroy and recreate a declared resource\n  unregister   Tear down and forget a registered repository\n\nOptions:\n      --json           Emit one stable JSON envelope\n      --yes            Consent to destructive operations without prompting\n      --quiet          Suppress optional notices\n      --verbose        Show notices even when stderr is not a terminal\n      --color <COLOR>  Control coloured terminal output [default: auto] [possible values: auto, always, never]\n      --home <DIR>     Use an alternate wt state directory\n  -h, --help           Print help\n  -V, --version        Print version\n\nExample: wt register . && wt new repo/feature"
 )]
 pub struct Cli {
     /// Emit one stable JSON envelope.
@@ -63,6 +63,8 @@ pub enum Command {
     Hook(HookRun),
     /// Create or resume a linked worktree.
     New(New),
+    /// Adopt and initialise an existing linked worktree.
+    Prepare(Prepare),
     /// Open or attach to an agent session.
     Open(Open),
     /// Open a tree in the configured editor.
@@ -120,6 +122,8 @@ pub enum Command {
     Prune(Prune),
     /// Close agent sessions.
     Close(Close),
+    /// Tear down wt state without removing a linked tree.
+    Release(Release),
     /// Forget wt's records for a linked tree without removing it.
     Forget(Forget),
     /// Destroy a declared resource.
@@ -138,6 +142,7 @@ impl Command {
         match self {
             Self::Hook(_) => "__hook",
             Self::New(_) => "new",
+            Self::Prepare(_) => "prepare",
             Self::Open(_) => "open",
             Self::Edit(_) => "edit",
             Self::With(_) => "with",
@@ -162,6 +167,7 @@ impl Command {
             Self::Doctor(_) => "doctor",
             Self::Prune(_) => "prune",
             Self::Close(_) => "close",
+            Self::Release(_) => "release",
             Self::Forget(_) => "forget",
             Self::Destroy(_) => "destroy",
             Self::Refresh(_) => "refresh",
@@ -291,6 +297,26 @@ pub struct Adopt {
     #[arg(long)]
     pub agent: Option<String>,
     /// Attach opaque metadata to the adopted tree.
+    #[arg(long = "meta", value_name = "k=v")]
+    pub meta: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = "Example: wt prepare . --name codex-1234")]
+pub struct Prepare {
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+    #[arg(long)]
+    pub label: Option<String>,
+    #[arg(long)]
+    pub name: Option<String>,
+    #[arg(long)]
+    pub agent: Option<String>,
+    #[arg(long)]
+    pub no_sync: bool,
+    #[arg(long = "no-after-new")]
+    pub no_after_new: bool,
+    /// Attach opaque metadata to the prepared tree.
     #[arg(long = "meta", value_name = "k=v")]
     pub meta: Vec<String>,
 }
@@ -427,6 +453,12 @@ pub struct Forget {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = "Example: wt release")]
+pub struct Release {
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Args)]
 #[command(after_help = "Example: wt rm project/feature")]
 pub struct Remove {
     pub target: String,
@@ -503,6 +535,7 @@ pub fn parse() -> Cli {
     let names = [
         "__hook",
         "new",
+        "prepare",
         "open",
         "edit",
         "with",
@@ -529,6 +562,7 @@ pub fn parse() -> Cli {
         "doctor",
         "prune",
         "close",
+        "release",
         "forget",
         "destroy",
         "refresh",

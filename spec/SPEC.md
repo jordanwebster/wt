@@ -23,10 +23,13 @@ mutation. Atomic writes preserve the last complete state.
 ## 2. Trees and identity
 
 `register` records a canonical checkout. `new` creates or resumes a linked Git
-worktree. `adopt` records an existing worktree. `rm` tears down tree-owned
-resources, ends keeps owned by the tree, closes its session, removes the Git
-worktree, and records a tombstone. `forget` removes wt records without deleting
-the worktree. `unregister` additionally tears down repository-owned resources.
+worktree. `adopt` records an existing worktree. `prepare` adopts an existing
+worktree and performs wt's post-creation initialisation. `rm` tears down
+tree-owned resources, ends keeps owned by the tree, closes its session, removes
+the Git worktree, and records a tombstone. `release` performs the same wt-owned
+teardown without removing the Git worktree, its branch, or user files. `forget`
+removes wt records without deleting the worktree. `unregister` additionally
+tears down repository-owned resources.
 
 Tree identity includes a stable tree id, label, name, branch, slot, frozen port
 geometry, allocated ports, source, and user metadata. The `.wt/tree_id`
@@ -181,6 +184,10 @@ materialises configuration, clones output roots, optionally synchronises, marks
 the tree ready, starts `after_new`, provisions a session when requested, and
 triggers the anchor when effective output exists.
 
+`prepare` applies the same identity, materialisation, output, sync, and
+`after_new` stages to a linked worktree created by another owner. It does not
+replace tracked files or create a session.
+
 ### 11.3 Sync
 
 `sync` reruns only the adapter synchronisation commands whose tracked
@@ -192,6 +199,11 @@ triggers the anchor when effective output exists.
 from snapshots, ends every keep owned by the tree, removes the Git worktree,
 deletes tree state, and records a tombstone. `--keep-orphans` permits removal
 when a resource cannot be destroyed while retaining its record for repair.
+
+`release` closes sessions, destroys tree-owned resources, ends keeps, and
+removes wt's identity marker and state without touching the Git worktree,
+branch, rendered files, copied files, or user files. It completes only when
+resource teardown succeeds.
 
 ### 11.5 Resource commands
 
@@ -312,9 +324,9 @@ Only an explicit `forever` pool wait is unbounded.
 
 ## 14. Command surface
 
-Primary commands are `register`, `unregister`, `clone`, `new`, `adopt`, `setup`,
-`rm`, `forget`, `sync`, `anchor`, `ls`, `status`, `meta`, `prune`, `with`,
-`destroy`, `refresh`, `leases`, `exec`, `edit`, `shell`, `env`, `open`, `close`,
-`path`, `which`, `config`, `doctor`, `shell-init`, and `completions`. `list`
-aliases `ls`; `remove` aliases `rm`. Unknown subcommands exit with usage status
-and nearest current names.
+Primary commands are `register`, `unregister`, `clone`, `new`, `prepare`,
+`adopt`, `setup`, `rm`, `release`, `forget`, `sync`, `anchor`, `ls`, `status`,
+`meta`, `prune`, `with`, `destroy`, `refresh`, `leases`, `exec`, `edit`, `shell`,
+`env`, `open`, `close`, `path`, `which`, `config`, `doctor`, `shell-init`, and
+`completions`. `list` aliases `ls`; `remove` aliases `rm`. Unknown subcommands
+exit with usage status and nearest current names.

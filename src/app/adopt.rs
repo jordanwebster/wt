@@ -8,7 +8,28 @@ use crate::cli::Adopt;
 
 use super::{door, executor, list, register, Context, Output};
 
+pub(crate) struct Adoption {
+    pub tree: TreeRec,
+    pub adopted: bool,
+    pub resumed: bool,
+    pub notices: Vec<wt_core::report::Notice>,
+}
+
 pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreError> {
+    let adoption = record(context, args, false)?;
+    Ok(Output::data(AdoptData {
+        tree: list::tree_report(context, &adoption.tree, false, false, false)?,
+        adopted: adoption.adopted,
+        resumed: adoption.resumed,
+    })?
+    .with_notices(adoption.notices))
+}
+
+pub(crate) fn record(
+    context: &mut Context,
+    args: Adopt,
+    resume_prepare: bool,
+) -> Result<Adoption, CoreError> {
     let meta = super::meta::parse_creation(&args.meta)?;
     if let Some(agent) = args.agent.as_deref() {
         if !context.settings.agents.contains_key(agent) {
@@ -78,8 +99,33 @@ pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreErro
         .find(|tree| tree.label == target.label && tree.name == target.name)
         .cloned()
     {
-        let interrupted = context
-            .read_state(&target)?
+        if existing.path.as_str() != path.to_string_lossy() {
+            return Err(CoreError::new(
+                ExitClass::Conflict,
+                "TARGET_OCCUPIED",
+                format!("{target} already names {}", existing.path.as_str()),
+                "choose another --name or use the existing target",
+            ));
+        }
+        let state = context.read_state(&target)?;
+        let preparation_interrupted = resume_prepare
+            && existing.source.kind == SourceKind::Adopted
+            && state.as_ref().is_some_and(|state| {
+                matches!(
+                    state.phase,
+                    StatePhase::Initialising | StatePhase::Bootstrapping | StatePhase::Failed
+                )
+            });
+        if preparation_interrupted {
+            return Ok(Adoption {
+                tree: existing,
+                adopted: false,
+                resumed: true,
+                notices: Vec::new(),
+            });
+        }
+        let interrupted = state
+            .as_ref()
             .is_some_and(|state| state.phase == StatePhase::Initialising);
         let (door, resumed) = if interrupted {
             let holder = context.holder(target.to_string(), "adopt")?;
@@ -102,12 +148,12 @@ pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreErro
             executor::refresh_all_declarations(context, &door)?;
             (door, false)
         };
-        return Ok(Output::data(AdoptData {
-            tree: list::tree_report(context, &existing, false, false, false)?,
+        return Ok(Adoption {
+            tree: existing,
             adopted: false,
             resumed,
-        })?
-        .with_notices(door.notices));
+            notices: door.notices,
+        });
     }
     if context
         .registry
@@ -170,6 +216,16 @@ pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreErro
         format!("{tree_id}\n").as_bytes(),
         0o600,
     )?;
+    if resume_prepare {
+        drop(token);
+        context.reload_registry()?;
+        return Ok(Adoption {
+            tree,
+            adopted: true,
+            resumed: false,
+            notices: Vec::new(),
+        });
+    }
     door::recompute_exclude(context, &tree.label)?;
     let door = door::enter_held(context, tree.clone(), "adopt", true)?;
     executor::refresh_all_declarations(context, &door)?;
@@ -180,10 +236,10 @@ pub(crate) fn run(context: &mut Context, args: Adopt) -> Result<Output, CoreErro
     })?;
     drop(token);
     context.reload_registry()?;
-    Ok(Output::data(AdoptData {
-        tree: list::tree_report(context, &tree, false, false, false)?,
+    Ok(Adoption {
+        tree,
         adopted: true,
         resumed: false,
-    })?
-    .with_notices(door.notices))
+        notices: door.notices,
+    })
 }

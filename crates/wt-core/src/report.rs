@@ -359,6 +359,22 @@ pub struct AdoptData {
     pub resumed: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PrepareData {
+    pub tree: TreeReport,
+    pub adopted: bool,
+    pub resumed: bool,
+    pub sync: Option<Vec<StepReport>>,
+    pub after_new: Option<crate::lifecycle::BuildState>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseData {
+    pub target: String,
+    pub released: bool,
+    pub destroyed: Vec<DestroyedReport>,
+    pub artifacts: Vec<ArtifactReport>,
+    pub session_closed: bool,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RemoveData {
     pub target: String,
     pub removed: bool,

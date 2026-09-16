@@ -615,6 +615,8 @@ pub(crate) fn new_state(
     let op_verb = match verb {
         "register" => wt_core::lifecycle::OpVerb::Register,
         "adopt" => wt_core::lifecycle::OpVerb::Adopt,
+        "prepare" => wt_core::lifecycle::OpVerb::Prepare,
+        "release" => wt_core::lifecycle::OpVerb::Release,
         "new" => wt_core::lifecycle::OpVerb::New,
         "sync" => wt_core::lifecycle::OpVerb::Sync,
         "remove" => wt_core::lifecycle::OpVerb::Remove,

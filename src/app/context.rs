@@ -295,8 +295,12 @@ impl Context {
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>();
+        let canonical_address = address
+            .filter(|address| address.starts_with('/'))
+            .and_then(|address| fsx::canonicalize(Path::new(address)).ok())
+            .map(|path| path.to_string_lossy().into_owned());
         wt_core::address::resolve(
-            address.unwrap_or("."),
+            canonical_address.as_deref().or(address).unwrap_or("."),
             &self.cwd.to_string_lossy(),
             &trees,
             &labels,

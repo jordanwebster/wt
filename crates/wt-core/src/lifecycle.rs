@@ -15,6 +15,8 @@ pub enum OpVerb {
     Remove,
     Register,
     Adopt,
+    Prepare,
+    Release,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

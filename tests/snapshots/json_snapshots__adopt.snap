@@ -22,7 +22,7 @@ expression: "normalize(value, &h.root)"
       "disk_kb": null,
       "geometry": {
         "base": 20000,
-        "port_base": 20016,
+        "port_base": 20032,
         "stride": 16
       },
       "label": "repo",
@@ -34,7 +34,7 @@ expression: "normalize(value, &h.root)"
         {
           "bound": false,
           "name": "http",
-          "port": 20016
+          "port": 20032
         }
       ],
       "resources": [
@@ -55,7 +55,7 @@ expression: "normalize(value, &h.root)"
       ],
       "session": "no",
       "session_name": "repo/adopted",
-      "slot": 1,
+      "slot": 2,
       "sync": {
         "at": null,
         "changed": [],

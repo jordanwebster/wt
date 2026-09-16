@@ -132,6 +132,48 @@ These output directories are cloned into a new tree and counted by `wt ls
 `after_new` runs detached in the new tree; `warm` runs in the canonical through
 the anchor.
 
+## Prepare worktrees created by the Codex desktop app
+
+Register the repository's canonical checkout with wt once, then add this local
+environment as `.codex/environments/environment.toml`:
+
+```toml
+version = 1
+name = "wt"
+
+[setup]
+script = '''
+tree_name="codex-$(basename "$(dirname "$CODEX_WORKTREE_PATH")")"
+wt prepare "$CODEX_WORKTREE_PATH" --name "$tree_name"
+eval "$(wt env "$CODEX_WORKTREE_PATH" --sh)"
+'''
+
+[cleanup]
+script = '''
+if test -f "$CODEX_WORKTREE_PATH/.wt/tree_id"; then
+  wt release "$CODEX_WORKTREE_PATH"
+fi
+'''
+```
+
+Codex creates and later removes the Git worktree. The setup adopts that
+worktree, assigns wt coordinates and ports, copies declared local files, clones
+declared output directories when possible, renders declarations, runs sync,
+and starts `hooks.after_new`. The exported door environment remains available
+to later setup commands and the agent.
+
+Before Codex removes the worktree, `release` closes a wt-managed session,
+releases leases, destroys recorded resources such as daemons, and removes wt's
+identity marker and records. It leaves the directory, branch, Git worktree
+registration, rendered and copied files, output roots, and other user files for
+Codex to handle. Cleanup does not prompt because it does not delete those files;
+a failed resource destroy makes cleanup fail so the worktree is not silently
+removed around a live daemon.
+
+This path cannot use wt's tracked-file snapshot optimization: Codex has already
+checked out those files before the setup script runs. Declared output roots
+still use copy-on-write cloning where the filesystem supports it.
+
 ## Portable wrappers
 
 A repository can keep CI independent of wt while requiring leases locally:

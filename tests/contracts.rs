@@ -146,7 +146,7 @@ fn removed_configuration_keys_name_their_replacements() {
 fn removed_work_and_inspection_verbs_are_not_commands() {
     let h = Harness::new();
     for verb in [
-        "run", "test", "lint", "fmt", "build", "tasks", "locks", "lease", "release",
+        "run", "test", "lint", "fmt", "build", "tasks", "locks", "lease",
     ] {
         h.wt()
             .arg(verb)
@@ -2012,6 +2012,170 @@ fn adopt_registers_an_existing_linked_worktree() {
         "adopted",
     ]);
     assert_eq!(value["data"]["adopted"], true);
+}
+
+#[test]
+fn prepare_initialises_and_release_tears_down_an_external_worktree() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        r#"
+copy = [".env"]
+output = [{ path = ".cache/build" }]
+[hooks]
+after_new = "touch \"$WT_ROOT/.after-new\""
+[files."generated.txt"]
+content = "managed={{name()}}"
+[resource.service]
+create = "touch \"$WT_ROOT/.service\""
+exists = "test -f \"$WT_ROOT/.service\""
+destroy = "rm -f \"$WT_ROOT/.service\""
+tied_to = "tree"
+"#,
+    );
+    common::write(&repo.join(".env"), "LOCAL=1\n");
+    common::write(&repo.join(".cache/build/seed"), "warm\n");
+    h.register(&repo);
+    let external = h.root.join("external");
+    common::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "external",
+            external.to_str().unwrap(),
+        ],
+    );
+
+    let prepared = h.json(&["prepare", external.to_str().unwrap(), "--name", "desktop"]);
+    assert_eq!(prepared["data"]["adopted"], true);
+    assert_eq!(prepared["data"]["tree"]["target"], "repo/desktop");
+    assert!(!prepared["data"]["after_new"].is_null());
+    wait_for(&external.join(".after-new"));
+    assert_eq!(
+        std::fs::read_to_string(external.join(".env")).unwrap(),
+        "LOCAL=1\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(external.join(".cache/build/seed")).unwrap(),
+        "warm\n"
+    );
+    assert!(external.join("generated.txt").exists());
+    let prepared_again = h.json(&[
+        "prepare",
+        external.to_str().unwrap(),
+        "--name",
+        "desktop",
+        "--no-after-new",
+    ]);
+    assert_eq!(prepared_again["data"]["adopted"], false);
+    assert_eq!(prepared_again["data"]["tree"]["phase"], "ready");
+
+    h.wt()
+        .current_dir(&external)
+        .args(["with", "service"])
+        .assert()
+        .success();
+    assert!(external.join(".service").exists());
+    common::write(&external.join("user.txt"), "keep\n");
+    let output = h
+        .wt()
+        .args(["release", external.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let released: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(released["data"]["released"], true);
+    assert_eq!(released["data"]["target"], "repo/desktop");
+    assert!(external.exists());
+    assert!(external.join("user.txt").exists());
+    assert!(external.join(".after-new").exists());
+    assert!(external.join(".env").exists());
+    assert!(external.join(".cache/build/seed").exists());
+    assert!(!external.join(".service").exists());
+    assert!(external.join("generated.txt").exists());
+    assert!(external.join(".wt").exists());
+    assert!(!external.join(".wt/tree_id").exists());
+    assert!(
+        common::git_stdout(&repo, &["worktree", "list", "--porcelain"])
+            .contains(external.to_str().unwrap())
+    );
+    let released_again: serde_json::Value = serde_json::from_slice(
+        &h.wt()
+            .current_dir(&external)
+            .args(["release", "--json"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(released_again["data"]["released"], false);
+    assert_eq!(released_again["notices"][0]["code"], "ALREADY_RELEASED");
+}
+
+#[test]
+fn release_failure_keeps_the_worktree_managed_for_retry() {
+    let h = Harness::new();
+    let repo = h.repo(
+        "repo",
+        r#"
+[resource.daemon]
+create = "touch \"$WT_ROOT/.daemon\""
+exists = "test -f \"$WT_ROOT/.daemon\""
+destroy = "false"
+tied_to = "tree"
+"#,
+    );
+    h.register(&repo);
+    let external = h.root.join("external");
+    common::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "external",
+            external.to_str().unwrap(),
+        ],
+    );
+    h.json(&[
+        "prepare",
+        external.to_str().unwrap(),
+        "--name",
+        "desktop",
+        "--no-sync",
+        "--no-after-new",
+    ]);
+    h.wt()
+        .current_dir(&external)
+        .args(["with", "daemon"])
+        .assert()
+        .success();
+
+    h.wt()
+        .current_dir(&external)
+        .args(["release", "--json"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("DESTROY_FAILED"));
+    assert!(external.join(".daemon").exists());
+    assert!(external.join(".wt/tree_id").exists());
+    assert_eq!(
+        h.json(&["status", "repo/desktop"])["data"]["phase"],
+        "remove-interrupted"
+    );
+    assert!(
+        common::git_stdout(&repo, &["worktree", "list", "--porcelain"])
+            .contains(external.to_str().unwrap())
+    );
 }
 
 #[test]

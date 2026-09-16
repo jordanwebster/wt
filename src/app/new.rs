@@ -14,9 +14,15 @@ use crate::cli::New;
 use super::context::target_of;
 use super::{door, executor, list, open, register, AfterRender, Context, Output};
 
-struct NewFinish {
-    sync: Option<Vec<wt_core::report::StepReport>>,
-    notices: Vec<Notice>,
+pub(crate) struct NewFinish {
+    pub sync: Option<Vec<wt_core::report::StepReport>>,
+    pub notices: Vec<Notice>,
+}
+
+pub(crate) struct FinishOptions<'a> {
+    pub no_sync: bool,
+    pub start: wt_core::new::StartAt,
+    pub verb: &'a str,
 }
 
 pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError> {
@@ -64,7 +70,7 @@ pub(crate) fn run(context: &mut Context, args: New) -> Result<Output, CoreError>
     Ok(output)
 }
 
-fn has_after_new_hook(context: &Context, target: &str) -> Result<bool, CoreError> {
+pub(crate) fn has_after_new_hook(context: &Context, target: &str) -> Result<bool, CoreError> {
     let target = context.resolve(Some(target))?;
     let tree = context.tree(&target)?;
     let config = context.load_config(&tree)?;
@@ -305,9 +311,12 @@ fn create(
         &tree,
         &canonical,
         &initial,
-        &args,
         &holder,
-        wt_core::new::StartAt::Git,
+        FinishOptions {
+            no_sync: args.no_sync,
+            start: wt_core::new::StartAt::Git,
+            verb: "new",
+        },
     )?;
     drop(token);
     ready_report(
@@ -353,8 +362,18 @@ fn resume(
         wt_sys::fsx::PathKind::Missing
     ) {
         let notice = add_worktree(context, &canonical, &tree, &args, head)?;
-        let finished =
-            finish_under_lock(context, &tree, &canonical, &initial, &args, &holder, start)?;
+        let finished = finish_under_lock(
+            context,
+            &tree,
+            &canonical,
+            &initial,
+            &holder,
+            FinishOptions {
+                no_sync: args.no_sync,
+                start,
+                verb: "new",
+            },
+        )?;
         drop(token);
         return ready_report(
             context,
@@ -365,7 +384,18 @@ fn resume(
             source_notices(notice, finished.notices),
         );
     }
-    let finished = finish_under_lock(context, &tree, &canonical, &initial, &args, &holder, start)?;
+    let finished = finish_under_lock(
+        context,
+        &tree,
+        &canonical,
+        &initial,
+        &holder,
+        FinishOptions {
+            no_sync: args.no_sync,
+            start,
+            verb: "new",
+        },
+    )?;
     drop(token);
     ready_report(context, tree, false, true, finished.sync, finished.notices)
 }
@@ -722,14 +752,13 @@ fn parse_pr(input: &Option<String>) -> Option<u64> {
     }
 }
 
-fn finish_under_lock(
+pub(crate) fn finish_under_lock(
     context: &mut Context,
     tree: &TreeRec,
     canonical: &TreeRec,
     config: &wt_core::config::Config,
-    args: &New,
     holder: &wt_sys::lock::Holder,
-    start: wt_core::new::StartAt,
+    options: FinishOptions<'_>,
 ) -> Result<NewFinish, CoreError> {
     let root = Path::new(tree.path.as_str());
     wt_sys::fsx::write_nofollow(
@@ -740,7 +769,7 @@ fn finish_under_lock(
     )?;
     let mut notices = Vec::new();
     let mut copied = Vec::new();
-    if start != wt_core::new::StartAt::Bootstrap {
+    if options.start != wt_core::new::StartAt::Bootstrap {
         let entries = config.root.copy.iter().collect::<Vec<_>>();
         let tracked = context
             .git(Path::new(canonical.path.as_str()))?
@@ -809,7 +838,7 @@ fn finish_under_lock(
         Ok(())
     })?;
     door::recompute_exclude(context, &tree.label)?;
-    let door = match door::enter_held(context, tree.clone(), "new", true) {
+    let door = match door::enter_held(context, tree.clone(), options.verb, true) {
         Ok(door) => door,
         Err(error) => {
             mark_new_failed(context, &target, holder, &error)?;
@@ -821,7 +850,7 @@ fn finish_under_lock(
         mark_new_failed(context, &target, holder, &error)?;
         return Err(error);
     }
-    let sync = if args.no_sync {
+    let sync = if options.no_sync {
         None
     } else if let Ok(plan) = executor::plan(context, &door, "sync") {
         let execution = match executor::execute_plan(
@@ -851,7 +880,7 @@ fn finish_under_lock(
             .zip(hashes)
             .map(|(path, hash)| (path.to_string_lossy().into_owned(), hash))
             .collect();
-        let holder = context.holder(target.to_string(), "new")?;
+        let holder = context.holder(target.to_string(), options.verb)?;
         context.mutate_state(&target, &holder, |state| {
             state.sync = Some(SyncState {
                 at: wt_sys::fsx::timestamp()?,
@@ -932,9 +961,12 @@ fn fresh_incarnation(
         &tree,
         &canonical,
         &initial,
-        &args,
         &holder,
-        wt_core::new::StartAt::Git,
+        FinishOptions {
+            no_sync: args.no_sync,
+            start: wt_core::new::StartAt::Git,
+            verb: "new",
+        },
     )?;
     drop(token);
     ready_report(

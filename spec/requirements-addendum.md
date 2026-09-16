@@ -1701,7 +1701,8 @@ take a running command. `wt rm` ends keeps owned by that tree. `wt leases`
 reports every instance's hold, process identity, release time, and keep expiry.
 There are no explicit tree-lease commands.
 
-Scope still decides lifetime. Tree resources are destroyed by `wt rm`, repo
+Scope still decides lifetime. Tree resources are destroyed by `wt rm` or
+`wt release`, repo
 resources by unregistering the repository, and machine resources only by
 request or after their declaration disappears. Repo and machine instance
 records preserve the frozen recipes needed to destroy state after the current
@@ -1768,3 +1769,38 @@ removed table names for unrelated tuning, settings recipe timeouts live under
 `[recipes]` and internal coordination waits under `[waits]`. No run history,
 derived budget, recipe overlay, alternate task-runner verb, per-lease clean
 flag, or previous-user record is introduced.
+
+## A84. External worktree owners can bracket wt's managed lifecycle
+
+`wt prepare [path] [--label label] [--name name] [--agent agent]
+[--meta k=v] [--no-sync] [--no-after-new]` adopts a linked Git worktree and
+then performs the post-creation part of `new`: it assigns coordinates and
+ports, writes identity, copies declared local files, clones declared output
+roots where possible, refreshes declarations, runs sync, marks the tree ready,
+and starts `hooks.after_new`. The path defaults to the current directory. It
+requires the shared repository to have a registered canonical checkout and
+records the source as adopted. Repeating it for the same path and address is
+safe and reruns the idempotent preparation stages. Because Git has already
+populated an externally created worktree, `prepare` cannot perform `new`'s
+tracked-file snapshot optimization.
+
+`wt release [target]` is the matching non-interactive teardown. The target
+defaults from the current directory. Under the tree's exclusive lock it closes
+the configured session, refreshes lifecycle declarations, releases the tree's
+pool keeps and leases, and destroys recorded resource instances newest first.
+Only after every destroy succeeds does it remove the `.wt/tree_id` identity
+marker, state, and the live registry entry, recording a tombstone with reason
+`released`. It leaves the directory, Git worktree registration, branch,
+rendered and copied files, declared output roots, and other user files
+untouched, so it requires no loss consent. A failed destroy leaves the live
+entry and remaining records for retry rather than allowing an external owner
+to remove the checkout around a daemon wt still knows to be live. Releasing a
+matching released tombstone again succeeds with `released:false` and an
+`ALREADY_RELEASED` notice.
+
+This lifecycle use of `release` supersedes A83's removal of the former explicit
+pool-lease release command; leases still have no manual release operation.
+These verbs let a worktree owner such as the Codex desktop application keep
+control of Git creation and deletion while wt owns the environment and resource
+lifecycle between those events. `adopt` and `forget` remain the record-only
+operations; `prepare` and `release` are the managed lifecycle pair.
