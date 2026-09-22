@@ -43,10 +43,7 @@ pub(crate) fn run(context: &mut Context, args: Prune) -> Result<Output, CoreErro
     let should_apply = if context.yes {
         true
     } else if context.tty.stdin {
-        context.confirm(&format!(
-            "apply prune plan: {}",
-            serde_json::to_string(&items).unwrap_or_else(|_| "<unavailable>".to_owned())
-        ))?
+        context.confirm_loss(&super::human::prune_plan(&items), "Apply prune plan?")?
     } else {
         false
     };
@@ -226,9 +223,9 @@ fn plan(context: &Context, args: &Prune) -> Result<(Vec<PruneItemReport>, Vec<No
                 PruneItemReport {
                     target,
                     reasons: vec![format!(
-                        "superseded-build-output ({} units, {} MB)",
+                        "superseded-build-output ({} units, {})",
                         total.units,
-                        total.kb / 1024
+                        super::human::size(total.kb)
                     )],
                     action: "sweep".to_owned(),
                     result: None,

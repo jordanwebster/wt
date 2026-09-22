@@ -152,7 +152,7 @@ pub(crate) fn notices(target: &str, passes: &[Pass]) -> Vec<Notice> {
                     code: "SWEPT".to_owned(),
                     subject: Some(target.to_owned()),
                     message: format!(
-                        "removed {} superseded unit{}, {} stale incremental director{} and {} stale file{} from {} ({} MB)",
+                        "removed {} superseded unit{}, {} stale incremental director{} and {} stale file{} from {} ({})",
                         pass.report.units,
                         if pass.report.units == 1 { "" } else { "s" },
                         pass.report.incremental,
@@ -160,7 +160,7 @@ pub(crate) fn notices(target: &str, passes: &[Pass]) -> Vec<Notice> {
                         pass.report.files,
                         if pass.report.files == 1 { "" } else { "s" },
                         pass.build_dir,
-                        pass.report.kb / 1024
+                        super::human::size(pass.report.kb)
                     ),
                 })
             } else {

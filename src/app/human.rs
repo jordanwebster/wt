@@ -2,8 +2,8 @@ use serde_json::Value;
 use wt_core::doctor::Severity;
 use wt_core::report::{
     AdoptData, AnchorData, CloneData, ConfigData, DoctorData, ForgetData, ListData, NewData,
-    Notice, PrepareData, PruneData, RegisterData, ReleaseData, RemoveData, ResourceActionData,
-    SessionsData, StatusData, SyncData, UnregisterData, WhichData,
+    Notice, PrepareData, PruneData, PruneItemReport, RegisterData, ReleaseData, RemoveData,
+    ResourceActionData, SessionsData, StatusData, SyncData, UnregisterData, WhichData,
 };
 
 use crate::cli::Command;
@@ -513,10 +513,10 @@ fn render_anchor(data: AnchorData, notices: &[Notice]) -> String {
             facts.push((
                 "swept",
                 format!(
-                    "{} units, {} incremental directories, {} MB",
+                    "{} units, {} incremental directories, {}",
                     swept.units,
                     swept.incremental,
-                    swept.kb / 1024
+                    size(swept.kb)
                 ),
             ));
         }
@@ -617,25 +617,41 @@ fn render_release(data: ReleaseData, notices: &[Notice]) -> String {
     block(headline, facts, notices)
 }
 
-fn render_prune(data: PruneData, notices: &[Notice]) -> String {
+fn render_prune(data: PruneData, _notices: &[Notice]) -> String {
+    let count = data.items.len();
     let headline = if data.applied {
-        format!("Applied prune plan to {} items", data.items.len())
+        format!(
+            "Applied prune plan to {count} {}",
+            plural(count, "item", "items")
+        )
     } else {
-        format!("Prune plan has {} items", data.items.len())
+        format!("Prune plan has {count} {}", plural(count, "item", "items"))
     };
-    let facts = data
-        .items
-        .into_iter()
+    prune_table(headline, &data.items)
+}
+
+/// The plan `prune` asks about before applying it, in the same shape its
+/// report takes afterwards.
+pub(crate) fn prune_plan(items: &[PruneItemReport]) -> String {
+    let count = items.len();
+    prune_table(
+        format!("Prune plan has {count} {}", plural(count, "item", "items")),
+        items,
+    )
+}
+
+fn prune_table(headline: String, items: &[PruneItemReport]) -> String {
+    let rows = items
+        .iter()
         .map(|item| {
-            let reasons = if item.reasons.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", item.reasons.join(", "))
-            };
-            ("item", format!("{}: {}{reasons}", item.target, item.action))
+            vec![
+                item.target.clone(),
+                item.action.clone(),
+                item.reasons.join(", "),
+            ]
         })
         .collect();
-    block(headline, facts, notices)
+    table(headline, ["target", "action", "reason"], rows)
 }
 
 fn render_resource(headline: &str, value: &Value, notices: &[Notice]) -> String {
@@ -857,6 +873,18 @@ fn block(
     output
 }
 
+/// A disk size for people: whole KB or MB while small, GB to one decimal
+/// once it passes a gigabyte, so large sweeps read at a glance.
+pub(crate) fn size(kb: u64) -> String {
+    if kb < 1024 {
+        format!("{kb} KB")
+    } else if kb < 1024 * 1024 {
+        format!("{} MB", kb / 1024)
+    } else {
+        format!("{:.1} GB", kb as f64 / (1024.0 * 1024.0))
+    }
+}
+
 fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
     if count == 1 {
         singular
@@ -904,4 +932,17 @@ fn table_row<const N: usize>(row: &[String], widths: &[usize; N]) -> String {
         })
         .collect::<Vec<_>>()
         .join("  ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::size;
+
+    #[test]
+    fn sizes_step_up_to_gigabytes() {
+        assert_eq!(size(512), "512 KB");
+        assert_eq!(size(3_672_064), "3.5 GB");
+        assert_eq!(size(12938 * 1024), "12.6 GB");
+        assert_eq!(size(900 * 1024), "900 MB");
+    }
 }
