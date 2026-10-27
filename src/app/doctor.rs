@@ -581,7 +581,7 @@ fn tree_findings(
     // the removal observer, which also classifies dirtiness and remote
     // containment that no doctor finding consumes.
     let git = context.git(root)?;
-    // wt turns these caches on for the worktrees it creates; a tree
+    // wt turns this cache on for the worktrees it creates; a tree
     // without them (typically the canonical checkout, or one created
     // before wt did this) pays a full working-tree scan on every status.
     if git.config_bool_in(root, "core.untrackedCache")? != Some(true) {
@@ -590,7 +590,7 @@ fn tree_findings(
             "STATUS_CACHE_OFF",
             &subject,
             "git's untracked cache is off, so each status scans the whole tree",
-            "run `git config core.untrackedCache true` in this checkout (on macOS or Windows also `git config core.fsmonitor true`)",
+            "run `git config core.untrackedCache true` in this checkout",
         ));
     }
     let branch = git.head_branch(root)?;

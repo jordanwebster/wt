@@ -16,4 +16,4 @@ Doctor found 0 errors, 2 warnings, 5 notes
   note     SHELL_INIT_MISSING shell - no shell startup file installs wt's PATH guard
   next     run `wt setup`, or add `eval "$(wt shell-init <shell>)"` to your shell's rc file
   note     STATUS_CACHE_OFF repo - git's untracked cache is off, so each status scans the whole tree
-  next     run `git config core.untrackedCache true` in this checkout (on macOS or Windows also `git config core.fsmonitor true`)
+  next     run `git config core.untrackedCache true` in this checkout

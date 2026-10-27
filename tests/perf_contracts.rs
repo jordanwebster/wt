@@ -128,19 +128,13 @@ fn created_trees_get_git_status_caches_scoped_per_worktree() {
         None,
         "the canonical checkout is not reconfigured"
     );
-    // The built-in filesystem monitor is platform- and version-gated;
-    // assert it exactly where the gate says it applies. The harness PATH
-    // is shims:/usr/bin:/bin with no git shim, so wt's git is /usr/bin/git
-    // — version the same executable, not whatever leads the outer PATH.
-    if cfg!(target_os = "macos")
-        && wt_sys::git::Git::version("/usr/bin/git", Duration::from_secs(10)).unwrap() >= (2, 37, 0)
-    {
-        assert_eq!(
-            git_output(&tree, &["config", "--worktree", "--get", "core.fsmonitor"]).as_deref(),
-            Some("true"),
-            "supported platforms also get the filesystem monitor"
-        );
-    }
+    // The filesystem monitor stays off: its daemon can hang every git
+    // invocation in the tree.
+    assert_eq!(
+        git_output(&tree, &["config", "--get", "core.fsmonitor"]),
+        None,
+        "a wt-created worktree does not enable the filesystem monitor"
+    );
 }
 
 #[test]

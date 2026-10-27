@@ -28,7 +28,7 @@ expression: "normalize(value, &h.root)"
       {
         "code": "STATUS_CACHE_OFF",
         "message": "git's untracked cache is off, so each status scans the whole tree",
-        "remedy": "run `git config core.untrackedCache true` in this checkout (on macOS or Windows also `git config core.fsmonitor true`)",
+        "remedy": "run `git config core.untrackedCache true` in this checkout",
         "severity": "info",
         "subject": "repo"
       }

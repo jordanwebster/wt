@@ -340,13 +340,18 @@ impl Git {
         crate::failpoint::new_g()
     }
 
-    /// Best-effort enablement of git's own exact status caches for one
-    /// freshly created worktree: the untracked cache everywhere, plus the
-    /// built-in filesystem monitor where git supports it (macOS and
-    /// Windows, git >= 2.37). Scoped through `extensions.worktreeConfig`
-    /// so no other checkout of the repository changes behaviour. Both
-    /// caches keep `git status` output exact — git invalidates them
-    /// itself — they only shrink the working-tree scan.
+    /// Best-effort enablement of git's untracked cache for one freshly
+    /// created worktree. Scoped through `extensions.worktreeConfig` so no
+    /// other checkout of the repository changes behaviour. The cache keeps
+    /// `git status` output exact — git invalidates it itself — it only
+    /// shrinks the working-tree scan.
+    ///
+    /// The built-in filesystem monitor is deliberately left off. Its
+    /// per-worktree daemon can accept a connection and never answer — seen
+    /// in trees whose build output churns inside the checkout — which hangs
+    /// every `git status`, and every tool that runs git, with no recovery
+    /// short of disabling it. The scan it saves is milliseconds on
+    /// ordinary repositories.
     pub fn accelerate_status(&self, tree: &Path) -> Result<()> {
         let extension = self.invoke_status(
             Class::Query,
@@ -390,13 +395,7 @@ impl Git {
             let output = self.invoke_request(tree, Class::Worktree, args.clone(), false, &[])?;
             ensure_success(Class::Worktree, &args, output).map(|_| ())
         };
-        set("core.untrackedCache", "true")?;
-        if cfg!(any(target_os = "macos", windows))
-            && Self::version(self.program.clone(), self.deadlines.query)? >= (2, 37, 0)
-        {
-            set("core.fsmonitor", "true")?;
-        }
-        Ok(())
+        set("core.untrackedCache", "true")
     }
 
     /// Reads one effective boolean config value as seen from the worktree
