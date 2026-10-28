@@ -3937,6 +3937,87 @@ fn an_orphan_already_gone_is_dropped_rather_than_destroyed_again() {
 }
 
 #[test]
+fn an_orphaned_slot_does_not_refuse_a_lease_another_slot_can_serve() {
+    // A pool chooses an existing instance over creating one, and an orphan
+    // still records its instance. Chosen first, it refused the whole lease
+    // although the next slot was free to create.
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo(
+        "shard-fixture",
+        "[resource.shard]\ntied_to=\"machine\"\ncount=2\nkeep=\"0ms\"\nidle=\"1s\"\nname=\"shard-{{index()}}\"\nexists=\"test -f \\\"$WT_HOME/$WT_SELF\\\"\"\ncreate=\"touch \\\"$WT_HOME/$WT_SELF\\\"\"\ndestroy=\"exit 2\"\n",
+    );
+    h.register(&repo);
+    h.wt()
+        .current_dir(&repo)
+        .args(["with", "shard", "--", "true"])
+        .assert()
+        .success();
+    assert!(h.home.join("shard-1").exists());
+    // The idle sweep cannot destroy the first shard, which is orphaned.
+    std::thread::sleep(Duration::from_millis(1200));
+    h.wt()
+        .current_dir(&repo)
+        .args(["__hook", "idle", "shard-fixture", "--json"])
+        .assert()
+        .failure();
+    h.wt()
+        .current_dir(&repo)
+        .args(["with", "shard", "--", "true"])
+        .assert()
+        .success();
+    assert!(h.home.join("shard-2").exists(), "the free slot served");
+}
+
+#[test]
+fn removing_a_tree_frees_the_records_its_lapsed_keeps_name() {
+    // A keep file reserves a slot and is deleted once read after it lapses,
+    // but the record keeps its own copy of the hold. Removing the tree that
+    // kept it must free that copy too, or the record names a gone tree.
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo(
+        "token-fixture",
+        "[resource.token]\ntied_to=\"machine\"\ncount=1\nkeep=\"100ms\"\nidle=\"1h\"\nname=\"token-{{index()}}\"\nexists=\"test -f \\\"$WT_HOME/$WT_SELF\\\"\"\ncreate=\"touch \\\"$WT_HOME/$WT_SELF\\\"\"\ndestroy=\"rm -f \\\"$WT_HOME/$WT_SELF\\\"\"\n",
+    );
+    h.register(&repo);
+    let made = h.json(&[
+        "new",
+        "token-fixture/work",
+        "--no-sync",
+        "--no-after-new",
+        "--no-open",
+    ]);
+    let tree = PathBuf::from(made["data"]["tree"]["path"].as_str().unwrap());
+    h.wt()
+        .current_dir(&tree)
+        .args(["with", "token", "--", "true"])
+        .assert()
+        .success();
+    let hold = || {
+        let state: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(h.home.join("state/_machine.json")).unwrap(),
+        )
+        .unwrap();
+        state["resources"]["token#1"]["hold"].clone()
+    };
+    assert_eq!(hold()["kind"], "kept");
+    // The keep lapses, and the idle sweep, reading it, deletes its file.
+    std::thread::sleep(Duration::from_millis(300));
+    h.wt()
+        .current_dir(&repo)
+        .args(["__hook", "idle", "token-fixture", "--json"])
+        .assert()
+        .success();
+    assert_eq!(hold()["kind"], "kept");
+    h.wt()
+        .args(["rm", "token-fixture/work", "--force", "--json"])
+        .assert()
+        .success();
+    assert_eq!(hold()["kind"], "free");
+}
+
+#[test]
 fn machine_recipes_outlive_the_tree_that_created_them() {
     // The device lives under the wt home, but asking whether it exists is a
     // script only a checkout carries, as a simulator's is. Once the tree that

@@ -1028,6 +1028,50 @@ fn execute_stored_effect(
     }
 }
 
+/// Frees every shared record still shown as kept by `target`. A keep file is
+/// what reserves a slot, and an expired one is deleted when next read, but
+/// the record's copy of the hold is written only on release, so a keep that
+/// lapsed before its tree was removed would otherwise name that tree forever.
+pub(crate) fn clear_shared_keeps_of(
+    context: &Context,
+    target: &wt_core::model::Target,
+) -> Result<(), CoreError> {
+    let holder = context.holder(target.to_string(), "resource")?;
+    let tree = target.to_string();
+    let stores = [
+        (
+            context
+                .home
+                .join(wt_core::model::repo_state_path(&target.label)),
+            context
+                .home
+                .join(format!("locks/{}/_repo.rmw.lock", target.label)),
+        ),
+        (
+            context.home.join(wt_core::model::machine_state_path()),
+            context.home.join("locks/_machine.rmw.lock"),
+        ),
+    ];
+    for (path, lock_path) in stores {
+        let _lock = lock::state_rmw(&lock_path, &holder, context.rmw_wait())?;
+        let Some(mut state) = wt_sys::fsx::read_json::<RepoState>(&path, "STATE_CORRUPT")? else {
+            continue;
+        };
+        let mut changed = false;
+        for record in state.resources.values_mut() {
+            if matches!(&record.hold, wt_core::resource::ResourceHold::Kept { tree: kept, .. } if *kept == tree)
+            {
+                record.hold = wt_core::resource::ResourceHold::Free;
+                changed = true;
+            }
+        }
+        if changed {
+            wt_sys::fsx::write_json(&path, &state)?;
+        }
+    }
+    Ok(())
+}
+
 fn persist_tree_record(
     context: &Context,
     target: &wt_core::model::Target,

@@ -438,11 +438,21 @@ fn acquire_slot(
                 .find(|node| node.id == id)
                 .and_then(|node| node.resource.as_ref())
                 .expect("instance pool root has a resource key");
-            let present = executor::load_record(context, door, key)
-                .is_ok_and(|record| record.instance.is_some());
+            let record = executor::load_record(context, door, key).ok();
+            let present = record
+                .as_ref()
+                .is_some_and(|record| record.instance.is_some());
+            // An orphan cannot be created or acquired until someone repairs
+            // it, so it is tried only after every other slot: one broken
+            // instance must not refuse a lease another slot could serve.
+            let orphaned = record
+                .as_ref()
+                .is_some_and(|record| record.state == wt_core::resource::ResourceState::Orphaned);
             let leased = occupancy.holders.iter().any(|holder| holder.slot == slot);
             ranked.push((
-                if !present {
+                if orphaned {
+                    4
+                } else if !present {
                     2
                 } else if leased {
                     3

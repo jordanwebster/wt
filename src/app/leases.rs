@@ -132,6 +132,9 @@ pub(crate) fn release_tree(context: &Context, target: &str) -> Result<(), CoreEr
             wt_sys::fsx::remove_path(&path)?;
         }
     }
+    if let Ok(target) = wt_core::model::Target::parse(target) {
+        executor::clear_shared_keeps_of(context, &target)?;
+    }
     Ok(())
 }
 
