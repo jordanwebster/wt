@@ -842,13 +842,21 @@ pub(crate) fn destroy_stored_resource(
             notice: Some(resource_held_by_notice(&key, &holder)),
         });
     }
-    let probe = if matches!(
-        record.state,
-        wt_core::resource::ResourceState::Present | wt_core::resource::ResourceState::Orphaned
-    ) {
-        Probe::present(wt_sys::fsx::timestamp()?)
-    } else {
-        execute_stored_probe(context, &record, tree_replaced)?
+    // An orphan is asked again before it is destroyed again: its last destroy
+    // may have taken it away while reporting failure, and a destroy that
+    // refuses what is already gone would then keep it orphaned for good. Only
+    // when the probe still cannot answer is it destroyed as if present.
+    let probe = match record.state {
+        wt_core::resource::ResourceState::Present => Probe::present(wt_sys::fsx::timestamp()?),
+        wt_core::resource::ResourceState::Orphaned => {
+            let probe = execute_stored_probe(context, &record, tree_replaced)?;
+            if matches!(probe.result, wt_core::resource::ProbeResult::Failed { .. }) {
+                Probe::present(wt_sys::fsx::timestamp()?)
+            } else {
+                probe
+            }
+        }
+        _ => execute_stored_probe(context, &record, tree_replaced)?,
     };
     let first = wt_core::resource::step(
         Some(record),
@@ -918,13 +926,31 @@ pub(crate) fn newest_resources_first(mut records: Vec<ResourceRecord>) -> Vec<Re
 }
 
 /// The registered checkout of the repository a stored record belongs to. A
-/// machine record belongs to no repository, so it gets the wt home, and the
-/// snapshot's own rules decide what that means for the recipe's directory.
+/// machine record's key names no repository, so its repository is the one
+/// whose tree recorded the snapshot, found among the live trees or, once that
+/// tree is removed, its tombstone: the recipes are that repository's scripts,
+/// and from the wt home a recipe naming them by relative path cannot start.
+/// Only when no registered repository owned that tree does it get the wt home.
+/// The snapshot's own rules decide what that means for the recipe's directory.
 fn stored_repo_root(context: &Context, record: &ResourceRecord) -> PathBuf {
-    record
-        .key
-        .label
-        .as_ref()
+    let tree = record.effective_snapshot().roots.tree.as_str();
+    let label = record.key.label.as_ref().or_else(|| {
+        let registry = &context.registry;
+        registry
+            .trees
+            .iter()
+            .find(|candidate| candidate.path.as_str() == tree)
+            .map(|candidate| &candidate.label)
+            .or_else(|| {
+                registry
+                    .tombstones
+                    .iter()
+                    .rev()
+                    .find(|candidate| candidate.path.as_str() == tree)
+                    .map(|candidate| &candidate.label)
+            })
+    });
+    label
         .and_then(|label| context.registry.labels.get(label))
         .map(|repo| PathBuf::from(repo.path.as_str()))
         .unwrap_or_else(|| context.home.clone())

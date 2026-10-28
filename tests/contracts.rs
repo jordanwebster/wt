@@ -3887,3 +3887,106 @@ fn machine_recipes_run_from_the_invoking_checkout() {
         .assert()
         .success();
 }
+
+#[test]
+fn an_orphan_already_gone_is_dropped_rather_than_destroyed_again() {
+    // A destroy that failed leaves the instance orphaned, and the device may
+    // be gone all the same, as a simulator deleted before its delete reported
+    // failure is. A delete that refuses a missing device, as `simctl delete`
+    // does, can then never succeed, so the idle sweep tearing the orphan down
+    // again must ask whether it still exists rather than delete it again.
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo(
+        "relic-fixture",
+        "[resource.relic]\ntied_to=\"machine\"\ncount=1\nkeep=\"0ms\"\nidle=\"1s\"\nname=\"relic-{{index()}}\"\nexists=\"test -f \\\"$WT_HOME/$WT_SELF\\\"\"\ncreate=\"touch \\\"$WT_HOME/$WT_SELF\\\"\"\ndestroy=\"sh scripts/relic-delete.sh\"\n",
+    );
+    common::write(
+        &repo.join("scripts/relic-delete.sh"),
+        "#!/bin/sh\ntest -f \"$WT_HOME/$WT_SELF\" || exit 148\nrm \"$WT_HOME/$WT_SELF\"\ntest \"$(cat \"$WT_HOME/relic.fail\")\" != fail\n",
+    );
+    common::git(&repo, &["add", "-A"]);
+    common::git(&repo, &["commit", "-qm", "the relic delete"]);
+    h.register(&repo);
+    let sweep = || {
+        h.wt()
+            .current_dir(&repo)
+            .args(["__hook", "idle", "relic-fixture", "--json"])
+            .assert()
+    };
+    h.wt()
+        .current_dir(&repo)
+        .args(["with", "relic", "--", "true"])
+        .assert()
+        .success();
+    let device = h.home.join("relic-1");
+    assert!(device.exists());
+    // The delete removes the device but reports failure: orphaned.
+    common::write(&h.home.join("relic.fail"), "fail");
+    std::thread::sleep(Duration::from_millis(1200));
+    sweep().failure();
+    assert!(!device.exists());
+    common::write(&h.home.join("relic.fail"), "pass");
+    sweep().success();
+    h.wt()
+        .current_dir(&repo)
+        .args(["with", "relic", "--", "true"])
+        .assert()
+        .success();
+    assert!(device.exists());
+}
+
+#[test]
+fn machine_recipes_outlive_the_tree_that_created_them() {
+    // The device lives under the wt home, but asking whether it exists is a
+    // script only a checkout carries, as a simulator's is. Once the tree that
+    // created it is removed, the idle sweep must still run its recipes from a
+    // checkout of the same repository: run from the wt home, the probe cannot
+    // start, the instance is orphaned, and every later lease is refused.
+    let h = Harness::new();
+    quiet(&h);
+    let repo = h.repo(
+        "widget-fixture",
+        "[resource.widget]\ntied_to=\"machine\"\ncount=1\nkeep=\"0ms\"\nidle=\"1s\"\nname=\"widget-{{index()}}\"\nexists=\"sh scripts/widget-exists.sh\"\ncreate=\"touch \\\"$WT_HOME/$WT_SELF\\\"\"\ndestroy=\"rm -f \\\"$WT_HOME/$WT_SELF\\\"\"\n",
+    );
+    common::write(
+        &repo.join("scripts/widget-exists.sh"),
+        "#!/bin/sh\ntest -f \"$WT_HOME/$WT_SELF\"\n",
+    );
+    common::git(&repo, &["add", "-A"]);
+    common::git(&repo, &["commit", "-qm", "the widget probe"]);
+    h.register(&repo);
+    let made = h.json(&[
+        "new",
+        "widget-fixture/work",
+        "--no-sync",
+        "--no-after-new",
+        "--no-open",
+    ]);
+    let tree = PathBuf::from(made["data"]["tree"]["path"].as_str().unwrap());
+    let device = h.home.join("widget-1");
+    h.wt()
+        .current_dir(&tree)
+        .args(["with", "widget", "--", "true"])
+        .assert()
+        .success();
+    assert!(device.exists(), "the lease created the device");
+    h.wt()
+        .args(["rm", "widget-fixture/work", "--force", "--json"])
+        .assert()
+        .success();
+    std::thread::sleep(Duration::from_millis(1200));
+    h.wt()
+        .current_dir(&repo)
+        .args(["__hook", "idle", "widget-fixture", "--json"])
+        .assert()
+        .success();
+    assert!(!device.exists(), "the idle sweep destroyed the device");
+    // Nothing was orphaned, so the pool still serves from the main checkout.
+    h.wt()
+        .current_dir(&repo)
+        .args(["with", "widget", "--", "true"])
+        .assert()
+        .success();
+    assert!(device.exists());
+}
