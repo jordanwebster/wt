@@ -27,7 +27,7 @@ enum Cmd {
         /// The branch name, instead of the config's `branch` templates
         #[arg(long)]
         branch: Option<String>,
-        /// A value for the `branch` templates, e.g. --set ticket=PRO-1170
+        /// A value for the `branch` templates, e.g. --set ticket=ENG-42
         #[arg(long = "set", value_name = "KEY=VALUE", value_parser = parse_set)]
         set: Vec<(String, String)>,
         /// Start from the last fetched copy of the default branch

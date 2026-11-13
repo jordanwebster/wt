@@ -37,9 +37,9 @@ exists it is used in place of the repository's file; the two aren't merged.
 
 ```toml
 # Branch names for `wt new` without --branch. The first template whose
-# values are all set wins: `wt new vocab --set ticket=PRO-1170` makes
-# PRO-1170_vocab, and `wt new vocab` makes vocab.
-branch = ["{{ticket}}_{{name}}", "{{name}}"]
+# values are all set wins: `wt new search-filters --set ticket=ENG-42` makes
+# ENG-42-search-filters, and `wt new search-filters` makes search-filters.
+branch = ["{{ticket}}-{{name}}", "{{name}}"]
 
 # Named ports, stable for the life of the tree.
 ports = ["server", "web"]

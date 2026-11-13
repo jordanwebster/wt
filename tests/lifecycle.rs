@@ -52,12 +52,12 @@ fn a_failed_fetch_starts_from_the_last_fetched_copy() {
 #[test]
 fn branch_templates_use_the_first_complete_one() {
     let fx = Fixture::new();
-    fx.config("branch = [\"{{ticket}}_{{name}}\", \"{{name}}\"]\n");
+    fx.config("branch = [\"{{ticket}}-{{name}}\", \"{{name}}\"]\n");
     let wt = fx.wt();
-    let mut request = NewTree::named("vocab");
-    request.vars.insert("ticket".into(), "PRO-1170".into());
+    let mut request = NewTree::named("search-filters");
+    request.vars.insert("ticket".into(), "ENG-42".into());
     let tree = wt.new_tree(&fx.repo, request).unwrap().tree;
-    assert_eq!(tree.branch().as_deref(), Some("PRO-1170_vocab"));
+    assert_eq!(tree.branch().as_deref(), Some("ENG-42-search-filters"));
     let tree = wt.new_tree(&fx.repo, NewTree::named("plain")).unwrap().tree;
     assert_eq!(tree.branch().as_deref(), Some("plain"));
 }

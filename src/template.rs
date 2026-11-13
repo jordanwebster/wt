@@ -85,6 +85,6 @@ mod tests {
 
     #[test]
     fn lists_variables() {
-        assert_eq!(variables("{{ticket}}_{{ name }}"), ["ticket", "name"]);
+        assert_eq!(variables("{{ticket}}-{{ name }}"), ["ticket", "name"]);
     }
 }

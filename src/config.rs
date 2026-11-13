@@ -499,7 +499,7 @@ mod tests {
     fn parses_a_full_config() {
         let config = Config::parse(
             r#"
-            branch = ["{{ticket}}_{{name}}", "{{name}}"]
+            branch = ["{{ticket}}-{{name}}", "{{name}}"]
             ports = ["server", "frontend"]
             copy = [".claude/settings.local.json", { from = "~/x/justfile", to = ".wt/justfile" }]
 

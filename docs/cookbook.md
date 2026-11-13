@@ -276,13 +276,13 @@ name when that is unset.
 ## Branch names from tickets
 
 ```toml
-branch = ["{{ticket}}_{{name}}", "{{name}}"]
+branch = ["{{ticket}}-{{name}}", "{{name}}"]
 ```
 
 ```sh
-wt new vocab-routing --set ticket=PRO-1170   # branch PRO-1170_vocab-routing
-wt new vocab-routing                         # branch vocab-routing
-wt new vocab-routing --branch anything/else  # as given
+wt new search-filters --set ticket=ENG-42    # branch ENG-42-search-filters
+wt new search-filters                        # branch search-filters
+wt new search-filters --branch anything/else # as given
 wt new review --branch colleague/fix         # origin's branch, checked out and tracking it
 ```
 
