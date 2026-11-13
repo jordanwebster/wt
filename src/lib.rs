@@ -11,6 +11,7 @@ mod error;
 mod fsx;
 mod git;
 mod lifecycle;
+mod migrate;
 mod names;
 mod ports;
 pub mod settings;
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 pub use error::{Error, Result};
 pub use lifecycle::{CreateStatus, Created, Hook, NewTree, Remove, Removed};
+pub use migrate::Imported;
 pub use settings::Settings;
 pub use tree::{Env, Tree};
 

@@ -84,6 +84,19 @@ pub fn read(home: &Path) -> Result<State> {
 /// Runs `change` on the current state under the state lock and writes the
 /// result if it changed.
 pub fn update<T>(home: &Path, change: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
+    locked(home, false, change)
+}
+
+/// Like [`update`], but always writes, so the state file exists afterwards.
+pub fn update_and_write<T>(home: &Path, change: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
+    locked(home, true, change)
+}
+
+fn locked<T>(
+    home: &Path,
+    always_write: bool,
+    change: impl FnOnce(&mut State) -> Result<T>,
+) -> Result<T> {
     fs::create_dir_all(home).map_err(io_at("creating", home))?;
     let lock_path = home.join("state.lock");
     let lock = File::options()
@@ -96,7 +109,7 @@ pub fn update<T>(home: &Path, change: impl FnOnce(&mut State) -> Result<T>) -> R
     let mut state = read(home)?;
     let before = state.clone();
     let value = change(&mut state)?;
-    if state != before {
+    if always_write || state != before {
         state.version = VERSION;
         let mut text = serde_json::to_string_pretty(&state).expect("state serialises");
         text.push('\n');

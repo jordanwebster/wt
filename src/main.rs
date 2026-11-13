@@ -89,6 +89,8 @@ enum Cmd {
     },
     /// Start a shell in a tree's environment
     Shell { tree: Option<String> },
+    /// Import trees from wt 0.5, keeping their names and ports
+    Migrate,
 }
 
 fn main() -> ExitCode {
@@ -105,7 +107,26 @@ fn main() -> ExitCode {
 fn run(command: Cmd) -> wt::Result<ExitCode> {
     let wt = Wt::open()?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if wt.needs_import() && !matches!(command, Cmd::Migrate) {
+        return Err(wt::Error::State(format!(
+            "{} has trees from wt 0.5; run `wt migrate` to import them first",
+            wt.home().display()
+        )));
+    }
     match command {
+        Cmd::Migrate => {
+            let imported = wt.import_legacy()?;
+            for warning in &imported.warnings {
+                eprintln!("wt: {warning}");
+            }
+            for tree in &imported.trees {
+                println!("imported {tree}");
+            }
+            eprintln!(
+                "wt: convert each repository's .wt.toml to the new format; the next \
+                 `wt init`, `env`, `exec` or `shell` in a tree renders it"
+            );
+        }
         Cmd::New {
             tree,
             from,
