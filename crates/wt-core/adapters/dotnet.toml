@@ -1,8 +1,0 @@
-name = "dotnet"
-detect = ["*.sln", "*.slnx", "*.csproj", "*.fsproj"]
-default_tool = "dotnet"
-
-[tools.dotnet]
-requires = "dotnet"
-sync_inputs = ["*.csproj", "packages.lock.json", "Directory.Packages.props"]
-sync = "dotnet restore"

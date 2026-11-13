@@ -1,13 +1,10 @@
-verify: lint test failpoints fmt-check
+verify: lint test fmt-check
 
 lint:
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --all-targets -- -D warnings
 
 test:
-    cargo test --workspace
-
-failpoints:
-    cargo test --workspace --features failpoints
+    cargo test
 
 fmt-check:
-    cargo fmt --all -- --check
+    cargo fmt -- --check

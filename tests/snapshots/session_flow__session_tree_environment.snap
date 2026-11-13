@@ -1,7 +1,0 @@
----
-source: tests/session_flow.rs
-expression: "lines[first..=last].join(\"\\n\").replace(&private.harness.root.to_string_lossy().to_string(),\n\"<ROOT>\").trim_end()"
----
-<ROOT>/wt-home/trees/repo/work/bin/tree-tool
-ROOT=<ROOT>/wt-home/trees/repo/work PORT=20016 RAW=unset
-__TREE_ENV__

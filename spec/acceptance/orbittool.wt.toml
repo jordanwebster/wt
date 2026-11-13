@@ -1,5 +1,0 @@
-bin = ["target/debug"]
-
-[hooks]
-after_new = "cargo build"
-warm = "cargo build && cargo test --workspace --no-run"

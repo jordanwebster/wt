@@ -3,10 +3,9 @@
 #
 #     cargo release <patch|minor|major> --execute
 #
-# It bumps the shared workspace version, commits, tags v<version>, and pushes.
+# It bumps the version, commits, tags v<version>, and pushes.
 # The tag triggers .github/workflows/release.yml, which builds the binaries
 # and attaches them to a GitHub release. Nothing is published to crates.io.
-shared-version = true
 consolidate-commits = true
 tag-name = "v{{version}}"
 tag-message = "Release v{{version}}"

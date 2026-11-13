@@ -1,8 +1,0 @@
-name = "go"
-detect = ["go.mod"]
-default_tool = "go"
-
-[tools.go]
-requires = "go"
-sync_inputs = ["go.sum", "go.mod"]
-sync = "go mod download"

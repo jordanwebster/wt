@@ -1,8 +1,0 @@
----
-source: tests/human_transcripts.rs
-expression: normalized
----
-Registered trees
-  target     phase  branch  sync   path
-  repo       ready  main    never  <ROOT>/repos/repo
-  repo/work  ready  work    never  <ROOT>/wt-home/trees/repo/work

@@ -1,9 +1,0 @@
----
-source: tests/human_transcripts.rs
-expression: normalized
----
-repo is registered
-  path      <ROOT>/repos/repo
-  phase     ready
-  branch    main
-  declared  1 files
