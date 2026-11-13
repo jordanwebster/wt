@@ -1,8 +1,9 @@
-# wt coordinates its own worktrees. Each checkout builds its own wt into
-# target/debug, which is first on PATH inside every door, so a worktree runs
-# the binary it just built rather than the one installed on this machine.
-bin = ["target/debug"]
+# wt coordinates its own worktrees. Each checkout builds its own wt, and
+# `wt` inside a tree runs that build rather than the one installed here.
+copy = ["target"]
 
-[hooks]
-after_new = "cargo build"
-warm = "cargo build && cargo test --workspace --no-run"
+[bin]
+wt = "target/debug/wt"
+
+[lifecycle]
+create = "cargo build"
