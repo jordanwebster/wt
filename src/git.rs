@@ -63,3 +63,70 @@ pub fn current_branch(path: &Path) -> Option<String> {
 pub fn canonical(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(path).map_err(io_at("resolving", path))
 }
+
+/// Like [`run`], but kills git and fails if it takes longer than `timeout`.
+pub fn run_timeout(dir: &Path, args: &[&str], timeout: std::time::Duration) -> Result<String> {
+    use std::process::Stdio;
+    let child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(io_at("running git in", dir))?;
+    let pid = child.id();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(child.wait_with_output());
+    });
+    let output = match receiver.recv_timeout(timeout) {
+        Ok(output) => output.map_err(io_at("running git in", dir))?,
+        Err(_) => {
+            // SAFETY: kill only sends a signal; the pid is our own child,
+            // which the waiting thread has not reaped yet.
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            return Err(Error::Git {
+                args: args.join(" "),
+                message: format!("timed out after {}s", timeout.as_secs()),
+            });
+        }
+    };
+    if !output.status.success() {
+        return Err(Error::Git {
+            args: args.join(" "),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+pub fn ref_exists(dir: &Path, name: &str) -> bool {
+    run(dir, &["show-ref", "--verify", "--quiet", name]).is_ok()
+}
+
+pub fn has_origin(dir: &Path) -> bool {
+    run(dir, &["remote", "get-url", "origin"]).is_ok()
+}
+
+/// The branch `origin/HEAD` points at, falling back to `main` or `master`
+/// when the remote doesn't say.
+pub fn default_branch(dir: &Path) -> Option<String> {
+    if let Ok(head) = run(
+        dir,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) && let Some(branch) = head.strip_prefix("origin/")
+    {
+        return Some(branch.to_owned());
+    }
+    ["main", "master"]
+        .into_iter()
+        .find(|branch| ref_exists(dir, &format!("refs/remotes/origin/{branch}")))
+        .map(str::to_owned)
+}
+
+/// Whether the worktree has changes or untracked files git doesn't ignore.
+pub fn is_dirty(dir: &Path) -> Result<bool> {
+    Ok(!run(dir, &["status", "--porcelain"])?.is_empty())
+}

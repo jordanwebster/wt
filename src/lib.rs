@@ -10,6 +10,7 @@ pub mod config;
 mod error;
 mod fsx;
 mod git;
+mod lifecycle;
 mod names;
 mod ports;
 pub mod settings;
@@ -20,6 +21,7 @@ mod tree;
 use std::path::{Path, PathBuf};
 
 pub use error::{Error, Result};
+pub use lifecycle::{CreateStatus, Created, Hook, NewTree, Remove, Removed};
 pub use settings::Settings;
 pub use tree::{Env, Tree};
 
@@ -73,23 +75,7 @@ impl Wt {
     pub fn init(&self, path: &Path, options: Init) -> Result<Tree> {
         let root = git::toplevel(path)?;
         let main = git::main_checkout(&root)?;
-        let snapshot = state::read(&self.home)?;
-        let label = match (snapshot.label_for(&main), options.label) {
-            (Some(existing), Some(asked)) if existing != asked => {
-                return Err(Error::Conflict(format!(
-                    "{} is already registered as `{existing}`",
-                    main.display()
-                )));
-            }
-            (Some(existing), _) => existing.to_owned(),
-            (None, Some(asked)) => asked,
-            (None, None) => file_name(&main),
-        };
-        if !names::valid(&label) {
-            return Err(Error::Conflict(format!(
-                "`{label}` can't be a label; pass --label"
-            )));
-        }
+        let label = self.label_for(&main, options.label)?;
         let config = Config::load(&self.home, &label, &root)?;
         let default_name = if root == main {
             "main".to_owned()
@@ -97,18 +83,7 @@ impl Wt {
             file_name(&root)
         };
         let record = state::update(&self.home, |state| {
-            match state.repos.get(&label) {
-                Some(other) if *other != main => {
-                    return Err(Error::Conflict(format!(
-                        "the label `{label}` is already used by {}; pass --label",
-                        other.display()
-                    )));
-                }
-                Some(_) => {}
-                None => {
-                    state.repos.insert(label.clone(), main.clone());
-                }
-            }
+            register(state, &label, &main)?;
             if let Some(index) = state.trees.iter().position(|tree| tree.path == root) {
                 let record = &mut state.trees[index];
                 if let Some(name) = &options.name
@@ -218,6 +193,29 @@ impl Wt {
         Ok(self.tree_from(&state, record))
     }
 
+    /// The label of the repository whose main checkout is `main`: the one it
+    /// is registered under, or else `asked`, or else the directory's name.
+    fn label_for(&self, main: &Path, asked: Option<String>) -> Result<String> {
+        let state = state::read(&self.home)?;
+        let label = match (state.label_for(main), asked) {
+            (Some(existing), Some(asked)) if existing != asked => {
+                return Err(Error::Conflict(format!(
+                    "{} is already registered as `{existing}`",
+                    main.display()
+                )));
+            }
+            (Some(existing), _) => existing.to_owned(),
+            (None, Some(asked)) => asked,
+            (None, None) => file_name(main),
+        };
+        if !names::valid(&label) {
+            return Err(Error::Conflict(format!(
+                "`{label}` can't be a label; pass --label"
+            )));
+        }
+        Ok(label)
+    }
+
     fn tree_from(&self, state: &state::State, record: &state::TreeRecord) -> Tree {
         let main = state
             .repos
@@ -225,6 +223,22 @@ impl Wt {
             .cloned()
             .unwrap_or_else(|| record.path.clone());
         Tree::from_record(self, record, main)
+    }
+}
+
+/// Records `label` as the repository whose main checkout is `main`, refusing
+/// a label already used by another repository.
+fn register(state: &mut state::State, label: &str, main: &Path) -> Result<()> {
+    match state.repos.get(label) {
+        Some(other) if other != main => Err(Error::Conflict(format!(
+            "the label `{label}` is already used by {}; pass --label",
+            other.display()
+        ))),
+        Some(_) => Ok(()),
+        None => {
+            state.repos.insert(label.to_owned(), main.to_owned());
+            Ok(())
+        }
     }
 }
 

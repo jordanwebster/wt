@@ -35,6 +35,50 @@ impl Fixture {
         }
     }
 
+    /// Gives `app` an `origin`: a bare clone, with `origin/HEAD` set.
+    pub fn with_origin(&self) -> PathBuf {
+        let origin = self.root.join("origin.git");
+        git(
+            &self.root,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                self.repo.to_str().unwrap(),
+                origin.to_str().unwrap(),
+            ],
+        );
+        git(
+            &self.repo,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&self.repo, &["fetch", "-q", "origin"]);
+        git(&self.repo, &["remote", "set-head", "origin", "-a"]);
+        origin
+    }
+
+    /// Pushes a new commit to `origin/main` from another clone, leaving the
+    /// main checkout behind. Returns the commit.
+    pub fn advance_origin(&self, origin: &Path) -> String {
+        let other = self.root.join("other-clone");
+        if !other.exists() {
+            git(
+                &self.root,
+                &[
+                    "clone",
+                    "-q",
+                    origin.to_str().unwrap(),
+                    other.to_str().unwrap(),
+                ],
+            );
+        }
+        fs::write(other.join("upstream.txt"), "new\n").unwrap();
+        git(&other, &["add", "."]);
+        git(&other, &["commit", "-q", "-m", "upstream"]);
+        git(&other, &["push", "-q", "origin", "HEAD:main"]);
+        git(&other, &["rev-parse", "HEAD"])
+    }
+
     pub fn wt(&self) -> Wt {
         Wt::with_home(&self.home).unwrap()
     }

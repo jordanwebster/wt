@@ -31,6 +31,20 @@ pub fn render(text: &str, vars: &BTreeMap<String, String>, what: &str) -> Result
     Ok(out)
 }
 
+/// The variables a template uses, so a branch template can be skipped when
+/// one of them wasn't supplied.
+pub fn variables(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else { break };
+        found.push(after[..end].trim().to_owned());
+        rest = &after[end + 2..];
+    }
+    found
+}
+
 fn unknown(key: &str, vars: &BTreeMap<String, String>, what: &str) -> Error {
     let available = vars.keys().cloned().collect::<Vec<_>>().join(", ");
     Error::Config(format!(
@@ -67,5 +81,10 @@ mod tests {
     #[test]
     fn unterminated_is_an_error() {
         assert!(render("a {{name", &vars(), "test").is_err());
+    }
+
+    #[test]
+    fn lists_variables() {
+        assert_eq!(variables("{{ticket}}_{{ name }}"), ["ticket", "name"]);
     }
 }

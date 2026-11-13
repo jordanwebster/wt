@@ -124,6 +124,14 @@ impl Tree {
     /// date with its config, and returns its environment. Cheap when nothing
     /// changed: files are rewritten only when their content differs.
     pub fn env(&self) -> Result<Env> {
+        if !self.root.is_dir() {
+            return Err(crate::Error::NotFound(format!(
+                "{}'s directory {} is gone; `wt rm --keep {}` forgets it",
+                self.id(),
+                self.root.display(),
+                self.id()
+            )));
+        }
         let config = self.config()?;
         let tree = self.with_ports(&config)?;
         let mut vars = tree.template_vars();
