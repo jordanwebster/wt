@@ -16,6 +16,12 @@ pub enum Error {
     /// wt's own state can't be read or was written by a newer version.
     #[error("{0}")]
     State(String),
+    /// Every slot of a pool stayed leased for as long as the pool waits.
+    #[error("{0}")]
+    Busy(String),
+    /// A command from a pool's config, such as `acquire`, failed.
+    #[error("{0}")]
+    Command(String),
     #[error("git {args}: {message}")]
     Git { args: String, message: String },
     #[error("{context}: {source}")]

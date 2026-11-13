@@ -13,6 +13,7 @@ mod git;
 mod lifecycle;
 mod migrate;
 mod names;
+mod pool;
 mod ports;
 pub mod settings;
 pub mod state;
@@ -24,6 +25,7 @@ use std::path::{Path, PathBuf};
 pub use error::{Error, Result};
 pub use lifecycle::{CreateStatus, Created, Hook, NewTree, Remove, Removed};
 pub use migrate::Imported;
+pub use pool::{Holder, Lease, Pool, Retired, SlotInfo};
 pub use settings::Settings;
 pub use tree::{Env, Tree};
 

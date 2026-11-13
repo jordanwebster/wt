@@ -1,7 +1,9 @@
 use std::ffi::OsString;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use wt::{CreateStatus, Hook, Init, NewTree, Remove, Tree, Wt};
@@ -91,6 +93,15 @@ enum Cmd {
     Shell { tree: Option<String> },
     /// Import trees from wt 0.5, keeping their names and ports
     Migrate,
+    /// Lease a slot in each pool and run a command while holding them
+    With {
+        #[arg(required = true)]
+        pools: Vec<String>,
+        #[arg(last = true, required = true)]
+        command: Vec<OsString>,
+    },
+    /// Show every pool slot: who holds it, who used it last, when it retires
+    Leases,
 }
 
 fn main() -> ExitCode {
@@ -214,6 +225,8 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
             let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
             return enter(&tree, &cwd, Command::new(shell));
         }
+        Cmd::With { pools, command } => return with(&wt, &cwd, &pools, &command),
+        Cmd::Leases => leases(&wt)?,
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -358,4 +371,164 @@ fn list(wt: &Wt) -> wt::Result<()> {
         println!("{}", line.trim_end());
     }
     Ok(())
+}
+
+/// Leases the pools and runs `command` as this process's child, in the
+/// current directory and, inside a tree, with the tree's environment.
+fn with(wt: &Wt, cwd: &Path, pools: &[String], command: &[OsString]) -> wt::Result<ExitCode> {
+    reap_idle(wt);
+    let tree = match wt.find(None, cwd) {
+        Ok(tree) => Some(tree),
+        Err(wt::Error::NotFound(_)) => None,
+        Err(error) => return Err(error),
+    };
+    let mut child = Command::new(&command[0]);
+    child.args(&command[1..]).current_dir(cwd);
+    if let Some(tree) = &tree {
+        tree.env()?.apply(&mut child);
+    }
+    let pools: Vec<&str> = pools.iter().map(String::as_str).collect();
+    let lease = wt.lease(tree.as_ref(), &pools)?;
+    child.envs(lease.vars());
+    let code = run_as_parent(child);
+    drop(lease);
+    Ok(code)
+}
+
+static CHILD: AtomicI32 = AtomicI32::new(0);
+static PENDING: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn forward(signal: libc::c_int) {
+    let child = CHILD.load(Ordering::SeqCst);
+    if child > 0 {
+        // SAFETY: kill is async-signal-safe.
+        unsafe { libc::kill(child, signal) };
+    } else {
+        PENDING.store(signal, Ordering::SeqCst);
+    }
+}
+
+/// Runs `command` and waits for it, rather than exec'ing it, because the
+/// lease lasts exactly as long as this process. SIGTERM and SIGHUP are
+/// passed on to the child. SIGINT is ignored here because the terminal
+/// already delivers it to the child, which decides whether to exit. A
+/// signal the caller already ignored (as under `nohup`) stays ignored for
+/// both.
+fn run_as_parent(mut command: Command) -> ExitCode {
+    // SAFETY: the dispositions are changed while this process has a single
+    // thread, and the pre_exec closure calls only the async-signal-safe
+    // signal().
+    unsafe {
+        for signal in [libc::SIGTERM, libc::SIGHUP] {
+            let previous = libc::signal(signal, forward as *const () as libc::sighandler_t);
+            if previous == libc::SIG_IGN {
+                libc::signal(signal, libc::SIG_IGN);
+            }
+        }
+        let interrupt = libc::signal(libc::SIGINT, libc::SIG_IGN);
+        command.pre_exec(move || {
+            libc::signal(libc::SIGINT, interrupt);
+            Ok(())
+        });
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!(
+                "wt: couldn't run {}: {error}",
+                command.get_program().to_string_lossy()
+            );
+            return ExitCode::from(127);
+        }
+    };
+    let pid = child.id() as i32;
+    CHILD.store(pid, Ordering::SeqCst);
+    // A signal that arrived before the child existed is passed on now.
+    let pending = PENDING.swap(0, Ordering::SeqCst);
+    if pending != 0 {
+        // SAFETY: a plain syscall on our own child.
+        unsafe { libc::kill(pid, pending) };
+    }
+    match child.wait() {
+        Ok(status) => match (status.code(), status.signal()) {
+            (Some(code), _) => ExitCode::from(code as u8),
+            (None, Some(signal)) => ExitCode::from(128 + signal as u8),
+            (None, None) => ExitCode::FAILURE,
+        },
+        Err(error) => {
+            eprintln!("wt: waiting for the command: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Retires idle pool slots. Problems are only warnings: they must not stop
+/// the command that was actually asked for.
+fn reap_idle(wt: &Wt) {
+    match wt.reap_idle() {
+        Ok(retired) => {
+            for slot in retired {
+                if let Err(error) = slot.result {
+                    eprintln!("wt: warning: retiring {}: {error}", slot.slot);
+                }
+            }
+        }
+        Err(error) => eprintln!("wt: warning: retiring idle pool slots: {error}"),
+    }
+}
+
+fn leases(wt: &Wt) -> wt::Result<()> {
+    reap_idle(wt);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    let ago = |at: u64| span(now.saturating_sub(at));
+    let mut rows = vec![["POOL", "SLOT", "STATE", "LAST USED BY", "RETIRES"].map(str::to_owned)];
+    for slot in wt.leases()? {
+        let state = match (&slot.holder, slot.leased) {
+            (_, false) => "free".to_owned(),
+            (None, true) => "leased".to_owned(),
+            (Some(holder), true) => {
+                let by = match (&holder.tree, holder.retiring) {
+                    (_, true) => "retiring".to_owned(),
+                    (Some(tree), false) => format!("leased by {tree}"),
+                    (None, false) => "leased".to_owned(),
+                };
+                format!("{by} (pid {}, {})", holder.pid, ago(holder.since))
+            }
+        };
+        let last = match (&slot.last_tree, slot.released_at) {
+            (Some(tree), Some(at)) => format!("{tree}, {} ago", ago(at)),
+            (None, Some(at)) => format!("outside a tree, {} ago", ago(at)),
+            _ => String::new(),
+        };
+        let retires = match slot.retire_due {
+            Some(due) if due > now => format!("in {}", span(due - now)),
+            Some(_) => "now".to_owned(),
+            None => String::new(),
+        };
+        rows.push([slot.pool, slot.name, state, last, retires]);
+    }
+    let widths: Vec<usize> = (0..4)
+        .map(|column| rows.iter().map(|row| row[column].len()).max().unwrap_or(0))
+        .collect();
+    for row in &rows {
+        let mut line = String::new();
+        for (column, cell) in row.iter().enumerate() {
+            let width = widths.get(column).copied().unwrap_or(0);
+            line.push_str(&format!("{cell:width$}  "));
+        }
+        println!("{}", line.trim_end());
+    }
+    Ok(())
+}
+
+/// `45s`, `12m`, `3h`.
+fn span(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        _ => format!("{}h", secs / 3600),
+    }
 }
