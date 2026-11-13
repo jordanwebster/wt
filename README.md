@@ -1,178 +1,120 @@
 # wt
 
-`wt` creates isolated Git worktrees and owns the state that must be prepared,
-shared, or kept alive around them. Your repository's own command runner remains
-the place where work is named. `wt with` supplies durable resources and bounded
-pool leases while that work executes.
+`wt` makes git worktrees you can run things in side by side. Each tree gets
+its own block of ports, an environment and files rendered from the
+repository's config, wrappers that run the tree's own builds, and lifecycle
+hooks. Pools let commands in different trees take turns with things there
+are only a few of, like simulators or test containers.
 
 ```sh
-wt register ~/source/sample
-wt new sample/fix-scroll
-wt with database -- just check
-wt rm sample/fix-scroll
+wt new fix-scroll          # worktree from origin's default branch, then its create hook
+wt exec fix-scroll -- just test
+wt with iphone -- just ui-test
+wt rm fix-scroll           # its stop and delete hooks, then the worktree; the branch stays
 ```
 
-Inside a tree, `wt exec`, `wt shell`, `wt open`, and the shell integration expose
-the same rendered environment, ports, files, copied inputs, and tree-local
-binaries. A leased value exists only for its child and is exported as
-`WT_LEASE_<POOL>`.
+It is also a Rust library, so a tool that runs agents in worktrees can make
+trees and start processes in them without shelling out.
 
 ## Configuration
 
-Put repository defaults in `.wt.toml`. User overrides live below
-`[repos.<label>]` in `$WT_HOME/config.toml`; a tree may add `.wt/config.toml`.
+A repository describes its trees in `.wt.toml`. For a repository where you
+can't commit one, put it in `~/.wt/repos/<label>/wt.toml` instead; when that
+exists it is used in place of the repository's file.
 
 ```toml
-ports = ["http"]
-bin = ["bin"]
-commands = ["samplectl"]
-output = [
-  { path = ".cache/typecheck" },
-  { path = "node_modules" },
+# Branch names for `wt new` without --branch. The first template whose
+# values are all set wins: `wt new vocab --set ticket=PRO-1170` makes
+# PRO-1170_vocab, and `wt new vocab` makes vocab.
+branch = ["{{ticket}}_{{name}}", "{{name}}"]
+
+# Named ports, stable for the life of the tree.
+ports = ["server", "web"]
+
+# Copied from the main checkout (or from `from`) when a tree is made,
+# copy-on-write where the filesystem supports it.
+copy = [
+  ".claude/settings.local.json",
+  { from = "~/notes/justfile", to = ".wt/justfile" },
 ]
 
+# Wrappers in .wt/bin, which is first on PATH inside a tree. `amux` runs this
+# tree's build and refuses, saying why, when it hasn't been built yet,
+# rather than finding a copy installed elsewhere.
+[bin]
+amux = "target/debug/amux"
+
 [env]
-APP_PORT = "{{ports.http}}"
+DATABASE_URL = "postgres://localhost:{{ports.server}}/app_{{name_snake}}"
 
-[files.".wt/application.env"]
-marker = "#"
-content = "PORT={{ports.http}}"
+# Rendered into the tree whenever it is entered.
+[files.".mcp.json"]
+content = """{ "url": "http://localhost:{{ports.web}}/mcp" }"""
 
-[hooks]
-after_new = "just compile"
-warm = "just warm"
-```
+[lifecycle]
+create = "just setup"                # after the tree is made
+start  = "docker compose up -d"      # safe to repeat
+stop   = "docker compose stop"       # safe to repeat
+delete = "docker compose down -v"    # when the tree is removed, after stop
 
-Configured output roots are opaque directories. A new tree starts with a
-copy-on-write clone when the filesystem supports it, `wt ls --disk` includes
-their size, and wt never inspects or sweeps their contents. Adapter-owned roots
-may have an ecosystem-specific sweeper.
-
-`after_new` starts detached in each new or prepared tree, writes
-`.wt/logs/wt-setup.log`, and gates claimed command shims until it succeeds or
-fails. `warm` runs in the
-canonical checkout when the anchor refreshes it. The anchor is triggered by
-`new`, `rm`, and `sync` when the effective configuration has output roots.
-
-## Resources
-
-A resource has an owner and a lifecycle:
-
-```toml
-[resource.database]
-tied_to = "tree"
-needs = ["network"]
-name = "sample_{{name_snake()}}"
-exists = 'test -f ".wt/$WT_SELF.ready"'
-create = 'touch ".wt/$WT_SELF.ready"'
-destroy = 'rm -f ".wt/$WT_SELF.ready"'
-```
-
-`tied_to` is `tree`, `repo`, or `machine`. Tree instances are destroyed by
-`wt rm` or `wt release`; repository instances by `wt unregister`; machine
-instances survive until explicitly destroyed or pruned after their declaration
-disappears.
-Lifecycle recipes receive the frozen instance name in `$WT_SELF`, and they
-run from a checkout, so a recipe may be one of the repository's own scripts:
-a tree resource's from its tree, a repo resource's from the registered
-checkout, and a machine resource's from the checkout that invoked it.
-
-```sh
-wt with database                 # ensure durable state
-wt destroy database --yes
-wt refresh database --yes
-```
-
-`needs` may name other resources. A resource can occupy a bounded arena while
-it exists:
-
-```toml
-[resource.web]
-tied_to = "tree"
-arena = "repo"
-capacity = 1
-name = "sample-web-{{name_short()}}"
-exists = 'test -f ".wt/$WT_SELF.ready"'
-create = 'touch ".wt/$WT_SELF.ready"'
-destroy = 'rm -f ".wt/$WT_SELF.ready"'
-```
-
-When an arena is full, `--take` may evict persistent tree- or resource-held
-state through its frozen destroy snapshot. A running child is never evicted.
-
-## Pools and leases
-
-A recipe-free counted resource is a token pool:
-
-```toml
-[resource.container]
-tied_to = "machine"
-count = 4
-wait = "2m"
-```
-
-Use it only with a command:
-
-```sh
-wt with container -- just integration
-```
-
-For several pools, wt acquires one slot from each in sorted pool-name order.
-The child's output is tee'd to `.wt/logs/`; all slots are released on success,
-failure, or termination. Naming one pool twice is an error.
-
-A counted resource with recipes is an instance pool:
-
-```toml
-[resource.device]
-tied_to = "machine"
-count = 2
-name = "orbit-device-{{index()}}"
-exists = 'scripts/device exists "$WT_SELF"'
-create = 'scripts/device create "$WT_SELF"'
-acquire = 'scripts/device clean-and-start "$WT_SELF"'
-destroy = 'scripts/device delete "$WT_SELF"'
-keep = "2m"
+[pool.iphone]
+size = 2
+name = "sim-{{n}}"
+acquire = 'scripts/sim acquire "$WT_LEASE"'   # every lease: create if missing, then clean
 idle = "30m"
-wait = "10m"
+retire = 'scripts/sim delete "$WT_LEASE"'     # once unused for `idle`
 ```
 
-`acquire` runs for every lease. After a command exits, its tree keeps the
-instance for `keep`, so its next command gets the same instance without
-queueing. Other trees wait for that reservation to expire. A free instance is
-destroyed after `idle`; a later lease creates it again. Instances are addressed
-from one, for example `wt destroy device#1 --yes`. `wt rm` ends that tree's
-keeps. `wt leases --json` reports each instance as free, kept with its tree and
-deadline, or leased with pid and process start time.
+Templates can use `name`, `name_snake`, `name_short` (unique across
+repositories), `label`, `root`, `main` (the main checkout), `ports.<name>`,
+and in files `env.<NAME>`. Hooks run with `sh -c` at the tree's root and read
+the same values from the environment: `WT_TREE` (`label/name`), `WT_ROOT`,
+`WT_NAME`, `WT_LABEL`, `WT_MAIN`, `WT_PORT_<NAME>` and everything in
+`[env]`.
 
-Machine pool recipes must agree across repositories. Machine sizing belongs in
-the user settings and overrides repository suggestions:
+wt does nothing language-specific. To start a Rust tree with the main
+checkout's build output, for example, add `"target"` to `copy`.
+
+## Machine settings
+
+`~/.wt/config.toml` (or `$WT_HOME/config.toml`):
 
 ```toml
-[resources.device]
-count = 3
-keep = "45m"
-idle = "30m"
-wait = "15m"
+trees_dir = "~/.wt/trees"   # the default
+[ports]
+base = 20000                # the default; tree n's ports start at base + n * stride
+stride = 16
+[pool.container]            # this machine's size for a pool, overriding the repository's
+size = 4
 ```
 
-## Everyday commands
+## Commands
 
-```sh
-wt ls --disk
-wt status sample/fix-scroll
-wt config sample/fix-scroll --origin
-wt env sample/fix-scroll --sh
-wt exec sample/fix-scroll -- just check
-wt shell sample/fix-scroll
-wt open sample/fix-scroll
-wt doctor
-wt prune --yes
-```
+| Command | |
+|---|---|
+| `wt new [label/]name [--from REF] [--branch B] [--set k=v] [--no-fetch] [--no-create]` | Make a tree and run its create hook. It starts from origin's default branch, fetched first (if the fetch fails or takes over 30 s, from the copy fetched last). Your main checkout is never touched. |
+| `wt init [path] [--label L] [--name N] [--no-create]` | Make an existing worktree, or the main checkout, a tree. |
+| `wt rm tree [--force] [--keep]` | Run stop and delete, then remove the worktree, keeping its branch. Refuses unsaved work or failing hooks without `--force`. `--keep` leaves the worktree and stops managing it. |
+| `wt ls` | Trees, with their status, branch, path and ports. |
+| `wt start [tree \| --all]`, `wt stop [tree \| --all]` | Run the start or stop hook. |
+| `wt exec [tree] -- cmd` | Run a command in the tree's environment, in the current directory if it is inside the tree. |
+| `wt shell [tree]` | A shell in the tree's environment. |
+| `wt env [tree]` | The environment as `export` lines: `eval "$(wt env)"`, or from direnv. |
+| `wt path [tree]` | The tree's path. |
+| `wt with pool… -- cmd` | Run a command holding one slot of each pool. |
+| `wt leases` | Who holds what. |
+| `wt migrate` | Import trees from wt 0.5, keeping their names and ports. |
 
-All control-plane commands support the stable error classes and JSON envelopes
-described in the specification. Passthrough doors retain their direct stdio
-contract and therefore do not emit envelopes.
+A tree is `label/name`, just `name` when that is unambiguous, or, left out,
+the tree you are in.
 
-See [the cookbook](docs/cookbook.md) for complete patterns and
-[the specification](spec/SPEC.md) for lifecycle and failure semantics.
+## Pools
+
+`wt with iphone -- cmd` waits for a free slot of the `iphone` pool, runs
+`acquire` for it, and runs `cmd` with `WT_LEASE_IPHONE` naming the slot. The
+slot is released when `cmd` exits, however it exits. It prefers the slot your
+tree used last, then one that has been set up before. Several pools are taken
+in name order, so two commands can never wait on each other. A command that
+already holds a pool (its `WT_LEASE_<POOL>` is set) doesn't take it again.
+Pools are shared by name across the machine, and `wait` (default 30m) bounds
+how long to wait for one.
