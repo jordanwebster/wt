@@ -101,7 +101,7 @@ impl Wt {
                     )));
                 }
                 ports::assign(&mut record.ports, &config.ports, self.settings.ports)?;
-                return Ok(record.clone());
+                return Ok((record.clone(), false));
             }
             let name = options.name.clone().unwrap_or(default_name);
             if !names::valid(&name) {
@@ -125,11 +125,22 @@ impl Wt {
             };
             ports::assign(&mut record.ports, &config.ports, self.settings.ports)?;
             state.trees.push(record.clone());
-            Ok(record)
+            Ok((record, true))
         })?;
+        let (record, created) = record;
         let tree = Tree::from_record(self, &record, main);
-        tree.copy_inputs(&config)?;
-        tree.env()?;
+        let prepared = tree.copy_inputs(&config).and_then(|()| tree.env());
+        if let Err(error) = prepared {
+            // A tree that never got going shouldn't hold on to its name and
+            // ports.
+            if created {
+                state::update(&self.home, |state| {
+                    state.trees.retain(|other| other.path != record.path);
+                    Ok(())
+                })?;
+            }
+            return Err(error);
+        }
         Ok(tree)
     }
 

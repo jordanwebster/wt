@@ -128,5 +128,13 @@ pub fn default_branch(dir: &Path) -> Option<String> {
 
 /// Whether the worktree has changes or untracked files git doesn't ignore.
 pub fn is_dirty(dir: &Path) -> Result<bool> {
-    Ok(!run(dir, &["status", "--porcelain"])?.is_empty())
+    // Explicit flags, because status.showUntrackedFiles=no (common in large
+    // repositories) would otherwise hide files that removal then deletes.
+    let args = [
+        "status",
+        "--porcelain",
+        "--untracked-files=normal",
+        "--ignore-submodules=none",
+    ];
+    Ok(!run(dir, &args)?.is_empty())
 }

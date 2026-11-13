@@ -274,3 +274,49 @@ fn env_prints_shell_exports() {
     assert!(printed.starts_with("app/t http://localhost:"), "{printed}");
     assert!(printed.ends_with(".wt/bin/tool\n"), "{printed}");
 }
+
+#[test]
+fn port_blocks_skip_ports_in_use_on_ipv6_localhost() {
+    let fx = Fixture::new();
+    fs::create_dir_all(&fx.home).unwrap();
+    fs::write(
+        fx.home.join("config.toml"),
+        "[ports]\nbase = 47310\nstride = 2\n",
+    )
+    .unwrap();
+    let Ok(_listener) = std::net::TcpListener::bind(("::1", 47310)) else {
+        return; // no IPv6 on this machine
+    };
+    fx.config("ports = [\"a\"]\n");
+    let tree = fx.wt().init(&fx.repo, Init::default()).unwrap();
+    assert_ne!(tree.slot, 0);
+}
+
+#[test]
+fn a_colon_in_the_path_does_not_break_entering_the_tree() {
+    let fx = Fixture::new();
+    let repo = fx.root.join("my:repos/app");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    let tree = fx.wt().init(&repo, Init::default()).unwrap();
+    let env = tree.env().unwrap();
+    assert!(env.to_shell().contains("my:repos"));
+    stdout(&fx.cli(&repo, &["exec", "--", "true"]));
+}
+
+#[test]
+fn writes_wait_for_a_pending_import() {
+    let fx = Fixture::new();
+    fs::create_dir_all(&fx.home).unwrap();
+    fs::write(
+        fx.home.join("registry.json"),
+        r#"{"labels": {}, "trees": []}"#,
+    )
+    .unwrap();
+    let error = fx
+        .wt()
+        .init(&fx.repo, Init::default())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("wt migrate"), "{error}");
+}

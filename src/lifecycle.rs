@@ -141,26 +141,46 @@ impl Wt {
             .map_err(|_| Error::Conflict(format!("`{branch}` isn't a valid branch name")))?;
 
         let mut warnings = Vec::new();
-        let exists = git::ref_exists(&main, &format!("refs/heads/{branch}"));
-        if exists && request.from.is_some() {
+        let local = git::ref_exists(&main, &format!("refs/heads/{branch}"));
+        let remote_ref = format!("refs/remotes/origin/{branch}");
+        // A branch asked for by name may be someone else's on origin: fetch
+        // it, so that it is checked out rather than started afresh. It may
+        // equally be new, so a failed fetch says nothing.
+        if !local && request.branch.is_some() && request.fetch && git::has_origin(&main) {
+            let _ = git::run_timeout(
+                &main,
+                &[
+                    "fetch",
+                    "--quiet",
+                    "origin",
+                    &format!("+refs/heads/{branch}:{remote_ref}"),
+                ],
+                FETCH_TIMEOUT,
+            );
+        }
+        let remote = !local && git::ref_exists(&main, &remote_ref);
+        if (local || remote) && request.from.is_some() {
             return Err(Error::Conflict(format!(
                 "branch `{branch}` already exists, so there's nothing to start it --from"
             )));
         }
-        let start = match &request.from {
-            Some(from) => from.clone(),
-            None if exists => String::new(),
-            None => start_point(&main, request.fetch, &mut warnings),
-        };
 
         let parent = path.parent().expect("trees live in a directory");
         fs::create_dir_all(parent).map_err(io_at("creating", parent))?;
         let path_arg = path.to_string_lossy();
+        let origin_branch = format!("origin/{branch}");
+        let start = match &request.from {
+            Some(from) => from.clone(),
+            None if local || remote => String::new(),
+            None => start_point(&main, request.fetch, &mut warnings),
+        };
         // checkout.workers=0 checks files out in parallel, one worker per
         // core: on large repositories that is several times faster.
         let mut args = vec!["-c", "checkout.workers=0", "worktree", "add", "--quiet"];
-        if exists {
+        if local {
             args.extend([&*path_arg, &branch]);
+        } else if remote {
+            args.extend(["--track", "-b", &branch, &*path_arg, &origin_branch]);
         } else {
             args.extend(["--no-track", "-b", &branch, &*path_arg, &start]);
         }
@@ -174,7 +194,7 @@ impl Wt {
             Ok(tree) => Ok(Created { tree, warnings }),
             Err(error) => {
                 let _ = git::run(&main, &["worktree", "remove", "--force", &path_arg]);
-                if !exists {
+                if !local {
                     let _ = git::run(&main, &["branch", "-D", &branch]);
                 }
                 Err(error)
@@ -182,24 +202,36 @@ impl Wt {
         }
     }
 
+    /// Refuses a removal [`Wt::remove`] would refuse. Call it before running
+    /// the tree's `stop` and `delete` hooks, so they never run on a tree
+    /// that then can't be removed.
+    pub fn check_remove(&self, tree: &Tree, options: Remove) -> Result<()> {
+        if options.keep {
+            return Ok(());
+        }
+        if tree.is_main() {
+            return Err(Error::Conflict(format!(
+                "{} is the main checkout; `--keep` stops managing it without deleting it",
+                tree.id()
+            )));
+        }
+        if !options.force && tree.root.is_dir() && git::is_dirty(&tree.root)? {
+            return Err(Error::Conflict(format!(
+                "{} has uncommitted changes or untracked files; commit them, or pass --force",
+                tree.id()
+            )));
+        }
+        Ok(())
+    }
+
     /// Stops managing a tree and, unless `keep`, removes its worktree. The
-    /// branch is kept. Run its `stop` and `delete` hooks first.
+    /// branch is kept. Call [`Wt::check_remove`], then run the tree's `stop`
+    /// and `delete` hooks, then this.
     pub fn remove(&self, tree: &Tree, options: Remove) -> Result<Removed> {
+        self.check_remove(tree, options)?;
         let branch = tree.branch();
         if !options.keep {
-            if tree.is_main() {
-                return Err(Error::Conflict(format!(
-                    "{} is the main checkout; `--keep` stops managing it without deleting it",
-                    tree.id()
-                )));
-            }
             if tree.root.is_dir() {
-                if !options.force && git::is_dirty(&tree.root)? {
-                    return Err(Error::Conflict(format!(
-                        "{} has uncommitted changes or untracked files; commit them, or pass --force",
-                        tree.id()
-                    )));
-                }
                 // What is left is either clean or ignored (build output, and
                 // the files wt itself rendered), so forcing is safe here.
                 let path = tree.root.to_string_lossy();

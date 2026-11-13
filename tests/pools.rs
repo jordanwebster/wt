@@ -452,3 +452,45 @@ name = "{{nope}}"
     let error = wt.pool(Some(&tree), "bad").unwrap_err().to_string();
     assert!(error.contains("nope"), "{error}");
 }
+
+#[test]
+fn sigterm_during_acquire_lets_it_finish_before_the_slot_is_free() {
+    let (fx, _tree) = setup("");
+    let log = fx.root.join("acquire.log");
+    fx.config(&format!(
+        "[pool.sim]\nsize = 1\nacquire = \"echo start >> {0}; sleep 1; echo end >> {0}\"\n",
+        log.display()
+    ));
+    let first = with(&fx, &fx.repo, &["sim", "--", "true"]).spawn().unwrap();
+    wait_until("acquire to start", || read(&log) == "start\n");
+    // SAFETY: signalling our own child.
+    unsafe { libc::kill(first.id() as i32, libc::SIGTERM) };
+    let second = with(&fx, &fx.repo, &["sim", "--", "true"]).spawn().unwrap();
+    let first = finish(first);
+    assert_eq!(first.status.code(), Some(143), "{}", stderr(&first));
+    let second = finish(second);
+    assert!(second.status.success(), "{}", stderr(&second));
+    assert_eq!(read(&log), "start\nend\nstart\nend\n");
+}
+
+#[test]
+fn sigterm_while_waiting_gives_up_at_once() {
+    let (fx, _tree) = setup("[pool.sim]\nsize = 1\nwait = \"1m\"\n");
+    let holder = with(&fx, &fx.repo, &["sim", "--", "sleep", "5"])
+        .spawn()
+        .unwrap();
+    wait_until("the slot to be held", || {
+        fx.wt().leases().unwrap().iter().any(|slot| slot.leased)
+    });
+    let waiter = with(&fx, &fx.repo, &["sim", "--", "true"]).spawn().unwrap();
+    sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    // SAFETY: signalling our own child.
+    unsafe { libc::kill(waiter.id() as i32, libc::SIGTERM) };
+    let waited = finish(waiter);
+    assert_eq!(waited.status.code(), Some(143));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    // SAFETY: signalling our own child.
+    unsafe { libc::kill(holder.id() as i32, libc::SIGTERM) };
+    finish(holder);
+}

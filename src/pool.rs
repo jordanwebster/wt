@@ -235,6 +235,18 @@ impl Wt {
     /// caller already holds them, as when a command run under a lease runs
     /// another that asks for the same pool.
     pub fn lease(&self, tree: Option<&Tree>, pools: &[&str]) -> Result<Lease> {
+        self.lease_unless(tree, pools, &|| false)
+    }
+
+    /// [`Wt::lease`], giving up with [`Error::Cancelled`] when `cancelled`
+    /// returns true while waiting for a busy pool. A running `acquire` is
+    /// always let finish, so that nothing else starts on its slot meanwhile.
+    pub fn lease_unless(
+        &self,
+        tree: Option<&Tree>,
+        pools: &[&str],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Lease> {
         let mut pools = pools.to_vec();
         // Every process takes pools in the same order, so two commands that
         // each want the other's pool can never wait on each other forever.
@@ -263,7 +275,7 @@ impl Wt {
         };
         for pool in &definitions {
             let dir = self.pool_dir(&pool.name);
-            let (n, lock) = take(pool, &dir, lease.tree.as_deref())?;
+            let (n, lock) = take(pool, &dir, lease.tree.as_deref(), cancelled)?;
             let slot = pool.slot(n)?;
             let record_path = record_path(&dir, n);
             let mut record = read_record(&record_path)?;
@@ -375,7 +387,10 @@ impl Wt {
             // it is held; with it, the record read next is also settled.
             let lock = try_lock(&lock_path(&dir, n))?;
             let record = read_record(&record_path(&dir, n))?;
-            let leased = lock.is_none();
+            // A lock held with no holder recorded is either a lease in the
+            // instant before it records itself or one released while a
+            // child process was starting (see `try_lock_settled`).
+            let leased = lock.is_none() && record.holder.is_some();
             drop(lock);
             let retire_due = match (record.released_at, record.idle_secs) {
                 (Some(at), Some(idle)) if !leased && record.warm && record.retire.is_some() => {
@@ -435,20 +450,28 @@ impl Wt {
 /// Takes a free slot in `pool`, preferring the one `tree` used last, then
 /// one still warm from an earlier `acquire`, then the lowest-numbered.
 /// Polls until the pool's `wait` runs out.
-fn take(pool: &Pool, dir: &Path, tree: Option<&str>) -> Result<(u32, File)> {
+fn take(
+    pool: &Pool,
+    dir: &Path,
+    tree: Option<&str>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(u32, File)> {
     let started = Instant::now();
     loop {
         let mut candidates = Vec::new();
         for n in 1..=pool.size {
             let record = read_record(&record_path(dir, n))?;
             let theirs = tree.is_some() && record.last_tree.as_deref() == tree;
-            candidates.push((!theirs, !record.warm, n));
+            candidates.push((!theirs, !record.warm, n, record.holder.is_none()));
         }
         candidates.sort_unstable();
-        for (_, _, n) in candidates {
-            if let Some(lock) = try_lock(&lock_path(dir, n))? {
+        for (_, _, n, released) in candidates {
+            if let Some(lock) = try_lock_settled(&lock_path(dir, n), released)? {
                 return Ok((n, lock));
             }
+        }
+        if cancelled() {
+            return Err(Error::Cancelled);
         }
         let waited = started.elapsed();
         if waited >= pool.wait {
@@ -552,6 +575,24 @@ fn slot_name(record: &Record, pool: &str, n: u32) -> String {
     } else {
         record.name.clone()
     }
+}
+
+/// [`try_lock`], allowing a moment for a lock whose record says it was
+/// released. A process that starts a child shares its open files with the
+/// child until the child execs, so a slot released just then stays locked
+/// for a few milliseconds; giving up at once would hand the tree a
+/// different slot from the one it used last.
+fn try_lock_settled(path: &Path, released: bool) -> Result<Option<File>> {
+    let attempts = if released { 10 } else { 1 };
+    for attempt in 1..=attempts {
+        if let Some(lock) = try_lock(path)? {
+            return Ok(Some(lock));
+        }
+        if attempt < attempts {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    Ok(None)
 }
 
 /// Opens and locks `path` without waiting; `None` when another open file

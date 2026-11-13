@@ -216,3 +216,109 @@ fn a_tree_deleted_by_hand_is_not_recreated_and_can_be_removed() {
     stdout(&fx.cli(&fx.repo, &["rm", "t"]));
     assert!(fx.wt().list().unwrap().is_empty());
 }
+
+#[test]
+fn rm_checks_before_running_any_hook() {
+    let fx = Fixture::new();
+    let log = fx.root.join("hooks.log");
+    fx.config(&format!(
+        "[lifecycle]\nstop = \"echo stop >> {0}\"\ndelete = \"echo delete >> {0}\"\n",
+        log.display()
+    ));
+    let wt = fx.wt();
+    let tree = wt.new_tree(&fx.repo, NewTree::named("t")).unwrap().tree;
+    wt.init(&fx.repo, Default::default()).unwrap();
+
+    fs::write(tree.root.join("unsaved.txt"), "x").unwrap();
+    assert!(!fx.cli(&fx.repo, &["rm", "t"]).status.success());
+    assert!(!fx.cli(&fx.repo, &["rm", "app/main"]).status.success());
+    assert!(!log.exists(), "a refused rm ran hooks");
+    assert!(tree.root.exists());
+}
+
+#[test]
+fn rm_sees_untracked_files_whatever_git_is_configured_to_show() {
+    let fx = Fixture::new();
+    git(&fx.repo, &["config", "status.showUntrackedFiles", "no"]);
+    let tree = fx
+        .wt()
+        .new_tree(&fx.repo, NewTree::named("t"))
+        .unwrap()
+        .tree;
+    fs::write(tree.root.join("notes.txt"), "mine").unwrap();
+    let error = fx.wt().remove(&tree, Remove::default()).unwrap_err();
+    assert!(error.to_string().contains("untracked"), "{error}");
+    assert!(tree.root.join("notes.txt").exists());
+}
+
+#[test]
+fn a_failed_new_gives_back_its_name() {
+    let fx = Fixture::new();
+    fx.config("[env]\nX = \"{{nope}}\"\n");
+    let wt = fx.wt();
+    assert!(wt.new_tree(&fx.repo, NewTree::named("t")).is_err());
+    assert!(wt.list().unwrap().is_empty());
+    fx.config("");
+    wt.new_tree(&fx.repo, NewTree::named("t")).unwrap();
+}
+
+#[test]
+fn a_tree_with_a_broken_config_can_still_be_forced_out() {
+    let fx = Fixture::new();
+    let log = fx.root.join("hooks.log");
+    fx.config(&format!(
+        "[lifecycle]\nstop = \"echo stop $WT_TREE >> {}\"\n",
+        log.display()
+    ));
+    let wt = fx.wt();
+    let broken = wt.new_tree(&fx.repo, NewTree::named("a")).unwrap().tree;
+    wt.new_tree(&fx.repo, NewTree::named("b")).unwrap();
+    fs::write(broken.root.join(".wt.toml"), "commands = [\"x\"]\n").unwrap();
+    git(&broken.root, &["commit", "-qam", "old config"]);
+
+    // One broken tree doesn't stop the others being stopped.
+    assert!(!fx.cli(&fx.root, &["stop", "--all"]).status.success());
+    assert_eq!(fs::read_to_string(&log).unwrap(), "stop app/b\n");
+
+    assert!(!fx.cli(&fx.root, &["rm", "app/a"]).status.success());
+    stdout(&fx.cli(&fx.root, &["rm", "app/a", "--force"]));
+    assert!(!broken.root.exists());
+}
+
+#[test]
+fn new_checks_out_a_branch_that_only_origin_has() {
+    let fx = Fixture::new();
+    let origin = fx.with_origin();
+    let other = fx.root.join("colleague");
+    git(
+        &fx.root,
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    git(&other, &["switch", "-q", "-c", "colleague"]);
+    fs::write(other.join("work.txt"), "theirs").unwrap();
+    git(&other, &["add", "."]);
+    git(&other, &["commit", "-qm", "their work"]);
+    git(&other, &["push", "-q", "origin", "colleague"]);
+    let theirs = git(&other, &["rev-parse", "HEAD"]);
+
+    let mut request = NewTree::named("review");
+    request.branch = Some("colleague".into());
+    let tree = fx.wt().new_tree(&fx.repo, request).unwrap().tree;
+    assert_eq!(git(&tree.root, &["rev-parse", "HEAD"]), theirs);
+    assert_eq!(
+        git(
+            &fx.repo,
+            &[
+                "for-each-ref",
+                "--format=%(upstream:short)",
+                "refs/heads/colleague"
+            ]
+        ),
+        "origin/colleague"
+    );
+}

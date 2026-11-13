@@ -31,7 +31,11 @@ pub fn write_atomic(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<(
     let parent = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent).map_err(io_at("creating", parent))?;
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temporary = parent.join(format!(".{file_name}.wt-{}", std::process::id()));
+    // Unique per write, not just per process: an embedding program may
+    // render the same tree from several threads.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let write = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = parent.join(format!(".{file_name}.wt-{}-{write}", std::process::id()));
     let result = (|| {
         let mut file = File::create(&temporary).map_err(io_at("writing", &temporary))?;
         file.write_all(contents)

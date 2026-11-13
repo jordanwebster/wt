@@ -82,6 +82,11 @@ impl Settings {
             && let Some(path) = errors.string(value, "trees_dir")
         {
             settings.trees_dir = expand_home(&path);
+            if !settings.trees_dir.is_absolute() {
+                errors.push(format!(
+                    "`trees_dir` must be an absolute path or start with ~/, not `{path}`"
+                ));
+            }
         }
         if let Some(value) = table.get("ports")
             && let Some(ports) = errors.table(value, "ports")

@@ -170,6 +170,8 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
         }
         Cmd::Rm { tree, force, keep } => {
             let tree = wt.find(Some(&tree), &cwd)?;
+            let options = Remove { force, keep };
+            wt.check_remove(&tree, options)?;
             let hooks: &[Hook] = if tree.root.is_dir() {
                 &[Hook::Stop, Hook::Delete]
             } else {
@@ -180,17 +182,15 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
                 &[]
             };
             for &hook in hooks {
-                let code = run_hook(&tree, hook)?;
-                if code != 0 && !force {
-                    eprintln!(
-                        "wt: {}'s {} hook failed (exit {code}); fix it and retry, or pass --force",
-                        tree.id(),
-                        hook.name()
-                    );
-                    return Ok(ExitCode::FAILURE);
+                if let Err((problem, _)) = run_hook(&tree, hook) {
+                    if !force {
+                        eprintln!("wt: {problem}; fix it and retry, or pass --force");
+                        return Ok(ExitCode::FAILURE);
+                    }
+                    eprintln!("wt: {problem}; carrying on because of --force");
                 }
             }
-            let removed = wt.remove(&tree, Remove { force, keep })?;
+            let removed = wt.remove(&tree, options)?;
             let kept = removed
                 .branch
                 .map(|branch| format!("; kept branch {branch}"))
@@ -238,31 +238,41 @@ fn parse_set(value: &str) -> Result<(String, String), String> {
         .ok_or_else(|| format!("`{value}` should be KEY=VALUE"))
 }
 
-/// Runs a hook in the foreground and returns its exit code; 0 when the
-/// config doesn't declare it.
-fn run_hook(tree: &Tree, hook: Hook) -> wt::Result<i32> {
-    let Some(mut command) = tree.hook(hook)? else {
-        return Ok(0);
+/// Runs a hook in the foreground; one the config doesn't declare succeeds.
+/// A failure carries a message and the exit code to pass on.
+fn run_hook(tree: &Tree, hook: Hook) -> Result<(), (String, u8)> {
+    let what = format!("{}'s {} hook", tree.id(), hook.name());
+    let command = tree
+        .hook(hook)
+        .map_err(|error| (format!("couldn't prepare {what}: {error}"), 1))?;
+    let Some(mut command) = command else {
+        return Ok(());
     };
-    eprintln!("wt: running {}'s {} hook", tree.id(), hook.name());
-    let status = command.status().map_err(|source| wt::Error::Io {
-        context: format!("running {}'s {} hook", tree.id(), hook.name()),
-        source,
-    })?;
-    Ok(status.code().unwrap_or(1))
+    eprintln!("wt: running {what}");
+    let status = command
+        .status()
+        .map_err(|error| (format!("couldn't run {what}: {error}"), 1))?;
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(code) => Err((
+            format!("{what} failed (exit {code})"),
+            code.clamp(1, 255) as u8,
+        )),
+        None => Err((format!("{what} was killed by a signal"), 1)),
+    }
 }
 
 fn run_create(tree: &Tree) -> wt::Result<ExitCode> {
-    let code = run_hook(tree, Hook::Create)?;
-    if code == 0 {
-        return Ok(ExitCode::SUCCESS);
+    match run_hook(tree, Hook::Create) {
+        Ok(()) => Ok(ExitCode::SUCCESS),
+        Err((problem, code)) => {
+            eprintln!(
+                "wt: {problem}; its output is in {}",
+                tree.create_log().display()
+            );
+            Ok(ExitCode::from(code))
+        }
     }
-    eprintln!(
-        "wt: {}'s create hook failed (exit {code}); its output is in {}",
-        tree.id(),
-        tree.create_log().display()
-    );
-    Ok(ExitCode::from(code.clamp(1, 255) as u8))
 }
 
 /// Runs `hook` in one tree, or in every tree whose directory exists, and
@@ -284,13 +294,8 @@ fn run_everywhere(
     };
     let mut failed = false;
     for tree in &trees {
-        let code = run_hook(tree, hook)?;
-        if code != 0 {
-            eprintln!(
-                "wt: {}'s {} hook failed (exit {code})",
-                tree.id(),
-                hook.name()
-            );
+        if let Err((problem, _)) = run_hook(tree, hook) {
+            eprintln!("wt: {problem}");
             failed = true;
         }
     }
@@ -388,7 +393,17 @@ fn with(wt: &Wt, cwd: &Path, pools: &[String], command: &[OsString]) -> wt::Resu
         tree.env()?.apply(&mut child);
     }
     let pools: Vec<&str> = pools.iter().map(String::as_str).collect();
-    let lease = wt.lease(tree.as_ref(), &pools)?;
+    // Caught from here on, not just once the command runs: a SIGTERM while
+    // `acquire` runs would otherwise kill wt and free the slot while
+    // `acquire` carries on, and the next lease would run a second one on it.
+    forward_termination();
+    let cancelled = || PENDING.load(Ordering::SeqCst) != 0;
+    let lease = match wt.lease_unless(tree.as_ref(), &pools, &cancelled) {
+        Err(wt::Error::Cancelled) => {
+            return Ok(ExitCode::from(128 + PENDING.load(Ordering::SeqCst) as u8));
+        }
+        lease => lease?,
+    };
     child.envs(lease.vars());
     let code = run_as_parent(child);
     drop(lease);
@@ -408,16 +423,12 @@ extern "C" fn forward(signal: libc::c_int) {
     }
 }
 
-/// Runs `command` and waits for it, rather than exec'ing it, because the
-/// lease lasts exactly as long as this process. SIGTERM and SIGHUP are
-/// passed on to the child. SIGINT is ignored here because the terminal
-/// already delivers it to the child, which decides whether to exit. A
-/// signal the caller already ignored (as under `nohup`) stays ignored for
-/// both.
-fn run_as_parent(mut command: Command) -> ExitCode {
+/// Passes SIGTERM and SIGHUP on to the command once it runs, and remembers
+/// them until then. A signal the caller already ignored (as under `nohup`)
+/// stays ignored.
+fn forward_termination() {
     // SAFETY: the dispositions are changed while this process has a single
-    // thread, and the pre_exec closure calls only the async-signal-safe
-    // signal().
+    // thread, and the handler calls only async-signal-safe functions.
     unsafe {
         for signal in [libc::SIGTERM, libc::SIGHUP] {
             let previous = libc::signal(signal, forward as *const () as libc::sighandler_t);
@@ -425,6 +436,26 @@ fn run_as_parent(mut command: Command) -> ExitCode {
                 libc::signal(signal, libc::SIG_IGN);
             }
         }
+    }
+}
+
+/// Runs `command` and waits for it, rather than exec'ing it, because the
+/// lease lasts exactly as long as this process. SIGTERM and SIGHUP are
+/// passed on to the child. SIGINT is ignored here because the terminal
+/// already delivers it to the child, which decides whether to exit. A
+/// signal the caller already ignored (as under `nohup`) stays ignored for
+/// both.
+fn run_as_parent(mut command: Command) -> ExitCode {
+    // A termination signal that arrived while the lease was being taken
+    // means the command was never wanted.
+    let pending = PENDING.swap(0, Ordering::SeqCst);
+    if pending != 0 {
+        return ExitCode::from(128 + pending as u8);
+    }
+    // SAFETY: the disposition is changed while this process has a single
+    // thread, and the pre_exec closure calls only the async-signal-safe
+    // signal().
+    unsafe {
         let interrupt = libc::signal(libc::SIGINT, libc::SIG_IGN);
         command.pre_exec(move || {
             libc::signal(libc::SIGINT, interrupt);

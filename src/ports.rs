@@ -3,7 +3,8 @@
 //! order they are first declared.
 
 use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, TcpListener};
+use std::io::ErrorKind;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener};
 
 use crate::error::{Error, Result};
 use crate::settings::PortGeometry;
@@ -26,10 +27,23 @@ pub fn allocate_slot(state: &State, geometry: PortGeometry) -> Result<u32> {
 }
 
 fn block_is_free(geometry: PortGeometry, slot: u32) -> bool {
+    // Dev servers that bind "localhost" often end up on ::1 alone, so both
+    // families are tried. A machine without IPv6 fails to bind for another
+    // reason, which says nothing about the port.
+    let addresses: [IpAddr; 4] = [
+        Ipv4Addr::LOCALHOST.into(),
+        Ipv4Addr::UNSPECIFIED.into(),
+        Ipv6Addr::LOCALHOST.into(),
+        Ipv6Addr::UNSPECIFIED.into(),
+    ];
     (0..geometry.stride).all(|offset| {
         let port = port(geometry, slot, offset);
-        TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
-            && TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok()
+        addresses.iter().all(|address| {
+            !matches!(
+                TcpListener::bind((*address, port)),
+                Err(error) if error.kind() == ErrorKind::AddrInUse
+            )
+        })
     })
 }
 

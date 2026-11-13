@@ -38,11 +38,21 @@ pub struct Env {
 impl Env {
     /// `PATH` for the tree, given the `PATH` it is entered from.
     pub fn path(&self, inherited: Option<&OsStr>) -> OsString {
-        let mut parts: Vec<PathBuf> = self.path_prefix.clone();
-        if let Some(inherited) = inherited {
-            parts.extend(std::env::split_paths(inherited));
+        // Joined by hand rather than with `join_paths`, which refuses a
+        // directory containing `:`. Such a directory can't be found through
+        // PATH, but entering the tree shouldn't fail because of it.
+        let mut path = OsString::new();
+        for directory in &self.path_prefix {
+            path.push(directory);
+            path.push(":");
         }
-        std::env::join_paths(parts).expect("tree paths contain no `:`")
+        match inherited {
+            Some(inherited) => path.push(inherited),
+            None => {
+                path = path.to_string_lossy().trim_end_matches(':').into();
+            }
+        }
+        path
     }
 
     /// Sets the tree's variables and `PATH` (relative to this process's
@@ -59,7 +69,7 @@ impl Env {
             out.push_str(&format!("export {key}={}\n", fsx::sh_quote(value)));
         }
         if !self.path_prefix.is_empty() {
-            let prefix = std::env::join_paths(&self.path_prefix).expect("no `:` in tree paths");
+            let prefix = self.path(None);
             out.push_str(&format!(
                 "export PATH={}:\"$PATH\"\n",
                 fsx::sh_quote(&prefix.to_string_lossy())
@@ -227,6 +237,11 @@ impl Tree {
             ("WT_LABEL".to_owned(), self.label.clone()),
             ("WT_MAIN".to_owned(), self.main.display().to_string()),
             ("WT_HOME".to_owned(), self.wt.home.display().to_string()),
+            // For shell startup files that reorder PATH to put it back first.
+            (
+                "WT_BIN".to_owned(),
+                self.root.join(".wt/bin").display().to_string(),
+            ),
         ]);
         for (name, port) in self.ports() {
             vars.insert(
@@ -263,7 +278,7 @@ impl Tree {
     fn wrapper(&self, name: &str, relative: &str) -> String {
         let executable = fsx::sh_quote(&self.root.join(relative).display().to_string());
         let status = fsx::sh_quote(&self.root.join(".wt/create.status").display().to_string());
-        let log = self.root.join(".wt/create.log").display().to_string();
+        let log = fsx::sh_quote(&self.root.join(".wt/create.log").display().to_string());
         let id = self.id();
         format!(
             r#"#!/bin/sh
@@ -271,10 +286,11 @@ impl Tree {
 # Runs {name} as built in {id}. Generated from [bin] in the tree's config.
 exe={executable}
 if [ -x "$exe" ]; then exec "$exe" "$@"; fi
+log={log}
 case "$(cat {status} 2>/dev/null)" in
-  running) why="the create hook is still running or was interrupted; see {log}" ;;
+  running) why="the create hook is still running or was interrupted; see $log" ;;
   ''|0) why="build it in this tree" ;;
-  *) why="the create hook failed; see {log}" ;;
+  *) why="the create hook failed; see $log" ;;
 esac
 echo "{name}: not built in {id} ($exe is missing): $why" >&2
 exit 127
@@ -291,12 +307,26 @@ exit 127
         wanted.extend(config.files.keys().map(|path| format!("/{path}")));
         wanted.extend(config.copy.iter().map(|entry| format!("/{}", entry.to)));
         let path = git::common_dir(&self.root)?.join("info/exclude");
-        let text = fs::read_to_string(&path).unwrap_or_default();
-        let (before, block, after) = split_block(&text);
-        let existing: BTreeSet<String> = block.lines().map(str::to_owned).collect();
-        if wanted.is_subset(&existing) {
+        let listed = |text: &str| -> BTreeSet<String> {
+            split_block(text).1.lines().map(str::to_owned).collect()
+        };
+        if wanted.is_subset(&listed(&fs::read_to_string(&path).unwrap_or_default())) {
             return Ok(());
         }
+        // Trees of one repository share the file, so two entering at once
+        // would each drop the other's lines without the lock.
+        let lock_path = self.wt.home.join("exclude.lock");
+        fs::create_dir_all(&self.wt.home).map_err(io_at("creating", &self.wt.home))?;
+        let lock = fs::File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(io_at("opening", &lock_path))?;
+        lock.lock().map_err(io_at("locking", &lock_path))?;
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let (before, _, after) = split_block(&text);
+        let existing = listed(&text);
         let mut lines: Vec<String> = existing.union(&wanted).cloned().collect();
         lines.retain(|line| !line.is_empty());
         let mut out = before.to_owned();

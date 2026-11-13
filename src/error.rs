@@ -19,6 +19,9 @@ pub enum Error {
     /// Every slot of a pool stayed leased for as long as the pool waits.
     #[error("{0}")]
     Busy(String),
+    /// The caller gave up while waiting.
+    #[error("cancelled")]
+    Cancelled,
     /// A command from a pool's config, such as `acquire`, failed.
     #[error("{0}")]
     Command(String),

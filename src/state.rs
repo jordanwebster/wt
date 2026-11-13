@@ -97,6 +97,12 @@ fn locked<T>(
     always_write: bool,
     change: impl FnOnce(&mut State) -> Result<T>,
 ) -> Result<T> {
+    if !always_write && home.join("registry.json").is_file() && !home.join("state.json").exists() {
+        return Err(Error::State(format!(
+            "{} has trees from wt 0.5; run `wt migrate` to import them first",
+            home.display()
+        )));
+    }
     fs::create_dir_all(home).map_err(io_at("creating", home))?;
     let lock_path = home.join("state.lock");
     let lock = File::options()
