@@ -5,6 +5,33 @@
 //! rendered or copied into it, and wrappers in `.wt/bin` for executables
 //! built inside it. The CLI in `main.rs` is a thin layer over this library,
 //! which other tools can embed to do the same.
+//!
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let repo = std::path::PathBuf::from("/src/app");
+//! use std::process::Command;
+//!
+//! let wt = wt::Wt::open()?;
+//! let tree = wt.new_tree(&repo, wt::NewTree::named("fix-scroll"))?.tree;
+//! if let Some(mut create) = tree.hook(wt::Hook::Create)? {
+//!     create.status()?; // or spawn it and stream its output somewhere
+//! }
+//! let mut agent = Command::new("claude");
+//! tree.env()?.apply(&mut agent);
+//! agent.current_dir(&tree.root).spawn()?;
+//!
+//! // Later, when the work is done. Check first, so the teardown hooks never
+//! // run on a tree that then can't be removed.
+//! wt.check_remove(&tree, wt::Remove::default())?;
+//! for hook in [wt::Hook::Stop, wt::Hook::Delete] {
+//!     if let Some(mut command) = tree.hook(hook)? {
+//!         command.status()?;
+//!     }
+//! }
+//! wt.remove(&tree, wt::Remove::default())?;
+//! # Ok(())
+//! # }
+//! ```
 
 pub mod config;
 mod error;
