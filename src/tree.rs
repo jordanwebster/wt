@@ -165,8 +165,11 @@ impl Tree {
         })
     }
 
-    /// Copies the config's `copy` entries that aren't in the tree yet.
-    pub(crate) fn copy_inputs(&self, config: &Config) -> Result<()> {
+    /// Copies the config's `copy` entries that aren't in the tree yet. Part
+    /// of setting a tree up, with the `create` hook, and like it left to
+    /// the caller because copying a large build directory takes seconds.
+    pub fn copy_inputs(&self) -> Result<()> {
+        let config = self.config()?;
         for entry in &config.copy {
             let source = if entry.from.starts_with("~/") || Path::new(&entry.from).is_absolute() {
                 expand_home(&entry.from)
@@ -284,15 +287,16 @@ impl Tree {
             r#"#!/bin/sh
 {WRAPPER_MARK}
 # Runs {name} as built in {id}. Generated from [bin] in the tree's config.
+# While the create hook runs, or after it failed, a binary already there is
+# not this tree's build: it may have been copied from the main checkout.
 exe={executable}
-if [ -x "$exe" ]; then exec "$exe" "$@"; fi
 log={log}
 case "$(cat {status} 2>/dev/null)" in
-  running) why="the create hook is still running or was interrupted; see $log" ;;
-  ''|0) why="build it in this tree" ;;
+  running) why="the create hook is still running (or was interrupted); see $log" ;;
+  ''|0) [ -x "$exe" ] && exec "$exe" "$@"; why="$exe is missing; build it in this tree" ;;
   *) why="the create hook failed; see $log" ;;
 esac
-echo "{name}: not built in {id} ($exe is missing): $why" >&2
+echo "{name}: not ready in {id}: $why" >&2
 exit 127
 "#
         )

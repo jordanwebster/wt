@@ -36,6 +36,10 @@ enum Cmd {
         /// Don't run the create hook
         #[arg(long)]
         no_create: bool,
+        /// Copy inputs and run the create hook in the foreground, rather
+        /// than in the background
+        #[arg(long, conflicts_with = "no_create")]
+        wait: bool,
     },
     /// Run a tree's stop and delete hooks, then remove it (keeping its branch)
     #[command(alias = "remove")]
@@ -75,6 +79,10 @@ enum Cmd {
         /// Don't run the create hook
         #[arg(long)]
         no_create: bool,
+        /// Copy inputs and run the create hook in the foreground, rather
+        /// than in the background
+        #[arg(long, conflicts_with = "no_create")]
+        wait: bool,
     },
     /// List trees
     #[command(alias = "list")]
@@ -93,6 +101,9 @@ enum Cmd {
     Shell { tree: Option<String> },
     /// Import trees from wt 0.5, keeping their names and ports
     Migrate,
+    /// Set a tree up in the background: copy inputs, then run create
+    #[command(name = "__setup", hide = true)]
+    Setup { path: PathBuf },
     /// Lease a slot in each pool and run a command while holding them
     With {
         #[arg(required = true)]
@@ -125,6 +136,7 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
         )));
     }
     match command {
+        Cmd::Setup { path } => return set_up_here(&wt.find(None, &path)?),
         Cmd::Migrate => {
             let imported = wt.import_legacy()?;
             for warning in &imported.warnings {
@@ -145,6 +157,7 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
             set,
             no_fetch,
             no_create,
+            wait,
         } => {
             let (label, name) = match tree.split_once('/') {
                 Some((label, name)) => (Some(label.to_owned()), name.to_owned()),
@@ -164,9 +177,7 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
             }
             let tree = created.tree;
             eprintln!("wt: made {} at {}", tree.id(), tree.root.display());
-            if !no_create {
-                return run_create(&tree);
-            }
+            return set_up(&tree, no_create, wait);
         }
         Cmd::Rm { tree, force, keep } => {
             let tree = wt.find(Some(&tree), &cwd)?;
@@ -204,12 +215,11 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
             label,
             name,
             no_create,
+            wait,
         } => {
             let tree = wt.init(path.as_deref().unwrap_or(&cwd), Init { label, name })?;
             eprintln!("wt: {} is at {}", tree.id(), tree.root.display());
-            if !no_create {
-                return run_create(&tree);
-            }
+            return set_up(&tree, no_create, wait);
         }
         Cmd::Ls => list(&wt)?,
         Cmd::Path { tree } => println!("{}", wt.find(tree.as_deref(), &cwd)?.root.display()),
@@ -260,6 +270,67 @@ fn run_hook(tree: &Tree, hook: Hook) -> Result<(), (String, u8)> {
         )),
         None => Err((format!("{what} was killed by a signal"), 1)),
     }
+}
+
+/// Copies the tree's inputs and runs its create hook: in the foreground
+/// with `wait`, otherwise in a detached process so that `wt new` returns as
+/// soon as the worktree exists. Copying a build directory and building
+/// take seconds to minutes; the [bin] wrappers refuse until it is done.
+fn set_up(tree: &Tree, no_create: bool, wait: bool) -> wt::Result<ExitCode> {
+    if no_create {
+        tree.copy_inputs()?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if wait {
+        tree.copy_inputs()?;
+        return run_create(tree);
+    }
+    tree.mark_creating()?;
+    let program = std::env::current_exe().map_err(|source| wt::Error::Io {
+        context: "finding the wt binary".to_owned(),
+        source,
+    })?;
+    let mut setup = Command::new(program);
+    setup
+        .arg("__setup")
+        .arg(&tree.root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: setsid is async-signal-safe. A session of its own keeps the
+    // setup running when the terminal that started it closes.
+    unsafe {
+        setup.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    setup.spawn().map_err(|source| wt::Error::Io {
+        context: "starting the setup".to_owned(),
+        source,
+    })?;
+    eprintln!(
+        "wt: setting {} up in the background; its output goes to {}",
+        tree.id(),
+        tree.create_log().display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The background half of [`set_up`]. A failed copy is recorded where a
+/// failed create hook would be, so `wt ls` and the wrappers report it.
+fn set_up_here(tree: &Tree) -> wt::Result<ExitCode> {
+    if let Err(error) = tree.copy_inputs() {
+        let directory = tree.root.join(".wt");
+        let _ = std::fs::create_dir_all(&directory);
+        let _ = std::fs::write(
+            tree.create_log(),
+            format!("wt: copying inputs failed: {error}\n"),
+        );
+        let _ = std::fs::write(directory.join("create.status"), "1");
+        return Ok(ExitCode::FAILURE);
+    }
+    run_create(tree)
 }
 
 fn run_create(tree: &Tree) -> wt::Result<ExitCode> {

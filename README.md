@@ -102,7 +102,9 @@ read the same values from the environment, which has:
 - everything in `[env]`.
 
 The create hook's output is kept in `.wt/create.log`, and `wt ls` shows
-whether it is still running or failed.
+whether it is still running or failed. Until it has succeeded, `[bin]`
+wrappers refuse to run, even if a binary is there: it may have been copied
+from the main checkout.
 
 **Git:** wt adds `.wt/`, rendered files and copied paths to the repository's
 `info/exclude`, so they don't show up in `git status`. wt does nothing
@@ -130,8 +132,8 @@ directory name unless `wt init --label` says otherwise.
 
 | Command | |
 |---|---|
-| `wt new [label/]name [--from REF] [--branch B] [--set k=v] [--no-fetch] [--no-create]` | Make a tree and run its create hook. It starts from origin's default branch, fetched first; if the fetch fails or takes over 30 s, it uses the copy fetched last. A branch that already exists, locally or on origin, is checked out. Your main checkout is never touched. |
-| `wt init [path] [--label L] [--name N] [--no-create]` | Make an existing worktree, or the main checkout, a tree. Running it again keeps the tree's name and ports. |
+| `wt new [label/]name [--from REF] [--branch B] [--set k=v] [--no-fetch] [--no-create] [--wait]` | Make a tree, and return as soon as it exists: copying its inputs and running its create hook carry on in the background (`--wait` does them first). It starts from origin's default branch, fetched first; if the fetch fails or takes over 30 s, it uses the copy fetched last. A branch that already exists, locally or on origin, is checked out. Your main checkout is never touched. |
+| `wt init [path] [--label L] [--name N] [--no-create] [--wait]` | Make an existing worktree, or the main checkout, a tree, and set it up as `new` does. Running it again keeps the tree's name and ports. |
 | `wt rm tree [--force] [--keep]` | Run stop and delete, then remove the worktree, keeping its branch. Refuses uncommitted or untracked work, or a failing hook, without `--force`. `--keep` still runs stop and delete, then leaves the worktree on disk and stops managing it. |
 | `wt ls` | Trees with their status, branch, path and ports. |
 | `wt start [tree \| --all]`, `wt stop [tree \| --all]` | Run the start or stop hook. |
@@ -177,6 +179,7 @@ and releases the slot when `cmd` exits, however it exits.
 ```rust
 let wt = wt::Wt::open()?;
 let tree = wt.new_tree(&repo, wt::NewTree::named("fix-scroll"))?.tree;
+tree.copy_inputs()?; // then run tree.hook(wt::Hook::Create), if you want it
 let mut agent = std::process::Command::new("claude");
 tree.env()?.apply(&mut agent);
 agent.current_dir(&tree.root).spawn()?;

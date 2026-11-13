@@ -97,7 +97,8 @@ fn bin_wrappers_run_the_trees_build_or_say_why_not() {
     let output = Command::new(&wrapper).output().unwrap();
     assert_eq!(output.status.code(), Some(127));
     let message = String::from_utf8_lossy(&output.stderr);
-    assert!(message.contains("not built in app/t"), "{message}");
+    assert!(message.contains("not ready in app/t"), "{message}");
+    assert!(message.contains("missing"), "{message}");
 
     fs::create_dir_all(path.join(".wt")).unwrap();
     fs::write(path.join(".wt/create.status"), "running").unwrap();
@@ -108,6 +109,13 @@ fn bin_wrappers_run_the_trees_build_or_say_why_not() {
     fs::create_dir_all(path.join("build")).unwrap();
     fs::write(path.join("build/tool"), "#!/bin/sh\necho built \"$@\"\n").unwrap();
     fs::set_permissions(path.join("build/tool"), fs::Permissions::from_mode(0o755)).unwrap();
+    // A binary that is there while create still runs isn't trusted.
+    let output = Command::new(&wrapper).arg("x").output().unwrap();
+    assert_eq!(output.status.code(), Some(127));
+    fs::write(path.join(".wt/create.status"), "2").unwrap();
+    let output = Command::new(&wrapper).arg("x").output().unwrap();
+    assert!(String::from_utf8_lossy(&output.stderr).contains("create hook failed"));
+    fs::write(path.join(".wt/create.status"), "0").unwrap();
     let output = Command::new(&wrapper).arg("x").output().unwrap();
     assert_eq!(stdout(&output), "built x\n");
 
@@ -146,7 +154,11 @@ fn copy_brings_files_from_the_main_checkout_once() {
     let path = fx.worktree("t");
     fs::create_dir_all(path.join("local")).unwrap();
     fs::write(path.join("local/settings.json"), "already here").unwrap();
-    fx.wt().init(&path, Init::default()).unwrap();
+    fx.wt()
+        .init(&path, Init::default())
+        .unwrap()
+        .copy_inputs()
+        .unwrap();
 
     assert_eq!(
         fs::read_to_string(path.join("local/settings.json")).unwrap(),

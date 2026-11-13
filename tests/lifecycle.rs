@@ -105,7 +105,7 @@ fn new_by_label_from_anywhere() {
 fn create_hook_records_its_status_and_output() {
     let fx = Fixture::new();
     fx.config("[lifecycle]\ncreate = \"echo made $WT_TREE; echo oops >&2\"\n");
-    let output = fx.cli(&fx.repo, &["new", "t"]);
+    let output = fx.cli(&fx.repo, &["new", "t", "--wait"]);
     assert!(stdout(&output).contains("made app/t"));
     let tree = fx.wt().find(Some("app/t"), &fx.root).unwrap();
     assert_eq!(tree.create_status(), CreateStatus::Succeeded);
@@ -113,7 +113,7 @@ fn create_hook_records_its_status_and_output() {
     assert!(log.contains("made app/t") && log.contains("oops"), "{log}");
 
     fx.config("[lifecycle]\ncreate = \"exit 7\"\n[bin]\ntool = \"x\"\n");
-    let output = fx.cli(&fx.repo, &["new", "broken"]);
+    let output = fx.cli(&fx.repo, &["new", "broken", "--wait"]);
     assert_eq!(output.status.code(), Some(7));
     let tree = fx.wt().find(Some("app/broken"), &fx.root).unwrap();
     assert_eq!(tree.create_status(), CreateStatus::Failed(7));
@@ -321,4 +321,62 @@ fn new_checks_out_a_branch_that_only_origin_has() {
         ),
         "origin/colleague"
     );
+}
+
+#[test]
+fn new_returns_before_setup_finishes_and_wrappers_wait_for_it() {
+    let fx = Fixture::new();
+    let gate = fx.root.join("gate");
+    fx.config(&format!(
+        "copy = [\"build\"]\n[bin]\ntool = \"build/tool\"\n[lifecycle]\ncreate = \"while [ ! -e {0} ]; do sleep 0.05; done; echo built\"\n",
+        gate.display()
+    ));
+    // The main checkout has a build of its own, which gets copied in.
+    fs::create_dir_all(fx.repo.join("build")).unwrap();
+    fs::write(fx.repo.join("build/tool"), "#!/bin/sh\necho main build\n").unwrap();
+    Command::new("chmod")
+        .arg("755")
+        .arg(fx.repo.join("build/tool"))
+        .status()
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    stdout(&fx.cli(&fx.repo, &["new", "t"]));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let tree = fx.wt().find(Some("app/t"), &fx.root).unwrap();
+    assert_eq!(tree.create_status(), CreateStatus::Running);
+
+    // Copied but not this tree's build yet: the wrapper refuses.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !tree.root.join("build/tool").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the copy never happened"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let early = Command::new(tree.root.join(".wt/bin/tool"))
+        .output()
+        .unwrap();
+    assert_eq!(early.status.code(), Some(127));
+    assert!(String::from_utf8_lossy(&early.stderr).contains("still running"));
+
+    fs::write(&gate, "").unwrap();
+    while tree.create_status() == CreateStatus::Running {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "create never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(tree.create_status(), CreateStatus::Succeeded);
+    assert!(
+        fs::read_to_string(tree.create_log())
+            .unwrap()
+            .contains("built")
+    );
+    let ready = Command::new(tree.root.join(".wt/bin/tool"))
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&ready), "main build\n");
 }

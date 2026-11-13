@@ -5,9 +5,30 @@ use std::process::Command;
 
 use crate::error::{Error, Result, io_at};
 
+/// The git executable. `/usr/bin/git` on macOS is a stub that locates the
+/// developer tools on every call, which costs ~35 ms each time; asking it
+/// once where git really lives makes the rest of a run's calls direct.
+fn binary() -> &'static std::path::Path {
+    static BINARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BINARY.get_or_init(|| {
+        let real = Command::new("git")
+            .arg("--exec-path")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()).join("git")
+            });
+        match real {
+            Some(path) if path.is_file() => path,
+            _ => PathBuf::from("git"),
+        }
+    })
+}
+
 /// Runs `git -C dir args…` and returns its trimmed stdout.
 pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    let output = Command::new(binary())
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -67,7 +88,7 @@ pub fn canonical(path: &Path) -> Result<PathBuf> {
 /// Like [`run`], but kills git and fails if it takes longer than `timeout`.
 pub fn run_timeout(dir: &Path, args: &[&str], timeout: std::time::Duration) -> Result<String> {
     use std::process::Stdio;
-    let child = Command::new("git")
+    let child = Command::new(binary())
         .arg("-C")
         .arg(dir)
         .args(args)

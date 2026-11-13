@@ -13,6 +13,7 @@
 //!
 //! let wt = wt::Wt::open()?;
 //! let tree = wt.new_tree(&repo, wt::NewTree::named("fix-scroll"))?.tree;
+//! tree.copy_inputs()?;
 //! if let Some(mut create) = tree.hook(wt::Hook::Create)? {
 //!     create.status()?; // or spawn it and stream its output somewhere
 //! }
@@ -100,9 +101,10 @@ impl Wt {
     }
 
     /// Makes the worktree containing `path` a tree: registers its repository
-    /// if needed, gives it a block of ports, copies the config's `copy`
-    /// entries and renders its files. Calling it again on the same worktree
-    /// keeps its name and ports and re-renders.
+    /// if needed, gives it a block of ports and renders its files. Calling it
+    /// again on the same worktree keeps its name and ports and re-renders.
+    /// Setting it up — [`Tree::copy_inputs`], then the `create` hook — is
+    /// left to the caller.
     pub fn init(&self, path: &Path, options: Init) -> Result<Tree> {
         let root = git::toplevel(path)?;
         let main = git::main_checkout(&root)?;
@@ -156,8 +158,7 @@ impl Wt {
         })?;
         let (record, created) = record;
         let tree = Tree::from_record(self, &record, main);
-        let prepared = tree.copy_inputs(&config).and_then(|()| tree.env());
-        if let Err(error) = prepared {
+        if let Err(error) = tree.env() {
             // A tree that never got going shouldn't hold on to its name and
             // ports.
             if created {

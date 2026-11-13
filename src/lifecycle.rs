@@ -372,6 +372,17 @@ impl Tree {
         }
     }
 
+    /// Records that setting the tree up has begun, so the `[bin]` wrappers
+    /// refuse from now until the `create` hook has finished, rather than
+    /// run a binary copied from the main checkout. For a caller that copies
+    /// inputs and runs `create` later, in the background.
+    pub fn mark_creating(&self) -> Result<()> {
+        if self.config()?.lifecycle.create.is_none() {
+            return Ok(());
+        }
+        crate::fsx::write_atomic(&self.root.join(".wt/create.status"), b"running", None)
+    }
+
     /// Where the `create` hook's output is kept.
     pub fn create_log(&self) -> PathBuf {
         self.root.join(".wt/create.log")

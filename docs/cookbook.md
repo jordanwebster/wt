@@ -143,11 +143,12 @@ create = "cargo build"
 ```
 
 wt writes `.wt/bin/mytool`, and `.wt/bin` comes first on `PATH` inside the
-tree. Once built, `mytool` is the tree's build. Before that, it fails and
-says why:
+tree. Once the create hook has built it, `mytool` is the tree's build.
+Before that it fails and says why, even if a `target/` copied from the main
+checkout already holds a binary:
 
 ```
-mytool: not built in app/fix-scroll (…/target/debug/mytool is missing): the create hook is still running; see …/.wt/create.log
+mytool: not ready in app/fix-scroll: the create hook is still running (or was interrupted); see …/.wt/create.log
 ```
 
 Point any environment the tool reads at the tree too, so the tree's build
@@ -324,7 +325,7 @@ name = "wt"
 [setup]
 script = '''
 tree="codex-$(basename "$(dirname "$CODEX_WORKTREE_PATH")")"
-wt init "$CODEX_WORKTREE_PATH" --name "$tree"
+wt init "$CODEX_WORKTREE_PATH" --name "$tree" --wait
 cd "$CODEX_WORKTREE_PATH" && eval "$(wt env)"
 '''
 
@@ -335,8 +336,8 @@ wt rm --keep "$tree"
 '''
 ```
 
-`wt init` gives the worktree its ports, copies and renders its files, and
-runs its create hook. `wt rm --keep` runs its stop and delete hooks and
+`wt init --wait` gives the worktree its ports, copies and renders its files,
+and runs its create hook before the setup script carries on. `wt rm --keep` runs its stop and delete hooks and
 forgets it, leaving the worktree for the tool to delete.
 
 ## Entering a tree
@@ -361,6 +362,7 @@ use std::process::Command;
 
 let wt = wt::Wt::open()?;
 let tree = wt.new_tree(&repo, wt::NewTree::named("fix-scroll"))?.tree;
+tree.copy_inputs()?;
 if let Some(mut create) = tree.hook(wt::Hook::Create)? {
     create.status()?; // or spawn it and stream its output somewhere
 }
