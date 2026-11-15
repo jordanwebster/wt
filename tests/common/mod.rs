@@ -5,7 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
-use wt::Wt;
+use wt::{Created, NewTree, PlanRequest, Wt};
+
+/// Plans and makes a tree as `wt new` does.
+pub fn make(wt: &Wt, cwd: &Path, request: PlanRequest) -> wt::Result<Created> {
+    let plan = wt.plan_new(cwd, &request)?;
+    wt.new_tree(&plan, NewTree::default())
+}
 
 /// A scratch directory holding a wt home and a git repository `app` with one
 /// commit on `main`.
@@ -107,6 +113,7 @@ impl Fixture {
             .args(args)
             .current_dir(cwd)
             .env("WT_HOME", &self.home)
+            .env_remove("WT_IN_HOOK")
             .output()
             .unwrap()
     }

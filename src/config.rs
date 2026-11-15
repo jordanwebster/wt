@@ -52,6 +52,29 @@ pub struct Lifecycle {
     pub start: Option<String>,
     pub stop: Option<String>,
     pub delete: Option<String>,
+    /// How long `start` may run before its process group is killed.
+    pub start_timeout: Option<Duration>,
+    pub stop_timeout: Option<Duration>,
+    pub delete_timeout: Option<Duration>,
+}
+
+/// A hook's time limit when the config doesn't set one.
+pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+impl Lifecycle {
+    /// How long `hook` may run. `create` has no limit: a build takes as long
+    /// as it takes. The others do, because a stop that hangs would keep
+    /// every holder waiting on it, and a start or delete that never returns
+    /// would hold the lifecycle lock for good.
+    pub fn time_limit(&self, hook: crate::Hook) -> Option<Duration> {
+        let set = match hook {
+            crate::Hook::Create => return None,
+            crate::Hook::Start => self.start_timeout,
+            crate::Hook::Stop => self.stop_timeout,
+            crate::Hook::Delete => self.delete_timeout,
+        };
+        Some(set.unwrap_or(DEFAULT_HOOK_TIMEOUT))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -414,7 +437,15 @@ impl Errors {
         self.keys(
             table,
             "lifecycle.",
-            &["create", "start", "stop", "delete"],
+            &[
+                "create",
+                "start",
+                "stop",
+                "delete",
+                "start_timeout",
+                "stop_timeout",
+                "delete_timeout",
+            ],
             &[("after_new", "renamed to lifecycle.create")],
         );
         let mut hook = |key: &str| {
@@ -426,6 +457,14 @@ impl Errors {
         lifecycle.start = hook("start");
         lifecycle.stop = hook("stop");
         lifecycle.delete = hook("delete");
+        let mut limit = |key: &str| {
+            table
+                .get(key)
+                .and_then(|v| self.duration(v, &format!("lifecycle.{key}")))
+        };
+        lifecycle.start_timeout = limit("start_timeout");
+        lifecycle.stop_timeout = limit("stop_timeout");
+        lifecycle.delete_timeout = limit("delete_timeout");
         lifecycle
     }
 
@@ -516,6 +555,7 @@ mod tests {
             [lifecycle]
             create = "just build"
             delete = "just clean"
+            stop_timeout = "30s"
 
             [pool.iphone]
             size = 2
@@ -532,6 +572,15 @@ mod tests {
         assert_eq!(config.bin["amux"], "target/debug/amux");
         assert_eq!(config.files[".mcp.json"].mode, Some(0o644));
         assert_eq!(config.lifecycle.create.as_deref(), Some("just build"));
+        assert_eq!(
+            config.lifecycle.time_limit(crate::Hook::Stop),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            config.lifecycle.time_limit(crate::Hook::Start),
+            Some(DEFAULT_HOOK_TIMEOUT)
+        );
+        assert_eq!(config.lifecycle.time_limit(crate::Hook::Create), None);
         assert_eq!(
             config.pools["iphone"].wait,
             Some(Duration::from_secs(45 * 60))

@@ -5,8 +5,8 @@ mod common;
 use std::fs;
 use std::process::Command;
 
-use common::{Fixture, git, stdout};
-use wt::{CreateStatus, Hook, NewTree, Remove};
+use common::{Fixture, git, make, stdout};
+use wt::{CreateStatus, Hook, PlanRequest, Remove};
 
 #[test]
 fn new_starts_from_origin_and_leaves_the_main_checkout_alone() {
@@ -15,10 +15,7 @@ fn new_starts_from_origin_and_leaves_the_main_checkout_alone() {
     let before = git(&fx.repo, &["rev-parse", "main"]);
     let upstream = fx.advance_origin(&origin);
 
-    let created = fx
-        .wt()
-        .new_tree(&fx.repo, NewTree::named("feature"))
-        .unwrap();
+    let created = make(&fx.wt(), &fx.repo, PlanRequest::named("feature")).unwrap();
     assert!(created.warnings.is_empty(), "{:?}", created.warnings);
     let tree = created.tree;
     assert_eq!(tree.id(), "app/feature");
@@ -43,7 +40,7 @@ fn a_failed_fetch_starts_from_the_last_fetched_copy() {
         &["remote", "set-url", "origin", "/nonexistent/origin.git"],
     );
 
-    let created = fx.wt().new_tree(&fx.repo, NewTree::named("t")).unwrap();
+    let created = make(&fx.wt(), &fx.repo, PlanRequest::named("t")).unwrap();
     assert_eq!(created.warnings.len(), 1);
     assert!(created.warnings[0].contains("couldn't fetch origin/main"));
     assert_eq!(git(&created.tree.root, &["rev-parse", "HEAD"]), fetched);
@@ -54,11 +51,13 @@ fn branch_templates_use_the_first_complete_one() {
     let fx = Fixture::new();
     fx.config("branch = [\"{{ticket}}-{{name}}\", \"{{name}}\"]\n");
     let wt = fx.wt();
-    let mut request = NewTree::named("search-filters");
+    let mut request = PlanRequest::named("search-filters");
     request.vars.insert("ticket".into(), "ENG-42".into());
-    let tree = wt.new_tree(&fx.repo, request).unwrap().tree;
+    let tree = make(&wt, &fx.repo, request).unwrap().tree;
     assert_eq!(tree.branch().as_deref(), Some("ENG-42-search-filters"));
-    let tree = wt.new_tree(&fx.repo, NewTree::named("plain")).unwrap().tree;
+    let tree = make(&wt, &fx.repo, PlanRequest::named("plain"))
+        .unwrap()
+        .tree;
     assert_eq!(tree.branch().as_deref(), Some("plain"));
 }
 
@@ -66,9 +65,9 @@ fn branch_templates_use_the_first_complete_one() {
 fn new_checks_out_an_existing_branch() {
     let fx = Fixture::new();
     git(&fx.repo, &["branch", "existing"]);
-    let mut request = NewTree::named("t");
+    let mut request = PlanRequest::named("t");
     request.branch = Some("existing".into());
-    let tree = fx.wt().new_tree(&fx.repo, request).unwrap().tree;
+    let tree = make(&fx.wt(), &fx.repo, request).unwrap().tree;
     assert_eq!(tree.branch().as_deref(), Some("existing"));
 }
 
@@ -76,13 +75,13 @@ fn new_checks_out_an_existing_branch() {
 fn new_refuses_duplicates_and_cleans_up_after_a_bad_config() {
     let fx = Fixture::new();
     let wt = fx.wt();
-    wt.new_tree(&fx.repo, NewTree::named("t")).unwrap();
-    assert!(wt.new_tree(&fx.repo, NewTree::named("t")).is_err());
+    make(&wt, &fx.repo, PlanRequest::named("t")).unwrap();
+    assert!(make(&wt, &fx.repo, PlanRequest::named("t")).is_err());
 
     // A config that only fails once the tree exists (an unknown template
     // variable) leaves neither a worktree nor a branch behind.
     fx.config("[env]\nX = \"{{nope}}\"\n");
-    assert!(wt.new_tree(&fx.repo, NewTree::named("bad")).is_err());
+    assert!(make(&wt, &fx.repo, PlanRequest::named("bad")).is_err());
     assert!(!fx.home.join("trees/app/bad").exists());
     assert!(!git(&fx.repo, &["branch", "--list", "bad"]).contains("bad"));
 }
@@ -91,14 +90,14 @@ fn new_refuses_duplicates_and_cleans_up_after_a_bad_config() {
 fn new_by_label_from_anywhere() {
     let fx = Fixture::new();
     let wt = fx.wt();
-    wt.new_tree(&fx.repo, NewTree::named("first")).unwrap();
-    let mut request = NewTree::named("second");
+    make(&wt, &fx.repo, PlanRequest::named("first")).unwrap();
+    let mut request = PlanRequest::named("second");
     request.label = Some("app".into());
-    let tree = wt.new_tree(&fx.root, request).unwrap().tree;
+    let tree = make(&wt, &fx.root, request).unwrap().tree;
     assert_eq!(tree.id(), "app/second");
-    let mut unknown = NewTree::named("x");
+    let mut unknown = PlanRequest::named("x");
     unknown.label = Some("nope".into());
-    assert!(wt.new_tree(&fx.root, unknown).is_err());
+    assert!(make(&wt, &fx.root, unknown).is_err());
 }
 
 #[test]
@@ -132,7 +131,7 @@ fn rm_runs_stop_and_delete_then_removes_the_worktree_and_keeps_the_branch() {
         "[lifecycle]\nstop = \"echo stop $WT_TREE >> {0}\"\ndelete = \"echo delete $WT_TREE >> {0}\"\n",
         log.display()
     ));
-    fx.wt().new_tree(&fx.repo, NewTree::named("t")).unwrap();
+    make(&fx.wt(), &fx.repo, PlanRequest::named("t")).unwrap();
     stdout(&fx.cli(&fx.repo, &["rm", "t"]));
     assert_eq!(
         fs::read_to_string(&log).unwrap(),
@@ -144,23 +143,41 @@ fn rm_runs_stop_and_delete_then_removes_the_worktree_and_keeps_the_branch() {
 }
 
 #[test]
-fn rm_refuses_unsaved_work_and_failing_hooks_unless_forced() {
+fn rm_refuses_unsaved_work_unless_forced() {
     let fx = Fixture::new();
-    fx.config("[lifecycle]\ndelete = \"exit 1\"\n");
     let wt = fx.wt();
-    let tree = wt.new_tree(&fx.repo, NewTree::named("t")).unwrap().tree;
-
-    let output = fx.cli(&fx.repo, &["rm", "t"]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("delete hook failed"));
-    assert!(tree.root.exists());
-
+    let tree = make(&wt, &fx.repo, PlanRequest::named("t")).unwrap().tree;
     fs::write(tree.root.join("scratch.txt"), "unsaved").unwrap();
     let error = wt.remove(&tree, Remove::default()).unwrap_err().to_string();
     assert!(error.contains("untracked"), "{error}");
+    assert!(!fx.cli(&fx.repo, &["rm", "t"]).status.success());
+    assert!(tree.root.exists());
 
     stdout(&fx.cli(&fx.repo, &["rm", "t", "--force"]));
     assert!(!tree.root.exists());
+}
+
+#[test]
+fn a_failing_hook_is_reported_and_removal_goes_on() {
+    let fx = Fixture::new();
+    fx.config("[lifecycle]\nstop = \"echo still up; exit 3\"\ndelete = \"exit 1\"\n");
+    let wt = fx.wt();
+    let tree = make(&wt, &fx.repo, PlanRequest::named("t")).unwrap().tree;
+    let removed = wt.remove(&tree, Remove::default()).unwrap();
+    assert!(!tree.root.exists());
+    assert_eq!(removed.warnings.len(), 2, "{:?}", removed.warnings);
+    assert!(
+        removed.warnings[0].contains("stop hook failed (exit 3)")
+            && removed.warnings[0].contains("still up"),
+        "{:?}",
+        removed.warnings
+    );
+    assert!(removed.warnings[1].contains("delete hook failed"));
+
+    make(&wt, &fx.repo, PlanRequest::named("cli")).unwrap();
+    let output = fx.cli(&fx.repo, &["rm", "cli"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("delete hook failed"));
 }
 
 #[test]
@@ -190,8 +207,8 @@ fn start_and_stop_run_in_one_tree_or_all() {
         log.display()
     ));
     let wt = fx.wt();
-    let a = wt.new_tree(&fx.repo, NewTree::named("a")).unwrap().tree;
-    wt.new_tree(&fx.repo, NewTree::named("b")).unwrap();
+    let a = make(&wt, &fx.repo, PlanRequest::named("a")).unwrap().tree;
+    make(&wt, &fx.repo, PlanRequest::named("b")).unwrap();
     stdout(&fx.cli(&a.root, &["start"]));
     stdout(&fx.cli(&fx.root, &["stop", "--all"]));
     assert_eq!(
@@ -205,9 +222,7 @@ fn start_and_stop_run_in_one_tree_or_all() {
 fn a_tree_deleted_by_hand_is_not_recreated_and_can_be_removed() {
     let fx = Fixture::new();
     fx.config("[files.\"x.txt\"]\ncontent = \"x\"\n[lifecycle]\ndelete = \"exit 1\"\n");
-    let tree = fx
-        .wt()
-        .new_tree(&fx.repo, NewTree::named("t"))
+    let tree = make(&fx.wt(), &fx.repo, PlanRequest::named("t"))
         .unwrap()
         .tree;
     fs::remove_dir_all(&tree.root).unwrap();
@@ -226,7 +241,7 @@ fn rm_checks_before_running_any_hook() {
         log.display()
     ));
     let wt = fx.wt();
-    let tree = wt.new_tree(&fx.repo, NewTree::named("t")).unwrap().tree;
+    let tree = make(&wt, &fx.repo, PlanRequest::named("t")).unwrap().tree;
     wt.init(&fx.repo, Default::default()).unwrap();
 
     fs::write(tree.root.join("unsaved.txt"), "x").unwrap();
@@ -240,9 +255,7 @@ fn rm_checks_before_running_any_hook() {
 fn rm_sees_untracked_files_whatever_git_is_configured_to_show() {
     let fx = Fixture::new();
     git(&fx.repo, &["config", "status.showUntrackedFiles", "no"]);
-    let tree = fx
-        .wt()
-        .new_tree(&fx.repo, NewTree::named("t"))
+    let tree = make(&fx.wt(), &fx.repo, PlanRequest::named("t"))
         .unwrap()
         .tree;
     fs::write(tree.root.join("notes.txt"), "mine").unwrap();
@@ -256,14 +269,14 @@ fn a_failed_new_gives_back_its_name() {
     let fx = Fixture::new();
     fx.config("[env]\nX = \"{{nope}}\"\n");
     let wt = fx.wt();
-    assert!(wt.new_tree(&fx.repo, NewTree::named("t")).is_err());
+    assert!(make(&wt, &fx.repo, PlanRequest::named("t")).is_err());
     assert!(wt.list().unwrap().is_empty());
     fx.config("");
-    wt.new_tree(&fx.repo, NewTree::named("t")).unwrap();
+    make(&wt, &fx.repo, PlanRequest::named("t")).unwrap();
 }
 
 #[test]
-fn a_tree_with_a_broken_config_can_still_be_forced_out() {
+fn a_tree_with_a_broken_config_can_still_be_removed() {
     let fx = Fixture::new();
     let log = fx.root.join("hooks.log");
     fx.config(&format!(
@@ -271,8 +284,8 @@ fn a_tree_with_a_broken_config_can_still_be_forced_out() {
         log.display()
     ));
     let wt = fx.wt();
-    let broken = wt.new_tree(&fx.repo, NewTree::named("a")).unwrap().tree;
-    wt.new_tree(&fx.repo, NewTree::named("b")).unwrap();
+    let broken = make(&wt, &fx.repo, PlanRequest::named("a")).unwrap().tree;
+    make(&wt, &fx.repo, PlanRequest::named("b")).unwrap();
     fs::write(broken.root.join(".wt.toml"), "commands = [\"x\"]\n").unwrap();
     git(&broken.root, &["commit", "-qam", "old config"]);
 
@@ -280,8 +293,10 @@ fn a_tree_with_a_broken_config_can_still_be_forced_out() {
     assert!(!fx.cli(&fx.root, &["stop", "--all"]).status.success());
     assert_eq!(fs::read_to_string(&log).unwrap(), "stop app/b\n");
 
-    assert!(!fx.cli(&fx.root, &["rm", "app/a"]).status.success());
-    stdout(&fx.cli(&fx.root, &["rm", "app/a", "--force"]));
+    // Its hooks can't run, which is reported, and removal goes on.
+    let output = fx.cli(&fx.root, &["rm", "app/a"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("couldn't run app/a's stop hook"));
     assert!(!broken.root.exists());
 }
 
@@ -306,9 +321,9 @@ fn new_checks_out_a_branch_that_only_origin_has() {
     git(&other, &["push", "-q", "origin", "colleague"]);
     let theirs = git(&other, &["rev-parse", "HEAD"]);
 
-    let mut request = NewTree::named("review");
+    let mut request = PlanRequest::named("review");
     request.branch = Some("colleague".into());
-    let tree = fx.wt().new_tree(&fx.repo, request).unwrap().tree;
+    let tree = make(&fx.wt(), &fx.repo, request).unwrap().tree;
     assert_eq!(git(&tree.root, &["rev-parse", "HEAD"]), theirs);
     assert_eq!(
         git(

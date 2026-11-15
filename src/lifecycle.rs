@@ -1,13 +1,16 @@
 //! Creating and removing trees, and the hooks that run around them.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use crate::config::Config;
 use crate::error::{Error, Result, io_at};
+use crate::run::RunHook;
 use crate::{Init, Tree, Wt, git, names, state, template};
 
 /// A tree's lifecycle hooks, from `[lifecycle]` in its config.
@@ -45,33 +48,71 @@ pub enum CreateStatus {
     Failed(i32),
 }
 
-/// A request to make a tree with `git worktree add`.
+/// What a tree will be called and where it goes: the input to
+/// [`Wt::plan_new`].
 #[derive(Clone, Debug)]
-pub struct NewTree {
+pub struct PlanRequest {
     /// The repository's label. Defaults to the repository containing the
-    /// directory `new_tree` is given.
+    /// directory the plan is made from.
     pub label: Option<String>,
     pub name: String,
-    /// What to start from instead of `origin/<default branch>`.
-    pub from: Option<String>,
     /// The branch, instead of one rendered from the config's `branch`
-    /// templates (or the tree's name when there are none).
+    /// templates (or the tree's name when there are none). A branch asked
+    /// for by name that already exists is checked out.
     pub branch: Option<String>,
     /// Values for the `branch` templates.
     pub vars: BTreeMap<String, String>,
-    /// Fetch the default branch first.
-    pub fetch: bool,
 }
 
-impl NewTree {
-    pub fn named(name: impl Into<String>) -> NewTree {
-        NewTree {
+impl PlanRequest {
+    pub fn named(name: impl Into<String>) -> PlanRequest {
+        PlanRequest {
             label: None,
             name: name.into(),
-            from: None,
             branch: None,
             vars: BTreeMap::new(),
+        }
+    }
+}
+
+/// A tree that can be made, from [`Wt::plan`] or [`Wt::plan_new`], checked
+/// against what is on this machine without touching the network. Give it to
+/// [`Wt::new_tree`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Planned {
+    pub label: String,
+    pub name: String,
+    /// Where the tree will be.
+    pub path: PathBuf,
+    pub branch: String,
+    /// The repository's main checkout.
+    pub main: PathBuf,
+    /// The branch was asked for by name rather than rendered.
+    named_branch: bool,
+}
+
+/// How to make a planned tree with `git worktree add`.
+#[derive(Clone, Debug)]
+pub struct NewTree {
+    /// What to start from instead of `origin/<default branch>`.
+    pub from: Option<String>,
+    /// Fetch the default branch first.
+    pub fetch: bool,
+    /// Fail with [`crate::Error::Taken`] when the branch already exists,
+    /// locally or (after a fetch) on `origin`, instead of checking it out.
+    pub fresh_branch: bool,
+    /// Recorded in `.wt/owner`, for [`Tree::owner`]: who made the tree, as
+    /// an opaque string.
+    pub owner: Option<String>,
+}
+
+impl Default for NewTree {
+    fn default() -> NewTree {
+        NewTree {
+            from: None,
             fetch: true,
+            fresh_branch: false,
+            owner: None,
         }
     }
 }
@@ -86,15 +127,28 @@ pub struct Created {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Remove {
     /// Remove even with uncommitted changes or untracked files.
-    pub force: bool,
+    pub ignore_dirty: bool,
+    /// Remove even while something holds the tree.
+    pub ignore_holders: bool,
     /// Leave the worktree on disk and only stop managing it.
     pub keep: bool,
+    /// Delete the tree's branch too when it has no commits of its own: when
+    /// its tip is reachable from another ref (other than its own upstream).
+    /// A branch with commits of its own is always kept.
+    pub delete_empty_branch: bool,
+    /// How the `stop` and `delete` hooks run.
+    pub hooks: RunHook,
 }
 
 #[derive(Debug)]
 pub struct Removed {
-    /// The branch the tree had checked out, which is kept.
+    /// The branch the tree had checked out.
     pub branch: Option<String>,
+    /// Whether that branch was deleted, by [`Remove::delete_empty_branch`].
+    pub branch_deleted: bool,
+    /// Things that went wrong without stopping the removal: a failed hook,
+    /// a branch that couldn't be deleted.
+    pub warnings: Vec<String>,
 }
 
 /// A fetch that hangs shouldn't hold up making a tree: the last fetched copy
@@ -102,51 +156,134 @@ pub struct Removed {
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Runs the `create` hook, recording `running` and then its exit code in
-/// `.wt/create.status`, and copying its output to `.wt/create.log`.
-const CREATE_WRAPPER: &str = r#"status="$1"; log="$2"; hook="$3"
-printf running > "$status"
-{ sh -c "$hook" 2>&1; echo $? > "$status.exit"; } | tee "$log"
-code=$(cat "$status.exit"); rm -f "$status.exit"
-printf '%s' "$code" > "$status"
+/// `.wt/create.status`, and its output in `.wt/create.log`. Arguments: the
+/// status file, the log, the hook, `1` to copy the output to stdout too,
+/// and then a command to run first (its failure is the hook's).
+///
+/// Whoever runs it hands it the lifecycle lock as fd 9, and the hook and
+/// the first command run with that closed, so build servers the hook leaves
+/// behind never hold it. Without `tee` the output goes to the log by
+/// redirection, not through a pipe, because something left holding the
+/// hook's stdout would keep `tee`, and so the wrapper and its lock, alive.
+///
+/// The status is replaced by a rename, never rewritten in place, because a
+/// reader that caught it empty would take the hook for finished.
+const CREATE_WRAPPER: &str = r#"status="$1"; log="$2"; hook="$3"; tee="$4"; shift 4
+record() { printf '%s' "$1" > "$status.new" && mv -f "$status.new" "$status"; }
+record running
+: > "$log"
+code=0
+if [ $# -gt 0 ]; then "$@" >> "$log" 2>&1 9>&- || code=$?; fi
+if [ "$code" = 0 ]; then
+  if [ "$tee" = 1 ]; then
+    { sh -c "$hook" 2>&1 9>&-; echo $? > "$status.exit"; } | tee -a "$log" 9>&-
+    code=$(cat "$status.exit"); rm -f "$status.exit"
+  else
+    sh -c "$hook" >> "$log" 2>&1 9>&-; code=$?
+  fi
+fi
+record "$code"
 exit "$code""#;
 
 impl Wt {
-    /// Makes a new worktree under the trees directory and initialises it.
-    /// It starts from `origin/<default branch>` (after a fetch that falls
-    /// back to the last fetched copy) unless told otherwise; the main
-    /// checkout and its branches are never touched. Doesn't run the
-    /// `create` hook: see [`Tree::hook`].
-    pub fn new_tree(&self, cwd: &Path, request: NewTree) -> Result<Created> {
-        let (label, main) = self.repository(request.label.as_deref(), cwd)?;
+    /// Plans a tree named `name` in the repository containing `repository`,
+    /// with its branch from the config's templates, answering locally and
+    /// quickly. `None` when wt isn't configured for the repository: it has
+    /// no `.wt.toml` in its main checkout and no user-layer config.
+    ///
+    /// Fails with [`crate::Error::Taken`] when the name, the path or the
+    /// local branch is already in use, so a caller choosing names can try
+    /// another.
+    pub fn plan(&self, repository: &Path, name: &str) -> Result<Option<Planned>> {
+        let (label, main) = self.find_repository(None, repository)?;
+        if Config::source(&self.home, &label, &main).is_none() {
+            return Ok(None);
+        }
+        let planned = self.plan_in(label, main, &PlanRequest::named(name))?;
+        if git::ref_exists(&planned.main, &format!("refs/heads/{}", planned.branch)) {
+            return Err(Error::Taken(format!(
+                "branch `{}` already exists",
+                planned.branch
+            )));
+        }
+        Ok(Some(planned))
+    }
+
+    /// Plans a tree as `wt new` does: with or without a config, and leaving
+    /// an existing branch to be checked out.
+    pub fn plan_new(&self, cwd: &Path, request: &PlanRequest) -> Result<Planned> {
+        let (label, main) = self.find_repository(request.label.as_deref(), cwd)?;
+        self.plan_in(label, main, request)
+    }
+
+    fn plan_in(&self, label: String, main: PathBuf, request: &PlanRequest) -> Result<Planned> {
         let name = request.name.clone();
         if !names::valid(&name) {
             return Err(Error::Conflict(format!("`{name}` can't be a tree name")));
         }
-        if let Some(other) = state::read(&self.home)?.tree(&label, &name) {
-            return Err(Error::Conflict(format!(
+        let path = self.settings.trees_dir.join(&label).join(&name);
+        self.check_free(&label, &name, &path)?;
+        let config = Config::load(&self.home, &label, &main)?;
+        let branch = branch_for(request, &config, &label)?;
+        git::run(&main, &["check-ref-format", "--branch", &branch])
+            .map_err(|_| Error::Conflict(format!("`{branch}` isn't a valid branch name")))?;
+        Ok(Planned {
+            label,
+            name,
+            path,
+            branch,
+            main,
+            named_branch: request.branch.is_some(),
+        })
+    }
+
+    fn check_free(&self, label: &str, name: &str, path: &Path) -> Result<()> {
+        if let Some(other) = state::read(&self.home)?.tree(label, name) {
+            return Err(Error::Taken(format!(
                 "{label}/{name} already exists at {}",
                 other.path.display()
             )));
         }
-        let path = self.settings.trees_dir.join(&label).join(&name);
         if path.exists() {
-            return Err(Error::Conflict(format!(
-                "{} already exists",
-                path.display()
-            )));
+            return Err(Error::Taken(format!("{} already exists", path.display())));
         }
-        let config = Config::load(&self.home, &label, &main)?;
-        let branch = branch_for(&request, &config, &label)?;
-        git::run(&main, &["check-ref-format", "--branch", &branch])
-            .map_err(|_| Error::Conflict(format!("`{branch}` isn't a valid branch name")))?;
+        Ok(())
+    }
+
+    /// Makes the planned tree under the trees directory and initialises it.
+    /// It starts from `origin/<default branch>` (after a fetch that falls
+    /// back to the last fetched copy) unless told otherwise; the main
+    /// checkout and its branches are never touched. Doesn't copy inputs or
+    /// run the `create` hook: see [`Tree::copy_inputs`] and
+    /// [`Tree::spawn_create`].
+    pub fn new_tree(&self, plan: &Planned, request: NewTree) -> Result<Created> {
+        let Planned {
+            label,
+            name,
+            path,
+            branch,
+            main,
+            named_branch,
+        } = plan.clone();
+        // Anything could have happened since the plan was made.
+        self.check_free(&label, &name, &path)?;
+        state::update(&self.home, |state| crate::register(state, &label, &main))?;
 
         let mut warnings = Vec::new();
         let local = git::ref_exists(&main, &format!("refs/heads/{branch}"));
+        if local && request.fresh_branch {
+            return Err(Error::Taken(format!("branch `{branch}` already exists")));
+        }
         let remote_ref = format!("refs/remotes/origin/{branch}");
         // A branch asked for by name may be someone else's on origin: fetch
         // it, so that it is checked out rather than started afresh. It may
-        // equally be new, so a failed fetch says nothing.
-        if !local && request.branch.is_some() && request.fetch && git::has_origin(&main) {
+        // equally be new, so a failed fetch says nothing. A fresh branch is
+        // fetched to make sure nobody has it.
+        if !local
+            && (named_branch || request.fresh_branch)
+            && request.fetch
+            && git::has_origin(&main)
+        {
             let _ = git::run_timeout(
                 &main,
                 &[
@@ -159,6 +296,11 @@ impl Wt {
             );
         }
         let remote = !local && git::ref_exists(&main, &remote_ref);
+        if remote && request.fresh_branch {
+            return Err(Error::Taken(format!(
+                "branch `{branch}` already exists on origin"
+            )));
+        }
         if (local || remote) && request.from.is_some() {
             return Err(Error::Conflict(format!(
                 "branch `{branch}` already exists, so there's nothing to start it --from"
@@ -190,32 +332,70 @@ impl Wt {
             label: Some(label),
             name: Some(name),
         };
-        match self.init(&path, init) {
+        let made = self.init(&path, init).and_then(|tree| {
+            if let Some(owner) = &request.owner {
+                tree.set_owner(owner)?;
+            }
+            Ok(tree)
+        });
+        match made {
             Ok(tree) => Ok(Created { tree, warnings }),
             Err(error) => {
                 let _ = git::run(&main, &["worktree", "remove", "--force", &path_arg]);
                 if !local {
                     let _ = git::run(&main, &["branch", "-D", &branch]);
                 }
+                let _ = state::update(&self.home, |state| {
+                    state.trees.retain(|other| other.path != path);
+                    Ok(())
+                });
                 Err(error)
             }
         }
     }
 
-    /// Refuses a removal [`Wt::remove`] would refuse. Call it before running
-    /// the tree's `stop` and `delete` hooks, so they never run on a tree
-    /// that then can't be removed.
+    /// Refuses a removal [`Wt::remove`] would refuse, without removing
+    /// anything: the main checkout (unless `keep`), a tree something holds
+    /// (unless `ignore_holders`), and one with uncommitted or untracked
+    /// work (unless `ignore_dirty` or `keep`).
     pub fn check_remove(&self, tree: &Tree, options: Remove) -> Result<()> {
-        if options.keep {
-            return Ok(());
-        }
-        if tree.is_main() {
+        self.check_main(tree, options)?;
+        let _exclusive = self.check_holders(tree, options)?;
+        self.check_dirty(tree, options)
+    }
+
+    fn check_main(&self, tree: &Tree, options: Remove) -> Result<()> {
+        if !options.keep && tree.is_main() {
             return Err(Error::Conflict(format!(
                 "{} is the main checkout; `--keep` stops managing it without deleting it",
                 tree.id()
             )));
         }
-        if !options.force && tree.root.is_dir() && git::is_dirty(&tree.root)? {
+        Ok(())
+    }
+
+    /// The exclusive hold, when the tree exists and nothing else holds it.
+    fn check_holders(&self, tree: &Tree, options: Remove) -> Result<Option<fs::File>> {
+        if !tree.root.is_dir() {
+            return Ok(None);
+        }
+        match tree.try_hold_exclusively()? {
+            Some(file) => Ok(Some(file)),
+            None if options.ignore_holders => Ok(None),
+            None => Err(Error::Held(format!(
+                "{} is in use: a `wt shell`, a `wt exec` or another program holds it; \
+                 pass --force to remove it anyway",
+                tree.id()
+            ))),
+        }
+    }
+
+    fn check_dirty(&self, tree: &Tree, options: Remove) -> Result<()> {
+        if !options.ignore_dirty
+            && !options.keep
+            && tree.root.is_dir()
+            && git::is_dirty(&tree.root)?
+        {
             return Err(Error::Conflict(format!(
                 "{} has uncommitted changes or untracked files; commit them, or pass --force",
                 tree.id()
@@ -224,34 +404,83 @@ impl Wt {
         Ok(())
     }
 
-    /// Stops managing a tree and, unless `keep`, removes its worktree. The
-    /// branch is kept. Call [`Wt::check_remove`], then run the tree's `stop`
-    /// and `delete` hooks, then this.
+    /// Removes a tree: runs its `stop` and `delete` hooks, then removes its
+    /// worktree (unless `keep`) and stops managing it. Never waits for
+    /// holders: a tree something holds is refused with
+    /// [`crate::Error::Held`] unless `ignore_holders`, and one with
+    /// uncommitted work with [`crate::Error::Conflict`] unless
+    /// `ignore_dirty`. It does wait for a hook already running, such as a
+    /// `create` still building. A failed hook is a warning, and removal goes
+    /// on. The branch is kept unless `delete_empty_branch` and it has no
+    /// commits of its own.
     pub fn remove(&self, tree: &Tree, options: Remove) -> Result<Removed> {
-        self.check_remove(tree, options)?;
+        self.check_main(tree, options)?;
+        // Held to the end, so nobody starts holding a tree being removed.
+        let _exclusive = self.check_holders(tree, options)?;
+        self.check_dirty(tree, options)?;
+        let mut warnings = Vec::new();
         let branch = tree.branch();
-        if !options.keep {
-            if tree.root.is_dir() {
+        if tree.root.is_dir() {
+            let lifecycle = tree.lock_lifecycle(options.hooks.forward)?;
+            for hook in [Hook::Stop, Hook::Delete] {
+                match tree.run_locked(hook, options.hooks, &lifecycle) {
+                    Ok(ran) => {
+                        let problem = if options.keep {
+                            ran.problem()
+                        } else {
+                            ran.problem_with_output()
+                        };
+                        warnings.extend(problem);
+                    }
+                    Err(Error::Cancelled) => return Err(Error::Cancelled),
+                    Err(error) => warnings.push(format!(
+                        "couldn't run {}'s {} hook: {error}",
+                        tree.id(),
+                        hook.name()
+                    )),
+                }
+            }
+            if !options.keep {
                 // What is left is either clean or ignored (build output, and
                 // the files wt itself rendered), so forcing is safe here.
                 let path = tree.root.to_string_lossy();
                 git::run(&tree.main, &["worktree", "remove", "--force", &path])?;
-            } else {
-                let _ = git::run(&tree.main, &["worktree", "prune"]);
             }
+        } else {
+            warnings.push(format!(
+                "{} is already gone from disk; not running its hooks",
+                tree.id()
+            ));
+            let _ = git::run(&tree.main, &["worktree", "prune"]);
         }
         state::update(&self.home, |state| {
             state.trees.retain(|record| record.path != tree.root);
             Ok(())
         })?;
-        Ok(Removed { branch })
+        let mut branch_deleted = false;
+        if options.delete_empty_branch
+            && !options.keep
+            && let Some(branch) = &branch
+        {
+            match delete_if_empty(&tree.main, branch) {
+                Ok(deleted) => branch_deleted = deleted,
+                Err(error) => {
+                    warnings.push(format!("couldn't delete branch {branch}: {error}"));
+                }
+            }
+        }
+        Ok(Removed {
+            branch,
+            branch_deleted,
+            warnings,
+        })
     }
 
     /// The label and main checkout of the repository named `label`, or of
-    /// the one containing `cwd`, registering it if it is new.
-    fn repository(&self, label: Option<&str>, cwd: &Path) -> Result<(String, PathBuf)> {
+    /// the one containing `cwd`, without registering it.
+    fn find_repository(&self, label: Option<&str>, cwd: &Path) -> Result<(String, PathBuf)> {
+        let state = state::read(&self.home)?;
         if let Some(label) = label {
-            let state = state::read(&self.home)?;
             return match state.repos.get(label) {
                 Some(main) => Ok((label.to_owned(), main.clone())),
                 None => Err(Error::NotFound(format!(
@@ -266,9 +495,37 @@ impl Wt {
             ))
         })?;
         let label = self.label_for(&main, None)?;
-        state::update(&self.home, |state| crate::register(state, &label, &main))?;
-        Ok((label, main))
+        match state.repos.get(&label) {
+            Some(other) if *other != main => Err(Error::Conflict(format!(
+                "the label `{label}` is already used by {}; run `wt init --label` in {} first",
+                other.display(),
+                main.display()
+            ))),
+            _ => Ok((label, main)),
+        }
     }
+}
+
+/// Deletes `branch` when its tip is reachable from a ref other than itself
+/// and its own upstream: then it has no commits of its own and deleting it
+/// loses nothing. wt records no start point, and the base moves, so
+/// reachability is the only test that works.
+fn delete_if_empty(main: &Path, branch: &str) -> Result<bool> {
+    let own = format!("refs/heads/{branch}");
+    let tip = git::run(main, &["rev-parse", "--verify", "--quiet", &own])?;
+    let upstream = git::run(main, &["for-each-ref", "--format=%(upstream)", &own])?;
+    let containing = git::run(
+        main,
+        &["for-each-ref", "--format=%(refname)", "--contains", &tip],
+    )?;
+    let elsewhere = containing
+        .lines()
+        .any(|name| name != own && name != upstream && name != "refs/stash");
+    if !elsewhere {
+        return Ok(false);
+    }
+    git::run(main, &["branch", "-D", branch])?;
+    Ok(true)
 }
 
 /// `origin/<default>` after fetching it, or the main checkout's HEAD for a
@@ -300,7 +557,7 @@ fn start_point(main: &Path, fetch: bool, warnings: &mut Vec<String>) -> String {
 
 /// The branch for a new tree: as asked, or the first `branch` template whose
 /// variables are all set, or the tree's name.
-fn branch_for(request: &NewTree, config: &Config, label: &str) -> Result<String> {
+fn branch_for(request: &PlanRequest, config: &Config, label: &str) -> Result<String> {
     if let Some(branch) = &request.branch {
         return Ok(branch.clone());
     }
@@ -326,10 +583,24 @@ fn branch_for(request: &NewTree, config: &Config, label: &str) -> Result<String>
 
 impl Tree {
     /// The hook as a command ready to spawn: `sh -c` at the tree's root with
-    /// its environment. `None` when the config doesn't declare it. `create`
-    /// also records its progress for [`Tree::create_status`] and the
-    /// `[bin]` wrappers, and merges stderr into stdout.
+    /// its environment and `WT_IN_HOOK` set to the hook's name. `None` when
+    /// the config doesn't declare it. `create` also records its progress
+    /// for [`Tree::create_status`] and the `[bin]` wrappers, and copies its
+    /// output (stderr merged into stdout) to [`Tree::create_log`].
+    ///
+    /// The command runs without wt's ordering and time limits; to have them,
+    /// use [`Tree::run_hook`], [`Tree::spawn_create`] or
+    /// [`Tree::stop_when_unheld`] instead.
     pub fn hook(&self, hook: Hook) -> Result<Option<Command>> {
+        self.hook_command(hook, true, &[])
+    }
+
+    pub(crate) fn hook_command(
+        &self,
+        hook: Hook,
+        tee: bool,
+        before: &[OsString],
+    ) -> Result<Option<Command>> {
         let config = self.config()?;
         let lifecycle = &config.lifecycle;
         let script = match hook {
@@ -352,13 +623,61 @@ impl Tree {
                 .arg("wt-create")
                 .arg(directory.join("create.status"))
                 .arg(directory.join("create.log"))
-                .arg(script);
+                .arg(script)
+                .arg(if tee { "1" } else { "0" })
+                .args(before);
         } else {
             command.arg("-c").arg(script);
         }
         env.apply(&mut command);
+        // Tells `wt shell` and `wt exec` run from a hook not to hold the
+        // tree: a stop hook's `wt exec` would otherwise wait on its own stop.
+        command.env("WT_IN_HOOK", hook.name());
         command.current_dir(&self.root);
         Ok(Some(command))
+    }
+
+    /// Starts the `create` hook detached, in a session of its own, and
+    /// returns at once; `None` when the config declares no `create` hook.
+    /// The tree is marked creating first (see [`Tree::mark_creating`]).
+    ///
+    /// The hook holds the tree's lifecycle lock from before this returns
+    /// until it finishes, whether or not this process is still alive, so a
+    /// start, a stop or a removal queues behind the build. Its output goes
+    /// to [`Tree::create_log`]. Waits first for any hook already running.
+    /// Wait on the child (on a thread of its own, say) to reap it.
+    pub fn spawn_create(&self) -> Result<Option<Child>> {
+        self.spawn_create_after(&[])
+    }
+
+    /// [`Tree::spawn_create`], running the command `before` first under the
+    /// same lock, with its output in the same log; if it fails, the hook
+    /// doesn't run and its exit code is recorded as the hook's. For `wt new`,
+    /// which copies inputs this way.
+    #[doc(hidden)]
+    pub fn spawn_create_after(&self, before: &[OsString]) -> Result<Option<Child>> {
+        let Some(mut command) = self.hook_command(Hook::Create, false, before)? else {
+            return Ok(None);
+        };
+        let lock = self.lock_lifecycle(None)?;
+        self.mark_creating()?;
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::run::pass_lock(&mut command, &lock);
+        // SAFETY: setsid is async-signal-safe. A session of its own keeps
+        // the hook running when the terminal that started it closes.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        command.spawn().map(Some).map_err(|source| Error::Io {
+            context: format!("starting {}'s create hook", self.id()),
+            source,
+        })
     }
 
     pub fn create_status(&self) -> CreateStatus {

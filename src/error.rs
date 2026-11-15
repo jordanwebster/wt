@@ -13,6 +13,14 @@ pub enum Error {
     /// The request conflicts with what already exists.
     #[error("{0}")]
     Conflict(String),
+    /// The tree name, its path or its branch is already taken. A caller
+    /// choosing names itself can try the next one.
+    #[error("{0}")]
+    Taken(String),
+    /// Something holds the tree (a `wt shell`, a `wt exec`, another
+    /// program), so it can't be removed now.
+    #[error("{0}")]
+    Held(String),
     /// wt's own state can't be read or was written by a newer version.
     #[error("{0}")]
     State(String),
