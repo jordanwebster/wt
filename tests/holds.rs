@@ -665,3 +665,112 @@ fn an_older_wt_lists_and_removes_a_tree_with_the_new_files() {
     assert!(!t.root.exists());
     assert!(wt.list().unwrap().is_empty());
 }
+
+#[test]
+fn removal_refuses_work_that_appeared_while_its_hooks_ran() {
+    let fx = Fixture::new();
+    fx.config("[lifecycle]\ndelete = \"echo late > late.txt\"\n");
+    let wt = fx.wt();
+    let t = tree(&fx, "t");
+    let error = wt.remove(&t, Remove::default()).unwrap_err();
+    assert!(matches!(error, Error::Conflict(_)), "{error}");
+    assert!(t.root.join("late.txt").exists(), "the new work was deleted");
+    assert_eq!(wt.list().unwrap().len(), 1);
+
+    let ignore_dirty = Remove {
+        ignore_dirty: true,
+        ..Remove::default()
+    };
+    wt.remove(&t, ignore_dirty).unwrap();
+    assert!(!t.root.exists());
+}
+
+#[test]
+fn a_signal_during_removal_stops_the_teardown_and_keeps_the_tree() {
+    let fx = Fixture::new();
+    let started = fx.root.join("started");
+    let deleted = fx.root.join("deleted");
+    fx.config(&format!(
+        "[lifecycle]\nstop = \"touch {}; sleep 30\"\ndelete = \"touch {}\"\n",
+        started.display(),
+        deleted.display()
+    ));
+    let t = tree(&fx, "t");
+    let mut rm = cli(&fx, &fx.root, &["rm", "app/t"]).spawn().unwrap();
+    wait_until("the stop hook", || started.exists());
+    // SAFETY: a plain syscall on the test's own child.
+    unsafe { libc::kill(rm.id() as i32, libc::SIGTERM) };
+    let status = rm.wait().unwrap();
+    assert!(!status.success(), "wt rm exited 0 after being interrupted");
+    assert!(
+        !deleted.exists(),
+        "the delete hook ran after the interruption"
+    );
+    assert!(t.root.exists());
+    assert_eq!(fx.wt().list().unwrap().len(), 1);
+}
+
+#[test]
+fn a_stopper_that_waited_for_a_hook_gives_up_on_a_tree_made_again_meanwhile() {
+    let fx = Fixture::new();
+    let log = fx.root.join("stop.log");
+    fx.config(&stop_logging_to(&log));
+    let wt = fx.wt();
+    let old = tree(&fx, "t");
+    // Stands in for a hook that is running, on the old tree's lock file.
+    fs::create_dir_all(old.root.join(".wt")).unwrap();
+    let lifecycle = fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(old.root.join(".wt/lifecycle.lock"))
+        .unwrap();
+    lifecycle.lock().unwrap();
+    let stopper = stop_in_background(&old);
+    assert!(stopper.still_running(Duration::from_millis(300)));
+    // The stopper let go of the tree while it waits for the hook.
+    drop(old.try_hold().unwrap().expect("the stopper let go"));
+
+    let moved = fx.root.join("moved-away");
+    fs::rename(&old.root, &moved).unwrap();
+    wt.remove(&old, Remove::default()).unwrap();
+    let new = tree(&fx, "t");
+    assert_eq!(new.root, old.root);
+    drop(lifecycle);
+    assert!(matches!(
+        stopper.finish("the stopper").unwrap(),
+        Stopped::Gone
+    ));
+    assert_eq!(read(&log), "", "the new tree was stopped");
+}
+
+#[test]
+fn a_hook_keeps_its_locks_when_whatever_ran_it_is_killed() {
+    let fx = Fixture::new();
+    let started = fx.root.join("started");
+    let gate = fx.root.join("gate");
+    let log = fx.root.join("hooks.log");
+    fx.config(&format!(
+        "[lifecycle]\nstop = \"touch {}; {}; echo stopped >> {log}\"\nstart = \"echo start >> {log}\"\n",
+        started.display(),
+        wait_for(&gate),
+        log = log.display(),
+    ));
+    let t = tree(&fx, "t");
+    let mut rm = cli(&fx, &fx.root, &["rm", "app/t"]).spawn().unwrap();
+    wait_until("the stop hook", || started.exists());
+    rm.kill().unwrap();
+    rm.wait().unwrap();
+
+    // The stop hook still runs, so the tree is still stopping, and no other
+    // hook may start.
+    assert!(t.try_hold().unwrap().is_none(), "the hold went with wt");
+    let starter = t.clone();
+    let start = Background::start(move || starter.run_hook(Hook::Start, RunHook::default()));
+    assert!(start.still_running(Duration::from_millis(300)));
+    fs::write(&gate, "").unwrap();
+    assert!(start.finish("the start hook").unwrap().succeeded());
+    assert_eq!(read(&log), "stopped\nstart\n");
+    wait_until("the stop to end", || t.try_hold().unwrap().is_some());
+    assert!(t.root.exists());
+}

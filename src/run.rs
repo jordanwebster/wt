@@ -50,6 +50,9 @@ pub enum Outcome {
     Killed(i32),
     /// Ran past its time limit, so wt killed its process group.
     TimedOut(Duration),
+    /// Ended after wt passed it this signal from [`RunHook::forward`]: the
+    /// person asked to give up.
+    Interrupted(i32),
 }
 
 /// A hook wt ran.
@@ -79,6 +82,7 @@ impl Ran {
                 "{what} ran past its time limit of {} and was killed",
                 span(*limit)
             ),
+            Outcome::Interrupted(signal) => format!("{what} was interrupted (signal {signal})"),
         };
         Some(match &self.log {
             Some(log) => format!("{problem}; its output is in {}", log.display()),
@@ -114,7 +118,9 @@ impl Ran {
         match self.outcome {
             Outcome::NotDeclared | Outcome::Succeeded => 0,
             Outcome::Failed(code) => code.clamp(1, 255) as u8,
-            Outcome::Killed(signal) => (128 + signal).clamp(1, 255) as u8,
+            Outcome::Killed(signal) | Outcome::Interrupted(signal) => {
+                (128 + signal).clamp(1, 255) as u8
+            }
             Outcome::TimedOut(_) => 124,
         }
     }
@@ -126,9 +132,12 @@ const KILL_GRACE: Duration = Duration::from_secs(3);
 /// How often a [`Forward`] is asked for a signal.
 const FORWARD_POLL: Duration = Duration::from_millis(100);
 
-/// The file descriptor the `create` wrapper holds the lifecycle lock on. One
-/// digit, because POSIX `sh` only promises `9>&-` for single digits.
-pub(crate) const CREATE_LOCK_FD: i32 = 9;
+/// The file descriptors a hook's wrapper holds the lifecycle lock and the
+/// tree's exclusive hold on, so they last until the hook ends even if the
+/// process that ran it dies. Single digits, because POSIX `sh` only promises
+/// `9>&-` for those.
+pub(crate) const LIFECYCLE_FD: i32 = 9;
+pub(crate) const HOLDS_FD: i32 = 8;
 
 impl Tree {
     /// Runs `hook` once no other hook of this tree is running, and waits for
@@ -139,22 +148,28 @@ impl Tree {
     /// describes.
     pub fn run_hook(&self, hook: Hook, options: RunHook) -> Result<Ran> {
         let lock = self.lock_lifecycle(options.forward)?;
-        self.run_locked(hook, options, &lock)
+        self.run_locked(hook, options, &lock, None)
     }
 
-    /// Runs `hook` while the caller holds the lifecycle lock in `lock`.
-    pub(crate) fn run_locked(&self, hook: Hook, options: RunHook, lock: &File) -> Result<Ran> {
+    /// Runs `hook` while the caller holds the lifecycle lock in `lock`, and,
+    /// for a stop or a removal, the exclusive hold in `holds`. The hook's
+    /// wrapper keeps both until the hook ends, even if this process dies
+    /// first; the hook itself, and whatever it leaves running, never has
+    /// them.
+    pub(crate) fn run_locked(
+        &self,
+        hook: Hook,
+        options: RunHook,
+        lock: &File,
+        holds: Option<&File>,
+    ) -> Result<Ran> {
         let config = self.config()?;
         let tee = options.output == HookOutput::Inherit;
         let Some(mut command) = self.hook_command(hook, tee, &[])? else {
             return Ok(self.ran(hook, Outcome::NotDeclared, None));
         };
         let log = self.direct_output(&mut command, hook, options.output)?;
-        if hook == Hook::Create {
-            // The wrapper keeps the lock if this process dies, so a start
-            // still waits for the build; the hook itself runs without it.
-            pass_lock(&mut command, lock);
-        }
+        pass_locks(&mut command, lock, holds);
         // In a process group of its own the hook is in the terminal's
         // background, where reading the terminal would stop it.
         command.stdin(Stdio::null()).process_group(0);
@@ -207,21 +222,35 @@ impl Tree {
     }
 }
 
-/// Gives the child the lifecycle lock as fd 9, which it inherits across
-/// exec: the lock lasts while any process has that descriptor open.
-pub(crate) fn pass_lock(command: &mut Command, lock: &File) {
-    let fd = lock.as_raw_fd();
-    // SAFETY: dup2 and fcntl are async-signal-safe, and the closure touches
-    // nothing but its two integers.
+/// Gives the child the lifecycle lock as fd 9 and the exclusive hold, if
+/// any, as fd 8, which it inherits across exec: a lock lasts while any
+/// process has its descriptor open.
+pub(crate) fn pass_locks(command: &mut Command, lifecycle: &File, holds: Option<&File>) {
+    let fds = [
+        Some((lifecycle.as_raw_fd(), LIFECYCLE_FD)),
+        holds.map(|holds| (holds.as_raw_fd(), HOLDS_FD)),
+    ];
+    // SAFETY: fcntl and dup2 are async-signal-safe, and the closure touches
+    // nothing but its integers.
     unsafe {
         command.pre_exec(move || {
-            if fd == CREATE_LOCK_FD {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+            // Each to a close-on-exec copy above 9 first, so that moving one
+            // into place can't overwrite another still to be moved.
+            let mut copies = [-1; 2];
+            for (copy, fds) in copies.iter_mut().zip(fds) {
+                if let Some((from, _)) = fds {
+                    *copy = libc::fcntl(from, libc::F_DUPFD_CLOEXEC, 10);
+                    if *copy < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+            }
+            for (copy, fds) in copies.into_iter().zip(fds) {
+                if let Some((_, to)) = fds
+                    && libc::dup2(copy, to) < 0
+                {
                     return Err(std::io::Error::last_os_error());
                 }
-            } else if libc::dup2(fd, CREATE_LOCK_FD) < 0 {
-                return Err(std::io::Error::last_os_error());
             }
             Ok(())
         });
@@ -238,32 +267,38 @@ fn wait(child: Child, limit: Option<Duration>, forward: Option<Forward>) -> Resu
         let _ = sender.send(child.wait());
     });
     let deadline = limit.map(|limit| Instant::now() + limit);
-    let outcome = |status: std::io::Result<ExitStatus>| -> Result<Outcome> {
-        let status = status.map_err(|source| Error::Io {
-            context: "waiting for a hook".to_owned(),
-            source,
-        })?;
-        Ok(match (status.code(), status.signal()) {
-            (Some(0), _) => Outcome::Succeeded,
-            (Some(code), _) => Outcome::Failed(code),
-            (None, Some(signal)) => Outcome::Killed(signal),
-            (None, None) => Outcome::Failed(-1),
-        })
-    };
+    let mut forwarded = None;
+    let outcome =
+        |status: std::io::Result<ExitStatus>, forwarded: Option<i32>| -> Result<Outcome> {
+            let status = status.map_err(|source| Error::Io {
+                context: "waiting for a hook".to_owned(),
+                source,
+            })?;
+            if let Some(signal) = forwarded {
+                return Ok(Outcome::Interrupted(signal));
+            }
+            Ok(match (status.code(), status.signal()) {
+                (Some(0), _) => Outcome::Succeeded,
+                (Some(code), _) => Outcome::Failed(code),
+                (None, Some(signal)) => Outcome::Killed(signal),
+                (None, None) => Outcome::Failed(-1),
+            })
+        };
     loop {
         let remaining = deadline.map(|at| at.saturating_duration_since(Instant::now()));
         let slice = match (remaining, forward) {
             (Some(remaining), Some(_)) => remaining.min(FORWARD_POLL),
             (Some(remaining), None) => remaining,
             (None, Some(_)) => FORWARD_POLL,
-            (None, None) => return outcome(receiver.recv().expect("the waiter sends")),
+            (None, None) => return outcome(receiver.recv().expect("the waiter sends"), None),
         };
         match receiver.recv_timeout(slice) {
-            Ok(status) => return outcome(status),
+            Ok(status) => return outcome(status, forwarded),
             Err(RecvTimeoutError::Disconnected) => unreachable!("the waiter sends"),
             Err(RecvTimeoutError::Timeout) => {}
         }
         if let Some(signal) = forward.and_then(|forward| forward()) {
+            forwarded = Some(signal);
             // SAFETY: a plain syscall on our own child's process group.
             unsafe { libc::kill(-group, signal) };
         }

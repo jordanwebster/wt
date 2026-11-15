@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::error::{Error, Result, io_at};
-use crate::run::RunHook;
+use crate::run::{Outcome, RunHook};
 use crate::{Init, Tree, Wt, git, names, state, template};
 
 /// A tree's lifecycle hooks, from `[lifecycle]` in its config.
@@ -168,7 +168,8 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// The status is replaced by a rename, never rewritten in place, because a
 /// reader that caught it empty would take the hook for finished.
-const CREATE_WRAPPER: &str = r#"status="$1"; log="$2"; hook="$3"; tee="$4"; shift 4
+const CREATE_WRAPPER: &str = r#"trap : INT TERM HUP
+status="$1"; log="$2"; hook="$3"; tee="$4"; shift 4
 record() { printf '%s' "$1" > "$status.new" && mv -f "$status.new" "$status"; }
 record running
 : > "$log"
@@ -184,6 +185,15 @@ if [ "$code" = 0 ]; then
 fi
 record "$code"
 exit "$code""#;
+
+/// Runs a `start`, `stop` or `delete` hook. Whoever runs it hands it the
+/// lifecycle lock as fd 9 and, for a stop or a removal, the exclusive hold as
+/// fd 8, so both last until the hook ends even if that process dies; the
+/// hook runs with them closed, so services it leaves running never hold
+/// them. The signals are trapped, not ignored, so the hook still gets them
+/// and the wrapper stays until it has ended.
+const HOOK_WRAPPER: &str = r#"trap : INT TERM HUP
+sh -c "$1" 8>&- 9>&-"#;
 
 impl Wt {
     /// Plans a tree named `name` in the repository containing `repository`,
@@ -416,14 +426,18 @@ impl Wt {
     pub fn remove(&self, tree: &Tree, options: Remove) -> Result<Removed> {
         self.check_main(tree, options)?;
         // Held to the end, so nobody starts holding a tree being removed.
-        let _exclusive = self.check_holders(tree, options)?;
+        let exclusive = self.check_holders(tree, options)?;
         self.check_dirty(tree, options)?;
         let mut warnings = Vec::new();
         let branch = tree.branch();
         if tree.root.is_dir() {
             let lifecycle = tree.lock_lifecycle(options.hooks.forward)?;
             for hook in [Hook::Stop, Hook::Delete] {
-                match tree.run_locked(hook, options.hooks, &lifecycle) {
+                match tree.run_locked(hook, options.hooks, &lifecycle, exclusive.as_ref()) {
+                    // A person asked to give up: nothing more is torn down.
+                    Ok(ran) if matches!(ran.outcome, Outcome::Interrupted(_)) => {
+                        return Err(Error::Cancelled);
+                    }
                     Ok(ran) => {
                         let problem = if options.keep {
                             ran.problem()
@@ -441,6 +455,9 @@ impl Wt {
                 }
             }
             if !options.keep {
+                // Again, now: work may have been saved while removal waited
+                // for a running hook, or by the stop and delete hooks.
+                self.check_dirty(tree, options)?;
                 // What is left is either clean or ignored (build output, and
                 // the files wt itself rendered), so forcing is safe here.
                 let path = tree.root.to_string_lossy();
@@ -627,7 +644,11 @@ impl Tree {
                 .arg(if tee { "1" } else { "0" })
                 .args(before);
         } else {
-            command.arg("-c").arg(script);
+            command
+                .arg("-c")
+                .arg(HOOK_WRAPPER)
+                .arg(format!("wt-{}", hook.name()))
+                .arg(script);
         }
         env.apply(&mut command);
         // Tells `wt shell` and `wt exec` run from a hook not to hold the
@@ -665,7 +686,7 @@ impl Tree {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        crate::run::pass_lock(&mut command, &lock);
+        crate::run::pass_locks(&mut command, &lock, None);
         // SAFETY: setsid is async-signal-safe. A session of its own keeps
         // the hook running when the terminal that started it closes.
         unsafe {

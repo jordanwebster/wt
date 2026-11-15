@@ -395,3 +395,30 @@ fn new_returns_before_setup_finishes_and_wrappers_wait_for_it() {
         .unwrap();
     assert_eq!(stdout(&ready), "main build\n");
 }
+
+#[test]
+fn a_failed_copy_without_a_create_hook_is_recorded() {
+    let fx = Fixture::new();
+    // `blocker` is a file, so nothing can be copied to blocker/data.
+    fs::write(fx.repo.join("blocker"), "a file").unwrap();
+    git(&fx.repo, &["add", "blocker"]);
+    git(&fx.repo, &["commit", "-qm", "blocker"]);
+    fs::create_dir_all(fx.repo.join("data")).unwrap();
+    fs::write(fx.repo.join("data/x"), "x").unwrap();
+    fx.config("copy = [{ from = \"data\", to = \"blocker/data\" }]\n");
+    stdout(&fx.cli(&fx.repo, &["new", "t"]));
+    let tree = fx.wt().find(Some("app/t"), &fx.root).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while tree.create_status() == CreateStatus::NotRun {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the failed copy was never recorded"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(tree.create_status(), CreateStatus::Failed(1));
+    let log = fs::read_to_string(tree.create_log()).unwrap();
+    assert!(log.contains("copying inputs failed"), "{log}");
+    let listed = stdout(&fx.cli(&fx.repo, &["ls"]));
+    assert!(listed.contains("create failed (1)"), "{listed}");
+}

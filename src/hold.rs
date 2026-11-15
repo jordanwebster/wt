@@ -102,12 +102,15 @@ impl Tree {
     /// starts over.
     pub fn stop_when_unheld(&self, options: RunHook) -> Result<Stopped> {
         let path = self.holds_path();
+        // Opened once: after waiting for another hook it is this file, the
+        // tree's identity, that is locked again, so a tree removed and made
+        // again meanwhile is seen as gone rather than stopped.
+        let holds = match run::open_lock(self, HOLDS) {
+            Ok(file) => file,
+            Err(Error::NotFound(_)) => return Ok(Stopped::Gone),
+            Err(error) => return Err(error),
+        };
         loop {
-            let holds = match run::open_lock(self, HOLDS) {
-                Ok(file) => file,
-                Err(Error::NotFound(_)) => return Ok(Stopped::Gone),
-                Err(error) => return Err(error),
-            };
             run::wait_for_lock(&holds, false, options.forward, &path)?;
             // Removed, perhaps made again under the same path, or forgotten
             // by `wt rm --keep` while this waited.
@@ -121,11 +124,13 @@ impl Tree {
             let lifecycle = run::open_lock(self, LIFECYCLE)?;
             match lifecycle.try_lock() {
                 Ok(()) => {
-                    let ran = self.run_locked(Hook::Stop, options, &lifecycle)?;
+                    let ran = self.run_locked(Hook::Stop, options, &lifecycle, Some(&holds))?;
                     return Ok(Stopped::Ran(ran));
                 }
                 Err(TryLockError::WouldBlock) => {
-                    drop(holds);
+                    holds
+                        .unlock()
+                        .map_err(io_at("unlocking", &self.holds_path()))?;
                     let lifecycle_path = self.root.join(".wt").join(LIFECYCLE);
                     run::wait_for_lock(&lifecycle, false, options.forward, &lifecycle_path)?;
                 }

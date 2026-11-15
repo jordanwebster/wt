@@ -105,7 +105,13 @@ enum Cmd {
     Migrate,
     /// Copy a tree's inputs, as the first step of its background setup
     #[command(name = "__copy-inputs", hide = true)]
-    CopyInputs { path: PathBuf },
+    CopyInputs {
+        path: PathBuf,
+        /// Record a failure in create.status and create.log, as the create
+        /// hook's wrapper does when it runs the copy
+        #[arg(long)]
+        record: bool,
+    },
     /// Lease a slot in each pool and run a command while holding them
     With {
         #[arg(required = true)]
@@ -138,9 +144,14 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
         )));
     }
     match command {
-        Cmd::CopyInputs { path } => {
-            if let Err(error) = wt.find(None, &path)?.copy_inputs() {
-                eprintln!("wt: copying inputs failed: {error}");
+        Cmd::CopyInputs { path, record } => {
+            let tree = wt.find(None, &path)?;
+            if let Err(error) = tree.copy_inputs() {
+                let message = format!("wt: copying inputs failed: {error}\n");
+                eprint!("{message}");
+                if record {
+                    record_failed_copy(&tree, &message);
+                }
                 return Ok(ExitCode::FAILURE);
             }
         }
@@ -203,7 +214,10 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
                 ..Remove::default()
             };
             let removed = match wt.remove(&tree, options) {
-                Err(wt::Error::Cancelled) => return Ok(interrupted()),
+                Err(wt::Error::Cancelled) => {
+                    eprintln!("wt: gave up removing {}; it is still there", tree.id());
+                    return Ok(interrupted());
+                }
                 removed => removed?,
             };
             for warning in &removed.warnings {
@@ -322,6 +336,7 @@ fn set_up(tree: &Tree, no_create: bool, wait: bool) -> wt::Result<ExitCode> {
         let mut setup = Command::new(&copy[0]);
         setup
             .args(&copy[1..])
+            .arg("--record")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -346,6 +361,20 @@ fn set_up(tree: &Tree, no_create: bool, wait: bool) -> wt::Result<ExitCode> {
         tree.create_log().display()
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// Records a failed background copy where a failed create hook would be, so
+/// `wt ls` and the `[bin]` wrappers report it. The status is written by a
+/// rename, so a reader never finds it empty.
+fn record_failed_copy(tree: &Tree, message: &str) {
+    let directory = tree.root.join(".wt");
+    let _ = std::fs::create_dir_all(&directory);
+    let _ = std::fs::write(tree.create_log(), message);
+    let status = directory.join("create.status");
+    let new = directory.join("create.status.new");
+    if std::fs::write(&new, "1").is_ok() {
+        let _ = std::fs::rename(&new, &status);
+    }
 }
 
 /// Runs `hook` in one tree, or in every tree whose directory exists, and
