@@ -43,6 +43,8 @@ delete = "docker compose down -v"
 `compose.yml` reads `${POSTGRES_PORT}` for its port mapping. `wt start`
 brings the stack up, `wt stop` pauses it with its data intact (`wt stop
 --all` frees the whole machine), and `wt rm` takes it down with its volumes.
+A start or stop that takes longer than 5 minutes is killed; set
+`start_timeout` or `stop_timeout` in `[lifecycle]` to allow more.
 
 A tool that isn't started from inside the tree, such as an editor's MCP
 client, can't see the environment. Render the value into the file it reads
@@ -89,8 +91,9 @@ esac
 
 The recipes that need a database call `scripts/db` first. Both commands are
 safe to repeat, so wt doesn't need to know whether the database exists. If
-postgres is down when the tree is removed, `wt rm` stops with the delete
-hook's error; start it and retry, or `wt rm --force` to skip the drop.
+postgres is down when the tree is removed, `wt rm` reports the delete hook's
+error and removes the tree anyway, leaving its database behind: drop it by
+hand once postgres is back.
 
 ## One dev server, pointed at one tree at a time
 
@@ -355,31 +358,49 @@ forgets it, leaving the worktree for the tool to delete.
 ## Using wt from Rust
 
 The CLI is a thin layer over the library, which a program can use to make
-trees and start processes in them:
+trees, run things in them, and stop them once nothing uses them:
 
 ```rust
 use std::process::Command;
 
 let wt = wt::Wt::open()?;
-let tree = wt.new_tree(&repo, wt::NewTree::named("fix-scroll"))?.tree;
+// Checked locally and quickly; `None` when wt isn't configured for `repo`.
+// A taken name, path or branch is `Error::Taken`, so try another name.
+let Some(plan) = wt.plan(&repo, "fix-scroll")? else { return Ok(()) };
+let options = wt::NewTree {
+    owner: Some("my-tool".into()), // `tree.owner()` tells your trees apart
+    fresh_branch: true,            // a new branch, or `Error::Taken`
+    ..wt::NewTree::default()
+};
+let tree = wt.new_tree(&plan, options)?.tree;
 tree.copy_inputs()?;
-if let Some(mut create) = tree.hook(wt::Hook::Create)? {
-    create.status()?; // or spawn it and stream its output somewhere
-}
+tree.spawn_create()?; // detached; start, stop and removal wait for it
+
+// Hold the tree while you use it, and start it.
+let hold = tree.hold()?;
+tree.run_hook(wt::Hook::Start, wt::RunHook::default())?;
 let mut agent = Command::new("claude");
 tree.env()?.apply(&mut agent);
-agent.current_dir(&tree.root).spawn()?;
+agent.current_dir(&tree.root).spawn()?.wait()?;
 
-// Later, when the work is done. Check first, so the teardown hooks never
-// run on a tree that then can't be removed.
-wt.check_remove(&tree, wt::Remove::default())?;
-for hook in [wt::Hook::Stop, wt::Hook::Delete] {
-    if let Some(mut command) = tree.hook(hook)? {
-        command.status()?;
-    }
+// Done for now. Stop it once nothing else holds it either (a person's
+// `wt shell`, say). This blocks, so give it a thread. Hold the tree again
+// before it stops, and the stop waits until that hold goes too.
+drop(hold);
+let stopper = tree.clone();
+std::thread::spawn(move || stopper.stop_when_unheld(wt::RunHook::default()));
+
+// When the work is done. Removal never waits: a tree something holds, or
+// one with uncommitted work, is refused, and you decide what to do.
+let options = wt::Remove { delete_empty_branch: true, ..wt::Remove::default() };
+match wt.remove(&tree, options) {
+    Ok(removed) => removed.warnings.iter().for_each(|w| eprintln!("{w}")),
+    Err(wt::Error::Held(_) | wt::Error::Conflict(_)) => tree.disown()?,
+    Err(error) => return Err(error.into()),
 }
-wt.remove(&tree, wt::Remove::default())?;
 ```
 
-`Tree::hook` returns a ready-to-run `Command`, so the program decides where
-the output goes. The library never prints.
+Hooks the library runs write their output to `.wt/<hook>.log` unless
+`RunHook::output` says otherwise; the library never prints. `Tree::hook`
+still returns a hook as a plain `Command`, for a program that wants to run
+it itself, without wt's ordering or time limits.
