@@ -28,6 +28,48 @@ pub fn write_if_changed(path: &Path, contents: &[u8], mode: Option<u32>) -> Resu
 }
 
 pub fn write_atomic(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
+    let temporary = write_temporary(path, contents, mode)?;
+    let result = fs::rename(&temporary, path).map_err(io_at("replacing", path));
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// Writes `contents` to `path` only if nothing is there, never replacing a
+/// file that appears meanwhile, and returns whether it wrote. A finished
+/// temporary file is hard-linked into place, which fails rather than
+/// replaces, so a reader never sees it half-written either.
+pub fn write_new(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<bool> {
+    let temporary = write_temporary(path, contents, mode)?;
+    let linked = fs::hard_link(&temporary, path);
+    let _ = fs::remove_file(&temporary);
+    match linked {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        // A filesystem without hard links: create the file exclusively,
+        // which still never replaces one.
+        Err(_) => {
+            let mut file = match File::options().write(true).create_new(true).open(path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Ok(false);
+                }
+                Err(error) => return Err(io_at("creating", path)(error)),
+            };
+            file.write_all(contents).map_err(io_at("writing", path))?;
+            if let Some(mode) = mode {
+                fs::set_permissions(path, fs::Permissions::from_mode(mode))
+                    .map_err(io_at("setting the mode of", path))?;
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// A finished file beside `path`, for [`write_atomic`] and [`write_new`] to
+/// move into place.
+fn write_temporary(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<std::path::PathBuf> {
     let parent = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent).map_err(io_at("creating", parent))?;
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -44,12 +86,15 @@ pub fn write_atomic(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<(
             fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))
                 .map_err(io_at("setting the mode of", &temporary))?;
         }
-        fs::rename(&temporary, path).map_err(io_at("replacing", path))
+        Ok(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+    match result {
+        Ok(()) => Ok(temporary),
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            Err(error)
+        }
     }
-    result
 }
 
 /// Copies a file or directory, copy-on-write where the filesystem can clone.
@@ -123,6 +168,20 @@ mod tests {
         assert!(write_if_changed(&path, b"x", Some(0o755)).unwrap());
         assert!(!write_if_changed(&path, b"x", Some(0o755)).unwrap());
         assert!(write_if_changed(&path, b"y", Some(0o755)).unwrap());
+    }
+
+    #[test]
+    fn writes_new_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a/new.txt");
+        assert!(write_new(&path, b"first", Some(0o600)).unwrap());
+        assert!(!write_new(&path, b"second", None).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read_dir(dir.path().join("a")).unwrap().count(), 1);
     }
 
     #[test]

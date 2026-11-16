@@ -156,7 +156,11 @@ impl Tree {
         for (path, file) in &config.files {
             let content = template::render(&file.content, &vars, &format!("files.\"{path}\""))?;
             let destination = tree.root.join(path);
-            if file.keep && fs::symlink_metadata(&destination).is_ok() {
+            if file.keep {
+                // Never over a file that is there, even one made a moment ago.
+                if fs::symlink_metadata(&destination).is_err() {
+                    fsx::write_new(&destination, content.as_bytes(), file.mode)?;
+                }
                 continue;
             }
             fsx::write_if_changed(&destination, content.as_bytes(), file.mode)?;

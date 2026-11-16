@@ -387,3 +387,43 @@ fn a_kept_file_is_written_when_missing_and_never_overwritten() {
     stdout(&fx.cli(&tree.root, &["exec", "--", "true"]));
     assert_eq!(fs::read_to_string(&state).unwrap(), "tree = \"t\"\n");
 }
+
+#[test]
+fn a_kept_file_never_replaces_one_created_while_entering() {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let fx = Fixture::new();
+    fx.config("[files.\"state.toml\"]\ncontent = \"rendered\"\nkeep = true\n");
+    let tree = make(&fx.wt(), &fx.repo, wt::PlanRequest::named("t"))
+        .unwrap()
+        .tree;
+    let path = tree.root.join("state.toml");
+    let done = Arc::new(AtomicBool::new(false));
+    let entering = {
+        let (tree, done) = (tree.clone(), done.clone());
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                tree.env().unwrap();
+            }
+        })
+    };
+    // An application that makes the file itself whenever it is missing.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut clobbered = None;
+    while clobbered.is_none() && std::time::Instant::now() < deadline {
+        let _ = fs::remove_file(&path);
+        let Ok(file) = fs::File::options().write(true).create_new(true).open(&path) else {
+            continue;
+        };
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let mine = file.metadata().unwrap().ino();
+        if fs::metadata(&path).map(|there| there.ino()).ok() != Some(mine) {
+            clobbered = Some(fs::read_to_string(&path).unwrap_or_default());
+        }
+    }
+    done.store(true, Ordering::SeqCst);
+    entering.join().unwrap();
+    assert_eq!(clobbered, None, "wt replaced a file the application made");
+}
