@@ -104,7 +104,8 @@ read the same values from the environment, which has:
 - `WT_PORT_<NAME>` for each port;
 - everything in `[env]`;
 - `WT_IN_HOOK`, the hook's name, so a `wt exec` or `wt shell` the hook runs
-  doesn't hold the tree.
+  doesn't hold the tree while the hook is running (one started later, by a
+  service the hook left running, does).
 
 A tree runs one hook at a time: a start, stop or removal waits for a create
 hook that is still building, even after `wt new` has returned. The create
@@ -112,7 +113,8 @@ hook's output is kept in `.wt/create.log`, and `wt ls` shows whether it is
 still running or failed. Until it has succeeded, `[bin]` wrappers refuse to
 run, even if a binary is there: it may have been copied from the main
 checkout. Start, stop and delete hooks run in a process group of their own
-with no input, and are killed with that group after their time limit.
+with no input, and are killed with that group after their time limit, even
+if the wt that ran them has gone.
 
 **Git:** wt adds `.wt/`, rendered files and copied paths to the repository's
 `info/exclude`, so they don't show up in `git status`. wt does nothing

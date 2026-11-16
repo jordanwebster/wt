@@ -774,3 +774,59 @@ fn a_hook_keeps_its_locks_when_whatever_ran_it_is_killed() {
     wait_until("the stop to end", || t.try_hold().unwrap().is_some());
     assert!(t.root.exists());
 }
+
+#[test]
+fn a_service_a_start_hook_leaves_running_still_holds_through_wt_exec() {
+    let fx = Fixture::new();
+    let gate = fx.root.join("gate");
+    let pid = fx.root.join("service.pid");
+    // The service runs `wt exec` in its own tree once the hook has ended,
+    // with WT_IN_HOOK inherited from the hook.
+    fx.config(&format!(
+        "[lifecycle]\nstart = \"sh -c '{wait}; exec {WT} exec app/t -- sh -c \\\"echo \\\\$\\\\$ > {pid}; exec sleep 60\\\"' > /dev/null 2>&1 &\"\n",
+        wait = wait_for(&gate),
+        pid = pid.display(),
+    ));
+    let t = tree(&fx, "t");
+    assert!(
+        t.run_hook(Hook::Start, RunHook::default())
+            .unwrap()
+            .succeeded()
+    );
+    fs::write(&gate, "").unwrap();
+    wait_until("the service's command", || pid.exists());
+    assert_eq!(
+        t.in_use(),
+        InUse::Held,
+        "the service's wt exec skipped the hold"
+    );
+    kill(&pid);
+}
+
+#[test]
+fn a_hook_past_its_time_limit_is_killed_even_when_whatever_ran_it_is_gone() {
+    let fx = Fixture::new();
+    let started = fx.root.join("started");
+    fx.config(&format!(
+        "[lifecycle]\nstop_timeout = \"1s\"\nstop = \"touch {}; sleep 60\"\nstart = \"true\"\n",
+        started.display()
+    ));
+    let t = tree(&fx, "t");
+    let mut rm = cli(&fx, &fx.root, &["rm", "app/t"]).spawn().unwrap();
+    wait_until("the stop hook", || started.exists());
+    rm.kill().unwrap();
+    rm.wait().unwrap();
+
+    let starter = t.clone();
+    let start = Background::start(move || starter.run_hook(Hook::Start, RunHook::default()));
+    assert!(
+        start
+            .finish("a start after the hung stop")
+            .unwrap()
+            .succeeded()
+    );
+    assert!(
+        t.try_hold().unwrap().is_some(),
+        "the hold outlived the limit"
+    );
+}

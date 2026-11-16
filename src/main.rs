@@ -363,6 +363,16 @@ fn set_up(tree: &Tree, no_create: bool, wait: bool) -> wt::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Whether this process was started by one of `tree`'s hooks that is still
+/// running. `WT_IN_HOOK` alone doesn't say so: everything a hook leaves
+/// running inherits it, such as a service a start hook launches, whose own
+/// `wt exec` long after the hook has ended must hold the tree like any other.
+fn from_own_hook(tree: &Tree) -> bool {
+    std::env::var_os("WT_IN_HOOK").is_some()
+        && std::env::var("WT_TREE").is_ok_and(|id| id == tree.id())
+        && tree.hook_running()
+}
+
 /// Records a failed background copy where a failed create hook would be, so
 /// `wt ls` and the `[bin]` wrappers report it. The status is written by a
 /// rename, so a reader never finds it empty.
@@ -424,15 +434,16 @@ fn run_everywhere(
 }
 
 /// Runs `command` in the tree's environment as this process's child,
-/// holding the tree until it exits, unless run from a hook (`WT_IN_HOOK`),
-/// which must never hold its own tree. Stays in the current directory when
+/// holding the tree until it exits, unless run from one of the tree's own
+/// hooks while it runs, which must never hold its tree: a stop hook's
+/// `wt exec` would wait on its own stop. Stays in the current directory when
 /// it is inside the tree, and starts at the tree's root otherwise.
 fn enter(tree: &Tree, cwd: &Path, mut command: Command) -> wt::Result<ExitCode> {
     let env = tree.env()?;
     env.apply(&mut command);
     let inside = std::fs::canonicalize(cwd).is_ok_and(|cwd| cwd.starts_with(&tree.root));
     command.current_dir(if inside { cwd } else { &tree.root });
-    let hold = if std::env::var_os("WT_IN_HOOK").is_some() {
+    let hold = if from_own_hook(tree) {
         None
     } else {
         Some(match tree.try_hold()? {

@@ -186,14 +186,43 @@ fi
 record "$code"
 exit "$code""#;
 
-/// Runs a `start`, `stop` or `delete` hook. Whoever runs it hands it the
-/// lifecycle lock as fd 9 and, for a stop or a removal, the exclusive hold as
-/// fd 8, so both last until the hook ends even if that process dies; the
-/// hook runs with them closed, so services it leaves running never hold
-/// them. The signals are trapped, not ignored, so the hook still gets them
-/// and the wrapper stays until it has ended.
+/// Runs a `start`, `stop` or `delete` hook. Arguments: the hook, and the
+/// seconds after which the wrapper kills it.
+///
+/// Whoever runs it hands it the lifecycle lock as fd 9 and, for a stop or a
+/// removal, the exclusive hold as fd 8, so both last until the hook ends
+/// even if that process dies; the hook runs with them closed, so services it
+/// leaves running never hold them. The signals are trapped, not ignored, so
+/// the hook still gets them and the wrapper stays until it has ended.
+///
+/// The watchdog is what enforces the time limit once the process that ran
+/// the hook is gone, which would otherwise leave a hung hook holding the
+/// locks for good. It gives the runner's own, exact limit time to act first:
+/// it fires a little later, sending SIGTERM and then SIGKILL to the process
+/// group, wrapper included. It holds no lock and none of the hook's output.
 const HOOK_WRAPPER: &str = r#"trap : INT TERM HUP
-sh -c "$1" 8>&- 9>&-"#;
+watchdog=
+if [ -n "$2" ]; then
+  (
+    trap '' INT HUP
+    trap 'kill "$s" 2>/dev/null; exit 0' TERM
+    sleep "$2" & s=$!
+    wait "$s"
+    trap '' TERM
+    kill -TERM 0
+    sleep 3
+    kill -KILL 0
+  ) < /dev/null > /dev/null 2>&1 8>&- 9>&- &
+  watchdog=$!
+fi
+sh -c "$1" 8>&- 9>&-
+code=$?
+[ -n "$watchdog" ] && kill "$watchdog" 2>/dev/null
+exit "$code""#;
+
+/// How much later than the time limit a hook's own wrapper kills it: after
+/// the runner's SIGTERM, its grace and some slack.
+const WATCHDOG_SLACK: Duration = Duration::from_secs(5);
 
 impl Wt {
     /// Plans a tree named `name` in the repository containing `repository`,
@@ -644,11 +673,16 @@ impl Tree {
                 .arg(if tee { "1" } else { "0" })
                 .args(before);
         } else {
+            let watchdog = lifecycle
+                .time_limit(hook)
+                .map(|limit| format!("{:.3}", (limit + WATCHDOG_SLACK).as_secs_f64()))
+                .unwrap_or_default();
             command
                 .arg("-c")
                 .arg(HOOK_WRAPPER)
                 .arg(format!("wt-{}", hook.name()))
-                .arg(script);
+                .arg(script)
+                .arg(watchdog);
         }
         env.apply(&mut command);
         // Tells `wt shell` and `wt exec` run from a hook not to hold the

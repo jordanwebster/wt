@@ -158,6 +158,15 @@ impl Tree {
         }
     }
 
+    /// Whether one of the tree's hooks is running now: something holds its
+    /// lifecycle lock.
+    pub fn hook_running(&self) -> bool {
+        let Ok(file) = File::open(self.root.join(".wt").join(LIFECYCLE)) else {
+            return false;
+        };
+        matches!(file.try_lock_shared(), Err(TryLockError::WouldBlock))
+    }
+
     /// Whether a person pinned the tree running with `wt start`.
     pub fn pinned(&self) -> bool {
         self.root.join(PINNED).exists()
