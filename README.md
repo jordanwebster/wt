@@ -34,6 +34,8 @@ in `$WT_HOME` if that is set.
 A repository describes its trees in `.wt.toml`. For a repository where you
 can't commit one, put it in `~/.wt/repos/<label>/wt.toml` instead. When that
 exists it is used in place of the repository's file; the two aren't merged.
+A key wt doesn't know, such as one a newer wt added, is ignored with a
+warning naming it and the file; a wrong value is still an error.
 
 ```toml
 # Branch names for `wt new` without --branch. The first template whose
@@ -65,12 +67,16 @@ DATABASE_URL = "postgres://localhost:{{ports.server}}/app_{{name_snake}}"
 [files.".mcp.json"]
 content = """{ "url": "http://localhost:{{ports.web}}/mcp" }"""
 # mode = "0755"
+# keep = true                        # write it only when it is missing
 
 [lifecycle]
 create = "just setup"                # after the tree is made
 start  = "docker compose up -d"      # must be safe to repeat
 stop   = "docker compose stop"       # must be safe to repeat
 delete = "docker compose down -v"    # when the tree is removed, after stop
+# start_timeout = "5m"               # the defaults: a hook still running is
+# stop_timeout = "5m"                # killed, with everything it started
+# delete_timeout = "5m"              # that is still in its process group
 
 [pool.phone]
 size = 2
@@ -93,18 +99,32 @@ substitutions, with no logic. They can use:
 An unknown name is an error. A file that needs literal `{{` belongs in
 `copy` instead.
 
+**Kept files:** a rendered file is rewritten whenever the tree is entered,
+so edits to it are lost. For a file that is also state the tree edits,
+such as a tool's per-tree settings, set `keep = true`: wt writes it only
+when it is missing and never overwrites it. Changes to its template don't
+reach a file already there; delete the file and the next `wt exec`,
+`wt shell` or `wt env` renders it afresh.
+
 **Hooks** run with `sh -c` at the tree's root. They aren't templated: they
 read the same values from the environment, which has:
 
 - `WT_TREE` (`label/name`), `WT_ROOT`, `WT_NAME`, `WT_LABEL` and `WT_MAIN`;
 - `WT_BIN`, the tree's `.wt/bin`;
 - `WT_PORT_<NAME>` for each port;
-- everything in `[env]`.
+- everything in `[env]`;
+- `WT_IN_HOOK`, the hook's name, so a `wt exec` or `wt shell` the hook runs
+  doesn't hold the tree while the hook is running (one started later, by a
+  service the hook left running, does).
 
-The create hook's output is kept in `.wt/create.log`, and `wt ls` shows
-whether it is still running or failed. Until it has succeeded, `[bin]`
-wrappers refuse to run, even if a binary is there: it may have been copied
-from the main checkout.
+A tree runs one hook at a time: a start, stop or removal waits for a create
+hook that is still building, even after `wt new` has returned. The create
+hook's output is kept in `.wt/create.log`, and `wt ls` shows whether it is
+still running or failed. Until it has succeeded, `[bin]` wrappers refuse to
+run, even if a binary is there: it may have been copied from the main
+checkout. Start, stop and delete hooks run in a process group of their own
+with no input, and are killed with that group after their time limit, even
+if the wt that ran them has gone.
 
 **Git:** wt adds `.wt/`, rendered files and copied paths to the repository's
 `info/exclude`, so they don't show up in `git status`. wt does nothing
@@ -134,18 +154,19 @@ directory name unless `wt init --label` says otherwise.
 |---|---|
 | `wt new [label/]name [--from REF] [--branch B] [--set k=v] [--no-fetch] [--no-create] [--wait]` | Make a tree, and return as soon as it exists: copying its inputs and running its create hook carry on in the background (`--wait` does them first). It starts from origin's default branch, fetched first; if the fetch fails or takes over 30 s, it uses the copy fetched last. A branch that already exists, locally or on origin, is checked out. Your main checkout is never touched. |
 | `wt init [path] [--label L] [--name N] [--no-create] [--wait]` | Make an existing worktree, or the main checkout, a tree, and set it up as `new` does. Running it again keeps the tree's name and ports. |
-| `wt rm tree [--force] [--keep]` | Run stop and delete, then remove the worktree, keeping its branch. Refuses uncommitted or untracked work, or a failing hook, without `--force`. `--keep` still runs stop and delete, then leaves the worktree on disk and stops managing it. |
-| `wt ls` | Trees with their status, branch, path and ports. |
-| `wt start [tree \| --all]`, `wt stop [tree \| --all]` | Run the start or stop hook. |
-| `wt exec [tree] -- cmd` | Run a command in the tree's environment. Run from inside the tree, it stays in the current directory; otherwise it starts at the root. |
-| `wt shell [tree]` | A shell in the tree's environment. |
+| `wt rm tree [--force] [--keep]` | Run stop (unless the tree is already stopped) and delete, then remove the worktree, keeping its branch. Refuses at once, without `--force`, a tree with uncommitted or untracked work, or one in use (a `wt shell` or `wt exec` in it, or another program holding it). A failing hook is reported and removal goes on; interrupted, it stops and keeps the tree, and work saved meanwhile is refused as uncommitted. `--keep` still runs stop and delete, then leaves the worktree on disk and stops managing it. |
+| `wt ls` | Trees with their status (whether pinned or in use too), owner, branch, path and ports. |
+| `wt start [tree \| --all]` | Run the start hook, and pin the tree running: nothing stops it on its own until `wt stop`. |
+| `wt stop [tree \| --all]` | Unpin the tree and run its stop hook now, whatever is using it. |
+| `wt exec [tree] -- cmd` | Run a command in the tree's environment, holding the tree while it runs. Run from inside the tree, it stays in the current directory; otherwise it starts at the root. |
+| `wt shell [tree]` | A shell in the tree's environment, holding the tree until it exits. |
 | `wt env [tree]` | The environment as `export` lines, for `eval "$(wt env)"` or direnv. |
 | `wt path [tree]` | The tree's path. |
 | `wt with pool… -- cmd` | Run a command holding one slot of each pool. |
 | `wt leases` | Each pool slot that has been used: who holds it, who used it last, and when it will be retired. |
 | `wt migrate` | Import trees from wt 0.5, keeping their names and ports. |
 
-`exec` and `with` exit with the command's own status.
+`exec`, `shell` and `with` exit with the command's own status.
 
 If your shell's startup files move other directories in front of the
 tree's `.wt/bin` (in `wt shell`, for instance), add this to the end of
@@ -154,6 +175,29 @@ them:
 ```sh
 [ -n "$WT_BIN" ] && PATH="$WT_BIN:$PATH"
 ```
+
+## In use, pinned and owned
+
+A program that runs things in trees can stop a tree once nothing uses it,
+and start it again when something does. To make that safe:
+
+- **In use:** `wt shell` and `wt exec` hold the tree while their command
+  runs, as does a program using the library. Something the command leaves
+  running in the background doesn't, and neither do hooks or what they
+  start. `wt rm` refuses a tree in use, and a stop waits for the last
+  holder to go. A holder that crashes never leaves a stale hold.
+- **Pinned:** `wt start` pins a tree, so nothing stops it on its own.
+  `wt stop` unpins it.
+- **Owner:** a tree made by another program records it, and `wt ls` shows
+  it.
+- **Stopped:** once a stop hook succeeds, the tree is marked stopped, and
+  `wt rm` skips the stop hook (still running delete). A start, a stop that
+  fails, or anything holding the tree (which may start things by hand)
+  clears the mark. A reboot or a crash can only make the mark more true, so
+  it never skips a stop that was needed.
+
+These live in the tree's `.wt` directory, and go with it when it is
+removed.
 
 ## Pools
 
@@ -178,13 +222,16 @@ and releases the slot when `cmd` exits, however it exits.
 
 ```rust
 let wt = wt::Wt::open()?;
-let tree = wt.new_tree(&repo, wt::NewTree::named("fix-scroll"))?.tree;
-tree.copy_inputs()?; // then run tree.hook(wt::Hook::Create), if you want it
+let Some(plan) = wt.plan(&repo, "fix-scroll")? else { return Ok(()) }; // not configured
+let tree = wt.new_tree(&plan, wt::NewTree::default())?.tree;
+tree.copy_inputs()?;
+tree.spawn_create()?; // in the background
+let hold = tree.hold()?; // in use until dropped
 let mut agent = std::process::Command::new("claude");
 tree.env()?.apply(&mut agent);
 agent.current_dir(&tree.root).spawn()?;
 ```
 
-Hooks come back as ready-to-run commands from `Tree::hook`, so the program
-decides where their output goes. The library never prints. The
-[cookbook](docs/cookbook.md#using-wt-from-rust) has the whole lifecycle.
+The library never prints: hooks it runs write to `.wt/<hook>.log` unless
+told otherwise. The [cookbook](docs/cookbook.md#using-wt-from-rust) has the
+whole lifecycle: holding, stopping once nothing holds a tree, and removal.

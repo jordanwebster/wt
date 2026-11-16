@@ -12,24 +12,41 @@
 //! use std::process::Command;
 //!
 //! let wt = wt::Wt::open()?;
-//! let tree = wt.new_tree(&repo, wt::NewTree::named("fix-scroll"))?.tree;
+//! // Checked locally and quickly; `None` when wt isn't configured here.
+//! let Some(plan) = wt.plan(&repo, "fix-scroll")? else { return Ok(()) };
+//! let options = wt::NewTree {
+//!     owner: Some("my-tool".into()),
+//!     fresh_branch: true,
+//!     ..wt::NewTree::default()
+//! };
+//! let tree = wt.new_tree(&plan, options)?.tree;
 //! tree.copy_inputs()?;
-//! if let Some(mut create) = tree.hook(wt::Hook::Create)? {
-//!     create.status()?; // or spawn it and stream its output somewhere
-//! }
+//! tree.spawn_create()?; // in the background; start and stop wait for it
+//!
+//! // Hold the tree while it is in use, and start it.
+//! let hold = tree.hold()?;
+//! tree.run_hook(wt::Hook::Start, wt::RunHook::default())?;
 //! let mut agent = Command::new("claude");
 //! tree.env()?.apply(&mut agent);
-//! agent.current_dir(&tree.root).spawn()?;
+//! agent.current_dir(&tree.root).spawn()?.wait()?;
 //!
-//! // Later, when the work is done. Check first, so the teardown hooks never
-//! // run on a tree that then can't be removed.
-//! wt.check_remove(&tree, wt::Remove::default())?;
-//! for hook in [wt::Hook::Stop, wt::Hook::Delete] {
-//!     if let Some(mut command) = tree.hook(hook)? {
-//!         command.status()?;
-//!     }
+//! // Done for now: let go, and stop it once nobody else holds it either
+//! // (a person's `wt shell`, say). This blocks, so give it a thread.
+//! drop(hold);
+//! let stopper = tree.clone();
+//! std::thread::spawn(move || stopper.stop_when_unheld(wt::RunHook::default()));
+//!
+//! // Later, when the work is done. Removal never waits: a tree something
+//! // holds, or one with uncommitted work, is refused.
+//! let options = wt::Remove {
+//!     delete_empty_branch: true,
+//!     ..wt::Remove::default()
+//! };
+//! match wt.remove(&tree, options) {
+//!     Ok(removed) => removed.warnings.iter().for_each(|w| eprintln!("{w}")),
+//!     Err(wt::Error::Held(_) | wt::Error::Conflict(_)) => tree.disown()?,
+//!     Err(error) => return Err(error.into()),
 //! }
-//! wt.remove(&tree, wt::Remove::default())?;
 //! # Ok(())
 //! # }
 //! ```
@@ -38,11 +55,13 @@ pub mod config;
 mod error;
 mod fsx;
 mod git;
+mod hold;
 mod lifecycle;
 mod migrate;
 mod names;
 mod pool;
 mod ports;
+mod run;
 pub mod settings;
 pub mod state;
 mod template;
@@ -51,9 +70,11 @@ mod tree;
 use std::path::{Path, PathBuf};
 
 pub use error::{Error, Result};
-pub use lifecycle::{CreateStatus, Created, Hook, NewTree, Remove, Removed};
+pub use hold::{Hold, InUse, Stopped};
+pub use lifecycle::{CreateStatus, Created, Hook, NewTree, PlanRequest, Planned, Remove, Removed};
 pub use migrate::Imported;
 pub use pool::{Holder, Lease, Pool, Retired, SlotInfo};
+pub use run::{Forward, HookOutput, Outcome, Ran, RunHook};
 pub use settings::Settings;
 pub use tree::{Env, Tree};
 

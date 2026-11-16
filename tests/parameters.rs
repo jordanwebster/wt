@@ -7,7 +7,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
-use common::{Fixture, git, stdout};
+use common::{Fixture, git, make, stdout};
 use wt::Init;
 
 const CONFIG: &str = r#"
@@ -331,4 +331,99 @@ fn writes_wait_for_a_pending_import() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("wt migrate"), "{error}");
+}
+
+#[test]
+fn unknown_config_keys_are_ignored_with_a_warning_naming_the_file() {
+    let fx = Fixture::new();
+    fx.config("future_key = 1\n[lifecycle]\nfuture_hook = \"x\"\n[env]\nA = \"1\"\n");
+    let tree = make(&fx.wt(), &fx.repo, wt::PlanRequest::named("t"))
+        .unwrap()
+        .tree;
+    let output = fx.cli(&tree.root, &["exec", "--", "sh", "-c", "echo $A"]);
+    assert_eq!(stdout(&output), "1\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown key `future_key`"), "{stderr}");
+    assert!(
+        stderr.contains("unknown key `lifecycle.future_hook`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(".wt.toml"), "{stderr}");
+    let config = tree.config().unwrap();
+    assert_eq!(config.warnings.len(), 2, "{:?}", config.warnings);
+
+    // A wrong value is still an error.
+    fs::write(tree.root.join(".wt.toml"), "ports = \"web\"\n").unwrap();
+    assert!(tree.config().is_err());
+
+    // So is an unknown key in the machine settings, as a warning too.
+    fs::write(fx.home.join("config.toml"), "future = true\n").unwrap();
+    let wt = fx.wt();
+    assert!(wt.settings().warnings[0].contains("unknown key `future`"));
+}
+
+#[test]
+fn a_kept_file_is_written_when_missing_and_never_overwritten() {
+    let fx = Fixture::new();
+    fx.config(
+        "[files.\"state.toml\"]\ncontent = \"tree = \\\"{{name}}\\\"\\n\"\nkeep = true\n\
+         [files.\"rendered.txt\"]\ncontent = \"{{name}}\"\n",
+    );
+    let tree = make(&fx.wt(), &fx.repo, wt::PlanRequest::named("t"))
+        .unwrap()
+        .tree;
+    let state = tree.root.join("state.toml");
+    let rendered = tree.root.join("rendered.txt");
+    assert_eq!(fs::read_to_string(&state).unwrap(), "tree = \"t\"\n");
+    assert!(tree.config().unwrap().warnings.is_empty());
+
+    fs::write(&state, "tree = \"edited\"\n").unwrap();
+    fs::write(&rendered, "edited").unwrap();
+    tree.env().unwrap();
+    assert_eq!(fs::read_to_string(&state).unwrap(), "tree = \"edited\"\n");
+    assert_eq!(fs::read_to_string(&rendered).unwrap(), "t");
+
+    fs::remove_file(&state).unwrap();
+    stdout(&fx.cli(&tree.root, &["exec", "--", "true"]));
+    assert_eq!(fs::read_to_string(&state).unwrap(), "tree = \"t\"\n");
+}
+
+#[test]
+fn a_kept_file_never_replaces_one_created_while_entering() {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let fx = Fixture::new();
+    fx.config("[files.\"state.toml\"]\ncontent = \"rendered\"\nkeep = true\n");
+    let tree = make(&fx.wt(), &fx.repo, wt::PlanRequest::named("t"))
+        .unwrap()
+        .tree;
+    let path = tree.root.join("state.toml");
+    let done = Arc::new(AtomicBool::new(false));
+    let entering = {
+        let (tree, done) = (tree.clone(), done.clone());
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                tree.env().unwrap();
+            }
+        })
+    };
+    // An application that makes the file itself whenever it is missing.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut clobbered = None;
+    while clobbered.is_none() && std::time::Instant::now() < deadline {
+        let _ = fs::remove_file(&path);
+        let Ok(file) = fs::File::options().write(true).create_new(true).open(&path) else {
+            continue;
+        };
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let mine = file.metadata().unwrap().ino();
+        if fs::metadata(&path).map(|there| there.ino()).ok() != Some(mine) {
+            clobbered = Some(fs::read_to_string(&path).unwrap_or_default());
+        }
+    }
+    done.store(true, Ordering::SeqCst);
+    entering.join().unwrap();
+    assert_eq!(clobbered, None, "wt replaced a file the application made");
 }

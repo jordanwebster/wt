@@ -2,11 +2,13 @@ use std::ffi::OsString;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use wt::{CreateStatus, Hook, Init, NewTree, Remove, Tree, Wt};
+use wt::{
+    CreateStatus, Hook, HookOutput, InUse, Init, NewTree, PlanRequest, Remove, RunHook, Tree, Wt,
+};
 
 #[derive(Parser)]
 #[command(name = "wt", version, about = "Parameterised git worktrees")]
@@ -45,21 +47,21 @@ enum Cmd {
     #[command(alias = "remove")]
     Rm {
         tree: String,
-        /// Remove despite uncommitted changes or failing hooks
+        /// Remove despite uncommitted changes, and while something holds it
         #[arg(long)]
         force: bool,
         /// Leave the worktree on disk; only stop managing it
         #[arg(long)]
         keep: bool,
     },
-    /// Run a tree's start hook
+    /// Run a tree's start hook, and keep it running until `wt stop`
     Start {
         tree: Option<String>,
         /// Every tree
         #[arg(long, conflicts_with = "tree")]
         all: bool,
     },
-    /// Run a tree's stop hook
+    /// Run a tree's stop hook now, whatever holds it
     Stop {
         tree: Option<String>,
         /// Every tree
@@ -101,9 +103,15 @@ enum Cmd {
     Shell { tree: Option<String> },
     /// Import trees from wt 0.5, keeping their names and ports
     Migrate,
-    /// Set a tree up in the background: copy inputs, then run create
-    #[command(name = "__setup", hide = true)]
-    Setup { path: PathBuf },
+    /// Copy a tree's inputs, as the first step of its background setup
+    #[command(name = "__copy-inputs", hide = true)]
+    CopyInputs {
+        path: PathBuf,
+        /// Record a failure in create.status and create.log, as the create
+        /// hook's wrapper does when it runs the copy
+        #[arg(long)]
+        record: bool,
+    },
     /// Lease a slot in each pool and run a command while holding them
     With {
         #[arg(required = true)]
@@ -128,6 +136,9 @@ fn main() -> ExitCode {
 
 fn run(command: Cmd) -> wt::Result<ExitCode> {
     let wt = Wt::open()?;
+    for warning in &wt.settings().warnings {
+        eprintln!("wt: warning: {warning}");
+    }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if wt.needs_import() && !matches!(command, Cmd::Migrate) {
         return Err(wt::Error::State(format!(
@@ -136,7 +147,17 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
         )));
     }
     match command {
-        Cmd::Setup { path } => return set_up_here(&wt.find(None, &path)?),
+        Cmd::CopyInputs { path, record } => {
+            let tree = wt.find(None, &path)?;
+            if let Err(error) = tree.copy_inputs() {
+                let message = format!("wt: copying inputs failed: {error}\n");
+                eprint!("{message}");
+                if record {
+                    record_failed_copy(&tree, &message);
+                }
+                return Ok(ExitCode::FAILURE);
+            }
+        }
         Cmd::Migrate => {
             let imported = wt.import_legacy()?;
             for warning in &imported.warnings {
@@ -163,15 +184,21 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
                 Some((label, name)) => (Some(label.to_owned()), name.to_owned()),
                 None => (None, tree),
             };
+            let plan = wt.plan_new(
+                &cwd,
+                &PlanRequest {
+                    label,
+                    branch,
+                    vars: set.into_iter().collect(),
+                    ..PlanRequest::named(name)
+                },
+            )?;
             let request = NewTree {
-                label,
                 from,
-                branch,
-                vars: set.into_iter().collect(),
                 fetch: !no_fetch,
-                ..NewTree::named(name)
+                ..NewTree::default()
             };
-            let created = wt.new_tree(&cwd, request)?;
+            let created = wt.new_tree(&plan, request)?;
             for warning in &created.warnings {
                 eprintln!("wt: {warning}");
             }
@@ -181,31 +208,29 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
         }
         Cmd::Rm { tree, force, keep } => {
             let tree = wt.find(Some(&tree), &cwd)?;
-            let options = Remove { force, keep };
-            wt.check_remove(&tree, options)?;
-            let hooks: &[Hook] = if tree.root.is_dir() {
-                &[Hook::Stop, Hook::Delete]
-            } else {
-                eprintln!(
-                    "wt: {} is already gone from disk; not running its hooks",
-                    tree.id()
-                );
-                &[]
+            warn_about_config(&tree);
+            catch_for_hooks();
+            let options = Remove {
+                ignore_dirty: force,
+                ignore_holders: force,
+                keep,
+                hooks: foreground(),
+                ..Remove::default()
             };
-            for &hook in hooks {
-                if let Err((problem, _)) = run_hook(&tree, hook) {
-                    if !force {
-                        eprintln!("wt: {problem}; fix it and retry, or pass --force");
-                        return Ok(ExitCode::FAILURE);
-                    }
-                    eprintln!("wt: {problem}; carrying on because of --force");
+            let removed = match wt.remove(&tree, options) {
+                Err(wt::Error::Cancelled) => {
+                    eprintln!("wt: gave up removing {}; it is still there", tree.id());
+                    return Ok(interrupted());
                 }
+                removed => removed?,
+            };
+            for warning in &removed.warnings {
+                eprintln!("wt: {warning}");
             }
-            let removed = wt.remove(&tree, options)?;
-            let kept = removed
-                .branch
-                .map(|branch| format!("; kept branch {branch}"))
-                .unwrap_or_default();
+            let kept = match (&removed.branch, removed.branch_deleted) {
+                (Some(branch), false) => format!("; kept branch {branch}"),
+                _ => String::new(),
+            };
             eprintln!("wt: removed {}{kept}", tree.id());
         }
         Cmd::Start { tree, all } => return run_everywhere(&wt, &cwd, tree, all, Hook::Start),
@@ -223,7 +248,11 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
         }
         Cmd::Ls => list(&wt)?,
         Cmd::Path { tree } => println!("{}", wt.find(tree.as_deref(), &cwd)?.root.display()),
-        Cmd::Env { tree } => print!("{}", wt.find(tree.as_deref(), &cwd)?.env()?.to_shell()),
+        Cmd::Env { tree } => {
+            let tree = wt.find(tree.as_deref(), &cwd)?;
+            warn_about_config(&tree);
+            print!("{}", tree.env()?.to_shell());
+        }
         Cmd::Exec { tree, command } => {
             let tree = wt.find(tree.as_deref(), &cwd)?;
             let mut child = Command::new(&command[0]);
@@ -248,27 +277,35 @@ fn parse_set(value: &str) -> Result<(String, String), String> {
         .ok_or_else(|| format!("`{value}` should be KEY=VALUE"))
 }
 
+/// Hooks run from the command line: output on the terminal, and signals
+/// passed on, since a hook in a process group of its own no longer gets the
+/// terminal's.
+fn foreground() -> RunHook {
+    RunHook {
+        output: HookOutput::Inherit,
+        forward: Some(take_pending),
+    }
+}
+
 /// Runs a hook in the foreground; one the config doesn't declare succeeds.
 /// A failure carries a message and the exit code to pass on.
 fn run_hook(tree: &Tree, hook: Hook) -> Result<(), (String, u8)> {
     let what = format!("{}'s {} hook", tree.id(), hook.name());
-    let command = tree
-        .hook(hook)
-        .map_err(|error| (format!("couldn't prepare {what}: {error}"), 1))?;
-    let Some(mut command) = command else {
-        return Ok(());
-    };
-    eprintln!("wt: running {what}");
-    let status = command
-        .status()
-        .map_err(|error| (format!("couldn't run {what}: {error}"), 1))?;
-    match status.code() {
-        Some(0) => Ok(()),
-        Some(code) => Err((
-            format!("{what} failed (exit {code})"),
-            code.clamp(1, 255) as u8,
-        )),
-        None => Err((format!("{what} was killed by a signal"), 1)),
+    if tree.config().is_ok_and(|config| match hook {
+        Hook::Create => config.lifecycle.create.is_some(),
+        Hook::Start => config.lifecycle.start.is_some(),
+        Hook::Stop => config.lifecycle.stop.is_some(),
+        Hook::Delete => config.lifecycle.delete.is_some(),
+    }) {
+        eprintln!("wt: running {what}");
+    }
+    match tree.run_hook(hook, foreground()) {
+        Ok(ran) => match ran.problem() {
+            None => Ok(()),
+            Some(problem) => Err((problem, ran.exit_code())),
+        },
+        Err(wt::Error::Cancelled) => Err((format!("gave up waiting to run {what}"), 130)),
+        Err(error) => Err((format!("couldn't run {what}: {error}"), 1)),
     }
 }
 
@@ -277,38 +314,56 @@ fn run_hook(tree: &Tree, hook: Hook) -> Result<(), (String, u8)> {
 /// soon as the worktree exists. Copying a build directory and building
 /// take seconds to minutes; the [bin] wrappers refuse until it is done.
 fn set_up(tree: &Tree, no_create: bool, wait: bool) -> wt::Result<ExitCode> {
+    warn_about_config(tree);
     if no_create {
         tree.copy_inputs()?;
         return Ok(ExitCode::SUCCESS);
     }
     if wait {
         tree.copy_inputs()?;
-        return run_create(tree);
+        catch_for_hooks();
+        return Ok(match run_hook(tree, Hook::Create) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err((problem, code)) => {
+                eprintln!("wt: {problem}");
+                ExitCode::from(code)
+            }
+        });
     }
-    tree.mark_creating()?;
     let program = std::env::current_exe().map_err(|source| wt::Error::Io {
         context: "finding the wt binary".to_owned(),
         source,
     })?;
-    let mut setup = Command::new(program);
-    setup
-        .arg("__setup")
-        .arg(&tree.root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    // SAFETY: setsid is async-signal-safe. A session of its own keeps the
-    // setup running when the terminal that started it closes.
-    unsafe {
-        setup.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
+    let copy: Vec<OsString> = vec![
+        program.into(),
+        "__copy-inputs".into(),
+        tree.root.clone().into(),
+    ];
+    // Copying goes first in the create hook's own wrapper, so that it holds
+    // the tree's lifecycle lock from now until the build is done.
+    if tree.spawn_create_after(&copy)?.is_none() {
+        let mut setup = Command::new(&copy[0]);
+        setup
+            .args(&copy[1..])
+            .arg("--record")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        // SAFETY: setsid is async-signal-safe. A session of its own keeps the
+        // copy going when the terminal that started it closes.
+        unsafe {
+            setup.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        setup.spawn().map_err(|source| wt::Error::Io {
+            context: "starting the setup".to_owned(),
+            source,
+        })?;
+        eprintln!("wt: copying {}'s inputs in the background", tree.id());
+        return Ok(ExitCode::SUCCESS);
     }
-    setup.spawn().map_err(|source| wt::Error::Io {
-        context: "starting the setup".to_owned(),
-        source,
-    })?;
     eprintln!(
         "wt: setting {} up in the background; its output goes to {}",
         tree.id(),
@@ -317,37 +372,43 @@ fn set_up(tree: &Tree, no_create: bool, wait: bool) -> wt::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The background half of [`set_up`]. A failed copy is recorded where a
-/// failed create hook would be, so `wt ls` and the wrappers report it.
-fn set_up_here(tree: &Tree) -> wt::Result<ExitCode> {
-    if let Err(error) = tree.copy_inputs() {
-        let directory = tree.root.join(".wt");
-        let _ = std::fs::create_dir_all(&directory);
-        let _ = std::fs::write(
-            tree.create_log(),
-            format!("wt: copying inputs failed: {error}\n"),
-        );
-        let _ = std::fs::write(directory.join("create.status"), "1");
-        return Ok(ExitCode::FAILURE);
-    }
-    run_create(tree)
-}
-
-fn run_create(tree: &Tree) -> wt::Result<ExitCode> {
-    match run_hook(tree, Hook::Create) {
-        Ok(()) => Ok(ExitCode::SUCCESS),
-        Err((problem, code)) => {
-            eprintln!(
-                "wt: {problem}; its output is in {}",
-                tree.create_log().display()
-            );
-            Ok(ExitCode::from(code))
+/// Shows the keys of the tree's config this wt doesn't know and ignored. A
+/// config that doesn't load at all is reported by whatever needs it.
+fn warn_about_config(tree: &Tree) {
+    if let Ok(config) = tree.config() {
+        for warning in &config.warnings {
+            eprintln!("wt: warning: {warning}");
         }
     }
 }
 
+/// Whether this process was started by one of `tree`'s hooks that is still
+/// running. `WT_IN_HOOK` alone doesn't say so: everything a hook leaves
+/// running inherits it, such as a service a start hook launches, whose own
+/// `wt exec` long after the hook has ended must hold the tree like any other.
+fn from_own_hook(tree: &Tree) -> bool {
+    std::env::var_os("WT_IN_HOOK").is_some()
+        && std::env::var("WT_TREE").is_ok_and(|id| id == tree.id())
+        && tree.hook_running()
+}
+
+/// Records a failed background copy where a failed create hook would be, so
+/// `wt ls` and the `[bin]` wrappers report it. The status is written by a
+/// rename, so a reader never finds it empty.
+fn record_failed_copy(tree: &Tree, message: &str) {
+    let directory = tree.root.join(".wt");
+    let _ = std::fs::create_dir_all(&directory);
+    let _ = std::fs::write(tree.create_log(), message);
+    let status = directory.join("create.status");
+    let new = directory.join("create.status.new");
+    if std::fs::write(&new, "1").is_ok() {
+        let _ = std::fs::rename(&new, &status);
+    }
+}
+
 /// Runs `hook` in one tree, or in every tree whose directory exists, and
-/// fails if any run failed.
+/// fails if any run failed. `start` pins each tree, so nothing stops it on
+/// its own, and `stop` unpins it.
 fn run_everywhere(
     wt: &Wt,
     cwd: &Path,
@@ -363,10 +424,25 @@ fn run_everywhere(
     } else {
         vec![wt.find(tree.as_deref(), cwd)?]
     };
+    catch_for_hooks();
     let mut failed = false;
     for tree in &trees {
-        if let Err((problem, _)) = run_hook(tree, hook) {
+        warn_about_config(tree);
+        let pinning = match hook {
+            Hook::Start => tree.pin(),
+            Hook::Stop => tree.unpin(),
+            _ => Ok(()),
+        };
+        if let Err(error) = pinning {
+            eprintln!("wt: {error}");
+            failed = true;
+            continue;
+        }
+        if let Err((problem, code)) = run_hook(tree, hook) {
             eprintln!("wt: {problem}");
+            if code == 130 || INTERRUPTED.load(Ordering::SeqCst) {
+                return Ok(interrupted());
+            }
             failed = true;
         }
     }
@@ -377,24 +453,38 @@ fn run_everywhere(
     })
 }
 
-/// Replaces this process with `command`, run in the tree's environment.
-/// Stays in the current directory when it is inside the tree, and starts at
-/// the tree's root otherwise.
+/// Runs `command` in the tree's environment as this process's child,
+/// holding the tree until it exits, unless run from one of the tree's own
+/// hooks while it runs, which must never hold its tree: a stop hook's
+/// `wt exec` would wait on its own stop. Stays in the current directory when
+/// it is inside the tree, and starts at the tree's root otherwise.
 fn enter(tree: &Tree, cwd: &Path, mut command: Command) -> wt::Result<ExitCode> {
+    warn_about_config(tree);
     let env = tree.env()?;
     env.apply(&mut command);
     let inside = std::fs::canonicalize(cwd).is_ok_and(|cwd| cwd.starts_with(&tree.root));
     command.current_dir(if inside { cwd } else { &tree.root });
-    let error = command.exec();
-    eprintln!(
-        "wt: couldn't run {}: {error}",
-        command.get_program().to_string_lossy()
-    );
-    Ok(ExitCode::from(127))
+    let hold = if from_own_hook(tree) {
+        None
+    } else {
+        Some(match tree.try_hold()? {
+            Some(hold) => hold,
+            None => {
+                eprintln!("wt: waiting for {}'s stop hook to finish", tree.id());
+                tree.hold()?
+            }
+        })
+    };
+    // The hold's file isn't inherited, so whatever the command leaves
+    // running doesn't keep the tree held once this process is gone.
+    forward_termination();
+    let code = run_as_parent(command);
+    drop(hold);
+    Ok(code)
 }
 
 fn list(wt: &Wt) -> wt::Result<()> {
-    let rows: Vec<[String; 5]> = wt
+    let rows: Vec<[String; 6]> = wt
         .list()?
         .iter()
         .map(|tree| {
@@ -413,23 +503,33 @@ fn list(wt: &Wt) -> wt::Result<()> {
             let status = if !exists {
                 "missing".to_owned()
             } else {
-                match tree.create_status() {
+                let mut status = vec![match tree.create_status() {
                     CreateStatus::NotRun | CreateStatus::Succeeded => "ready".to_owned(),
                     CreateStatus::Running => "creating".to_owned(),
                     CreateStatus::Failed(code) => format!("create failed ({code})"),
+                }];
+                if tree.pinned() {
+                    status.push("pinned".to_owned());
                 }
+                match tree.in_use() {
+                    InUse::No => {}
+                    InUse::Held => status.push("in use".to_owned()),
+                    InUse::Stopping => status.push("stopping".to_owned()),
+                }
+                status.join(", ")
             };
             [
                 tree.id(),
                 status,
+                tree.owner().unwrap_or_default(),
                 branch,
                 tree.root.display().to_string(),
                 ports,
             ]
         })
         .collect();
-    let header = ["TREE", "STATUS", "BRANCH", "PATH", "PORTS"].map(str::to_owned);
-    let widths: Vec<usize> = (0..4)
+    let header = ["TREE", "STATUS", "OWNER", "BRANCH", "PATH", "PORTS"].map(str::to_owned);
+    let widths: Vec<usize> = (0..5)
         .map(|column| {
             std::iter::once(&header)
                 .chain(&rows)
@@ -443,7 +543,7 @@ fn list(wt: &Wt) -> wt::Result<()> {
         for (cell, width) in row.iter().zip(&widths) {
             line.push_str(&format!("{cell:width$}  "));
         }
-        line.push_str(&row[4]);
+        line.push_str(&row[5]);
         println!("{}", line.trim_end());
     }
     Ok(())
@@ -461,6 +561,7 @@ fn with(wt: &Wt, cwd: &Path, pools: &[String], command: &[OsString]) -> wt::Resu
     let mut child = Command::new(&command[0]);
     child.args(&command[1..]).current_dir(cwd);
     if let Some(tree) = &tree {
+        warn_about_config(tree);
         tree.env()?.apply(&mut child);
     }
     let pools: Vec<&str> = pools.iter().map(String::as_str).collect();
@@ -483,6 +584,48 @@ fn with(wt: &Wt, cwd: &Path, pools: &[String], command: &[OsString]) -> wt::Resu
 
 static CHILD: AtomicI32 = AtomicI32::new(0);
 static PENDING: AtomicI32 = AtomicI32::new(0);
+/// A signal was passed on to a hook, so `--all` stops at that tree.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// For [`wt::RunHook::forward`]: the termination signal that arrived since
+/// it was last asked, if any.
+fn take_pending() -> Option<i32> {
+    let signal = PENDING.swap(0, Ordering::SeqCst);
+    (signal != 0).then(|| {
+        INTERRUPTED.store(true, Ordering::SeqCst);
+        signal
+    })
+}
+
+fn interrupted() -> ExitCode {
+    ExitCode::from(130)
+}
+
+extern "C" fn record(signal: libc::c_int) {
+    PENDING.store(signal, Ordering::SeqCst);
+}
+
+/// Records SIGINT, SIGTERM and SIGHUP for [`take_pending`] while hooks run.
+/// Without SA_RESTART, so that a wait on a lock behind a long build is
+/// interrupted and wt can give up. A signal the caller already ignored (as
+/// under `nohup`) stays ignored.
+fn catch_for_hooks() {
+    // SAFETY: the dispositions are changed while this process has a single
+    // thread, and the handler only stores to an atomic.
+    unsafe {
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = record as *const () as libc::sighandler_t;
+            action.sa_flags = 0;
+            libc::sigemptyset(&mut action.sa_mask);
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(signal, &action, &mut previous);
+            if previous.sa_sigaction == libc::SIG_IGN {
+                libc::sigaction(signal, &previous, std::ptr::null_mut());
+            }
+        }
+    }
+}
 
 extern "C" fn forward(signal: libc::c_int) {
     let child = CHILD.load(Ordering::SeqCst);

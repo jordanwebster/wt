@@ -2,8 +2,11 @@
 //! `~/.wt/repos/<label>/wt.toml`.
 //!
 //! Parsing goes through `toml::Table` by hand rather than serde so that every
-//! unknown key in a file is reported at once, and keys from older versions of
-//! wt name their replacement.
+//! problem in a file is reported at once, and keys from older versions of wt
+//! name their replacement.
+//!
+//! A key wt doesn't know is ignored with a warning rather than refused, so a
+//! file using a key a newer wt added still works with an older one.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,6 +33,8 @@ pub struct Config {
     pub files: BTreeMap<String, FileEntry>,
     pub lifecycle: Lifecycle,
     pub pools: BTreeMap<String, PoolConfig>,
+    /// Keys this wt doesn't know, which it ignored, for the caller to show.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +49,10 @@ pub struct CopyEntry {
 pub struct FileEntry {
     pub content: String,
     pub mode: Option<u32>,
+    /// Written only when the file is missing, and never overwritten: for a
+    /// file that is also state the tree edits. Changes to the template
+    /// don't reach a file already there.
+    pub keep: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -52,6 +61,29 @@ pub struct Lifecycle {
     pub start: Option<String>,
     pub stop: Option<String>,
     pub delete: Option<String>,
+    /// How long `start` may run before its process group is killed.
+    pub start_timeout: Option<Duration>,
+    pub stop_timeout: Option<Duration>,
+    pub delete_timeout: Option<Duration>,
+}
+
+/// A hook's time limit when the config doesn't set one.
+pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+impl Lifecycle {
+    /// How long `hook` may run. `create` has no limit: a build takes as long
+    /// as it takes. The others do, because a stop that hangs would keep
+    /// every holder waiting on it, and a start or delete that never returns
+    /// would hold the lifecycle lock for good.
+    pub fn time_limit(&self, hook: crate::Hook) -> Option<Duration> {
+        let set = match hook {
+            crate::Hook::Create => return None,
+            crate::Hook::Start => self.start_timeout,
+            crate::Hook::Stop => self.stop_timeout,
+            crate::Hook::Delete => self.delete_timeout,
+        };
+        Some(set.unwrap_or(DEFAULT_HOOK_TIMEOUT))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -87,7 +119,12 @@ impl Config {
 
     pub fn from_file(path: &Path) -> Result<Config> {
         let text = std::fs::read_to_string(path).map_err(io_at("reading", path))?;
-        Self::parse(&text).map_err(|error| Error::Config(format!("{}: {error}", path.display())))
+        let mut config = Self::parse(&text)
+            .map_err(|error| Error::Config(format!("{}: {error}", path.display())))?;
+        for warning in &mut config.warnings {
+            *warning = format!("{}: {warning}", path.display());
+        }
+        Ok(config)
     }
 
     pub fn parse(text: &str) -> Result<Config, String> {
@@ -152,7 +189,9 @@ impl Config {
         if let Some(value) = table.get("pool") {
             config.pools = errors.pools(value, "pool", false);
         }
-        errors.finish(config)
+        let (mut config, warnings) = errors.finish(config)?;
+        config.warnings = warnings;
+        Ok(config)
     }
 }
 
@@ -203,25 +242,31 @@ pub(crate) fn duration(text: &str) -> Option<Duration> {
     }
 }
 
-/// Collects every problem in a file so they can be reported together.
+/// Collects every problem in a file so they can be reported together, and
+/// the unknown keys that are only warned about.
 #[derive(Default)]
-pub(crate) struct Errors(Vec<String>);
+pub(crate) struct Errors {
+    errors: Vec<String>,
+    warnings: Vec<String>,
+}
 
 impl Errors {
     pub(crate) fn push(&mut self, message: impl Into<String>) {
-        self.0.push(message.into());
+        self.errors.push(message.into());
     }
 
-    pub(crate) fn finish<T>(self, value: T) -> Result<T, String> {
-        if self.0.is_empty() {
-            Ok(value)
+    /// The value and the warnings, or every error at once.
+    pub(crate) fn finish<T>(self, value: T) -> Result<(T, Vec<String>), String> {
+        if self.errors.is_empty() {
+            Ok((value, self.warnings))
         } else {
-            Err(self.0.join("\n  "))
+            Err(self.errors.join("\n  "))
         }
     }
 
-    /// Reports keys of `table` outside `allowed`, naming the replacement of
-    /// any in `removed`.
+    /// Reports keys of `table` outside `allowed`: one in `removed`, from an
+    /// older wt, is an error naming its replacement; any other is ignored
+    /// with a warning, since it may be one a newer wt knows.
     pub(crate) fn keys(
         &mut self,
         table: &Table,
@@ -236,8 +281,8 @@ impl Errors {
             let path = format!("{prefix}{key}");
             match removed.iter().find(|(old, _)| old == key) {
                 Some((_, instead)) => self.push(format!("`{path}` was removed: {instead}")),
-                None => self.push(format!(
-                    "unknown key `{path}`; expected one of: {}",
+                None => self.warnings.push(format!(
+                    "unknown key `{path}` ignored; this wt knows: {}",
                     allowed.join(", ")
                 )),
             }
@@ -374,7 +419,7 @@ impl Errors {
             self.keys(
                 entry,
                 &format!("{at}."),
-                &["content", "mode"],
+                &["content", "mode", "keep"],
                 &[
                     ("marker", "removed: delete it"),
                     (
@@ -396,9 +441,23 @@ impl Errors {
                 }
                 mode
             });
+            let keep = entry.get("keep").is_some_and(|v| {
+                let keep = v.as_bool();
+                if keep.is_none() {
+                    self.push(format!("`{at}.keep` must be true or false"));
+                }
+                keep.unwrap_or(false)
+            });
             match content {
                 Some(content) => {
-                    files.insert(path.clone(), FileEntry { content, mode });
+                    files.insert(
+                        path.clone(),
+                        FileEntry {
+                            content,
+                            mode,
+                            keep,
+                        },
+                    );
                 }
                 None => self.push(format!("`{at}` needs `content`")),
             }
@@ -414,7 +473,15 @@ impl Errors {
         self.keys(
             table,
             "lifecycle.",
-            &["create", "start", "stop", "delete"],
+            &[
+                "create",
+                "start",
+                "stop",
+                "delete",
+                "start_timeout",
+                "stop_timeout",
+                "delete_timeout",
+            ],
             &[("after_new", "renamed to lifecycle.create")],
         );
         let mut hook = |key: &str| {
@@ -426,6 +493,14 @@ impl Errors {
         lifecycle.start = hook("start");
         lifecycle.stop = hook("stop");
         lifecycle.delete = hook("delete");
+        let mut limit = |key: &str| {
+            table
+                .get(key)
+                .and_then(|v| self.duration(v, &format!("lifecycle.{key}")))
+        };
+        lifecycle.start_timeout = limit("start_timeout");
+        lifecycle.stop_timeout = limit("stop_timeout");
+        lifecycle.delete_timeout = limit("delete_timeout");
         lifecycle
     }
 
@@ -445,17 +520,27 @@ impl Errors {
         } else {
             &["size", "name", "wait", "acquire", "idle", "retire"]
         };
+        // Keys this wt knows but only a repository's config may set: an
+        // error in the machine settings, not an unknown key to ignore.
+        let repository_only: &[(&str, &str)] = if sizing_only {
+            &[
+                ("name", "only a repository's config can set it"),
+                ("acquire", "only a repository's config can set it"),
+                ("retire", "only a repository's config can set it"),
+            ]
+        } else {
+            &[]
+        };
         for (name, pool) in table {
             let at = format!("{prefix}.{name}");
             self.name(name, "a pool");
             let Some(pool) = self.table(pool, &at) else {
                 continue;
             };
-            self.keys(
-                pool,
-                &format!("{at}."),
-                allowed,
-                &[
+            let removed: Vec<(&str, &str)> = repository_only
+                .iter()
+                .copied()
+                .chain([
                     ("count", "renamed to `size`"),
                     ("keep", "removed: a tree now prefers the slot it used last"),
                     (
@@ -471,9 +556,11 @@ impl Errors {
                         "tied_to",
                         "removed: pools are shared by name across the machine",
                     ),
-                ],
-            );
-            let get = |key: &str| pool.get(key);
+                ])
+                .collect();
+            self.keys(pool, &format!("{at}."), allowed, &removed);
+            // Only what `allowed` names is read: anything else was ignored.
+            let get = |key: &str| pool.get(key).filter(|_| allowed.contains(&key));
             let config = PoolConfig {
                 size: get("size").and_then(|v| self.size(v, &format!("{at}.size"))),
                 name: get("name").and_then(|v| self.string(v, &format!("{at}.name"))),
@@ -516,6 +603,7 @@ mod tests {
             [lifecycle]
             create = "just build"
             delete = "just clean"
+            stop_timeout = "30s"
 
             [pool.iphone]
             size = 2
@@ -532,6 +620,15 @@ mod tests {
         assert_eq!(config.bin["amux"], "target/debug/amux");
         assert_eq!(config.files[".mcp.json"].mode, Some(0o644));
         assert_eq!(config.lifecycle.create.as_deref(), Some("just build"));
+        assert_eq!(
+            config.lifecycle.time_limit(crate::Hook::Stop),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            config.lifecycle.time_limit(crate::Hook::Start),
+            Some(DEFAULT_HOOK_TIMEOUT)
+        );
+        assert_eq!(config.lifecycle.time_limit(crate::Hook::Create), None);
         assert_eq!(
             config.pools["iphone"].wait,
             Some(Duration::from_secs(45 * 60))
@@ -554,7 +651,8 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("`bin` is now a table"), "{error}");
         assert!(error.contains("`commands` was removed"), "{error}");
-        assert!(error.contains("unknown key `unknown`"), "{error}");
+        // A key no wt knew is only a warning.
+        assert!(!error.contains("unknown"), "{error}");
         assert!(error.contains("lifecycle.create"), "{error}");
         assert!(
             error.contains("`pool.p.count` was removed: renamed to `size`"),
@@ -567,6 +665,18 @@ mod tests {
         let error = Config::parse("copy = [\"../x\"]\n[bin]\nx = \"/usr/bin/x\"").unwrap_err();
         assert!(error.contains("copy"), "{error}");
         assert!(error.contains("bin.x"), "{error}");
+    }
+
+    #[test]
+    fn unknown_keys_are_warnings_and_ignored() {
+        let config = Config::parse(
+            "later = 1\n[lifecycle]\nstop = \"x\"\nlater = \"y\"\n[pool.p]\nlater = 2\n",
+        )
+        .unwrap();
+        assert_eq!(config.lifecycle.stop.as_deref(), Some("x"));
+        assert_eq!(config.warnings.len(), 3, "{:?}", config.warnings);
+        assert!(config.warnings[0].contains("unknown key `later` ignored"));
+        assert!(Config::parse("ports = 3\nlater = 1\n").is_err());
     }
 
     #[test]
