@@ -14,6 +14,8 @@ pub struct Settings {
     pub ports: PortGeometry,
     /// Machine sizing for pools: only `size`, `wait` and `idle` are set.
     pub pools: BTreeMap<String, PoolConfig>,
+    /// Keys this wt doesn't know, which it ignored, for the caller to show.
+    pub warnings: Vec<String>,
 }
 
 /// Port `p` of the tree in slot `s` is `base + s * stride + p`.
@@ -40,8 +42,12 @@ impl Settings {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(io_at("reading", &path)(error)),
         };
-        Self::parse(&text, home)
-            .map_err(|error| Error::Config(format!("{}: {error}", path.display())))
+        let mut settings = Self::parse(&text, home)
+            .map_err(|error| Error::Config(format!("{}: {error}", path.display())))?;
+        for warning in &mut settings.warnings {
+            *warning = format!("{}: {warning}", path.display());
+        }
+        Ok(settings)
     }
 
     pub fn parse(text: &str, home: &Path) -> Result<Settings, String> {
@@ -77,6 +83,7 @@ impl Settings {
             trees_dir: home.join("trees"),
             ports: PortGeometry::default(),
             pools: BTreeMap::new(),
+            warnings: Vec::new(),
         };
         if let Some(value) = table.get("trees_dir")
             && let Some(path) = errors.string(value, "trees_dir")
@@ -114,7 +121,9 @@ impl Settings {
         if let Some(value) = table.get("pool") {
             settings.pools = errors.pools(value, "pool", true);
         }
-        errors.finish(settings)
+        let (mut settings, warnings) = errors.finish(settings)?;
+        settings.warnings = warnings;
+        Ok(settings)
     }
 }
 

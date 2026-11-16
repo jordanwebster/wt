@@ -34,6 +34,8 @@ in `$WT_HOME` if that is set.
 A repository describes its trees in `.wt.toml`. For a repository where you
 can't commit one, put it in `~/.wt/repos/<label>/wt.toml` instead. When that
 exists it is used in place of the repository's file; the two aren't merged.
+A key wt doesn't know, such as one a newer wt added, is ignored with a
+warning naming it and the file; a wrong value is still an error.
 
 ```toml
 # Branch names for `wt new` without --branch. The first template whose

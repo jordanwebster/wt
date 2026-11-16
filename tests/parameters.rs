@@ -7,7 +7,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
-use common::{Fixture, git, stdout};
+use common::{Fixture, git, make, stdout};
 use wt::Init;
 
 const CONFIG: &str = r#"
@@ -331,4 +331,33 @@ fn writes_wait_for_a_pending_import() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("wt migrate"), "{error}");
+}
+
+#[test]
+fn unknown_config_keys_are_ignored_with_a_warning_naming_the_file() {
+    let fx = Fixture::new();
+    fx.config("future_key = 1\n[lifecycle]\nfuture_hook = \"x\"\n[env]\nA = \"1\"\n");
+    let tree = make(&fx.wt(), &fx.repo, wt::PlanRequest::named("t"))
+        .unwrap()
+        .tree;
+    let output = fx.cli(&tree.root, &["exec", "--", "sh", "-c", "echo $A"]);
+    assert_eq!(stdout(&output), "1\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown key `future_key`"), "{stderr}");
+    assert!(
+        stderr.contains("unknown key `lifecycle.future_hook`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(".wt.toml"), "{stderr}");
+    let config = tree.config().unwrap();
+    assert_eq!(config.warnings.len(), 2, "{:?}", config.warnings);
+
+    // A wrong value is still an error.
+    fs::write(tree.root.join(".wt.toml"), "ports = \"web\"\n").unwrap();
+    assert!(tree.config().is_err());
+
+    // So is an unknown key in the machine settings, as a warning too.
+    fs::write(fx.home.join("config.toml"), "future = true\n").unwrap();
+    let wt = fx.wt();
+    assert!(wt.settings().warnings[0].contains("unknown key `future`"));
 }

@@ -136,6 +136,9 @@ fn main() -> ExitCode {
 
 fn run(command: Cmd) -> wt::Result<ExitCode> {
     let wt = Wt::open()?;
+    for warning in &wt.settings().warnings {
+        eprintln!("wt: warning: {warning}");
+    }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if wt.needs_import() && !matches!(command, Cmd::Migrate) {
         return Err(wt::Error::State(format!(
@@ -205,6 +208,7 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
         }
         Cmd::Rm { tree, force, keep } => {
             let tree = wt.find(Some(&tree), &cwd)?;
+            warn_about_config(&tree);
             catch_for_hooks();
             let options = Remove {
                 ignore_dirty: force,
@@ -244,7 +248,11 @@ fn run(command: Cmd) -> wt::Result<ExitCode> {
         }
         Cmd::Ls => list(&wt)?,
         Cmd::Path { tree } => println!("{}", wt.find(tree.as_deref(), &cwd)?.root.display()),
-        Cmd::Env { tree } => print!("{}", wt.find(tree.as_deref(), &cwd)?.env()?.to_shell()),
+        Cmd::Env { tree } => {
+            let tree = wt.find(tree.as_deref(), &cwd)?;
+            warn_about_config(&tree);
+            print!("{}", tree.env()?.to_shell());
+        }
         Cmd::Exec { tree, command } => {
             let tree = wt.find(tree.as_deref(), &cwd)?;
             let mut child = Command::new(&command[0]);
@@ -306,6 +314,7 @@ fn run_hook(tree: &Tree, hook: Hook) -> Result<(), (String, u8)> {
 /// soon as the worktree exists. Copying a build directory and building
 /// take seconds to minutes; the [bin] wrappers refuse until it is done.
 fn set_up(tree: &Tree, no_create: bool, wait: bool) -> wt::Result<ExitCode> {
+    warn_about_config(tree);
     if no_create {
         tree.copy_inputs()?;
         return Ok(ExitCode::SUCCESS);
@@ -363,6 +372,16 @@ fn set_up(tree: &Tree, no_create: bool, wait: bool) -> wt::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Shows the keys of the tree's config this wt doesn't know and ignored. A
+/// config that doesn't load at all is reported by whatever needs it.
+fn warn_about_config(tree: &Tree) {
+    if let Ok(config) = tree.config() {
+        for warning in &config.warnings {
+            eprintln!("wt: warning: {warning}");
+        }
+    }
+}
+
 /// Whether this process was started by one of `tree`'s hooks that is still
 /// running. `WT_IN_HOOK` alone doesn't say so: everything a hook leaves
 /// running inherits it, such as a service a start hook launches, whose own
@@ -408,6 +427,7 @@ fn run_everywhere(
     catch_for_hooks();
     let mut failed = false;
     for tree in &trees {
+        warn_about_config(tree);
         let pinning = match hook {
             Hook::Start => tree.pin(),
             Hook::Stop => tree.unpin(),
@@ -439,6 +459,7 @@ fn run_everywhere(
 /// `wt exec` would wait on its own stop. Stays in the current directory when
 /// it is inside the tree, and starts at the tree's root otherwise.
 fn enter(tree: &Tree, cwd: &Path, mut command: Command) -> wt::Result<ExitCode> {
+    warn_about_config(tree);
     let env = tree.env()?;
     env.apply(&mut command);
     let inside = std::fs::canonicalize(cwd).is_ok_and(|cwd| cwd.starts_with(&tree.root));
@@ -540,6 +561,7 @@ fn with(wt: &Wt, cwd: &Path, pools: &[String], command: &[OsString]) -> wt::Resu
     let mut child = Command::new(&command[0]);
     child.args(&command[1..]).current_dir(cwd);
     if let Some(tree) = &tree {
+        warn_about_config(tree);
         tree.env()?.apply(&mut child);
     }
     let pools: Vec<&str> = pools.iter().map(String::as_str).collect();
