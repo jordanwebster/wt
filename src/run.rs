@@ -173,7 +173,8 @@ impl Tree {
         // In a process group of its own the hook is in the terminal's
         // background, where reading the terminal would stop it.
         command.stdin(Stdio::null()).process_group(0);
-        if hook == Hook::Start {
+        // A start, or a create run again, may bring services up.
+        if matches!(hook, Hook::Start | Hook::Create) {
             self.set_stopped(false)?;
         }
         let child = command.spawn().map_err(io_at(
@@ -184,7 +185,11 @@ impl Tree {
         if hook == Hook::Stop {
             // Only a stop that succeeded says the tree is stopped; one that
             // didn't leaves it in a state nobody knows.
-            self.set_stopped(outcome == Outcome::Succeeded)?;
+            if outcome == Outcome::Succeeded {
+                self.mark_stopped_unless_held(holds)?;
+            } else {
+                self.set_stopped(false)?;
+            }
         }
         Ok(self.ran(hook, outcome, log))
     }

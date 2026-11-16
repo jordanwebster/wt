@@ -941,3 +941,36 @@ fn t_stop(t: &Tree) {
     );
     assert!(t.stopped());
 }
+
+#[test]
+fn a_hard_stop_under_a_holder_does_not_mark_the_tree_stopped() {
+    let fx = Fixture::new();
+    fx.config("[lifecycle]\nstop = \"true\"\n");
+    let t = tree(&fx, "t");
+    let hold = t.hold().unwrap();
+    stdout(&fx.cli(&fx.root, &["stop", "app/t"]));
+    assert!(
+        !t.stopped(),
+        "marked stopped while a holder could restart things"
+    );
+    drop(hold);
+    stdout(&fx.cli(&fx.root, &["stop", "app/t"]));
+    assert!(t.stopped());
+}
+
+#[test]
+fn a_create_hook_clears_the_stopped_mark() {
+    let fx = Fixture::new();
+    fx.config("[lifecycle]\nstop = \"true\"\ncreate = \"true\"\n");
+    let t = tree(&fx, "t");
+    t_stop(&t);
+    assert!(
+        t.run_hook(Hook::Create, RunHook::default())
+            .unwrap()
+            .succeeded()
+    );
+    assert!(!t.stopped(), "a foreground create left the mark");
+    t_stop(&t);
+    t.spawn_create().unwrap().unwrap().wait().unwrap();
+    assert!(!t.stopped(), "a detached create left the mark");
+}

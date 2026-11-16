@@ -188,6 +188,24 @@ impl Tree {
         self.root.join(STOPPED).exists()
     }
 
+    /// Marks the tree stopped after a stop hook succeeded, unless something
+    /// holds it: a holder (say, the shell of a person who ran a hard
+    /// `wt stop`) may start things again, and a hold clears the mark only
+    /// when it is taken. `exclusive` is the caller's exclusive hold, if it
+    /// has one; otherwise the hold is taken for as long as the mark is
+    /// written, so no holder can slip in between.
+    pub(crate) fn mark_stopped_unless_held(&self, exclusive: Option<&File>) -> Result<()> {
+        if exclusive.is_some() {
+            return self.set_stopped(true);
+        }
+        let holds = run::open_lock(self, HOLDS)?;
+        match holds.try_lock() {
+            Ok(()) => self.set_stopped(true),
+            Err(TryLockError::WouldBlock) => self.set_stopped(false),
+            Err(TryLockError::Error(error)) => Err(io_at("locking", &self.holds_path())(error)),
+        }
+    }
+
     pub(crate) fn set_stopped(&self, stopped: bool) -> Result<()> {
         let path = self.root.join(STOPPED);
         if stopped {

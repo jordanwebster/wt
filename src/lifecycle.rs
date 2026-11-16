@@ -736,6 +736,8 @@ impl Tree {
             return Ok(None);
         };
         let lock = self.lock_lifecycle(None)?;
+        // The create hook may bring services up again.
+        self.set_stopped(false)?;
         self.mark_creating()?;
         command
             .stdin(Stdio::null())
