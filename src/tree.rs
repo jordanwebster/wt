@@ -155,7 +155,11 @@ impl Tree {
         }
         for (path, file) in &config.files {
             let content = template::render(&file.content, &vars, &format!("files.\"{path}\""))?;
-            fsx::write_if_changed(&tree.root.join(path), content.as_bytes(), file.mode)?;
+            let destination = tree.root.join(path);
+            if file.keep && fs::symlink_metadata(&destination).is_ok() {
+                continue;
+            }
+            fsx::write_if_changed(&destination, content.as_bytes(), file.mode)?;
         }
         tree.write_wrappers(&config)?;
         tree.update_excludes(&config)?;

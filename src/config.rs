@@ -49,6 +49,10 @@ pub struct CopyEntry {
 pub struct FileEntry {
     pub content: String,
     pub mode: Option<u32>,
+    /// Written only when the file is missing, and never overwritten: for a
+    /// file that is also state the tree edits. Changes to the template
+    /// don't reach a file already there.
+    pub keep: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -415,7 +419,7 @@ impl Errors {
             self.keys(
                 entry,
                 &format!("{at}."),
-                &["content", "mode"],
+                &["content", "mode", "keep"],
                 &[
                     ("marker", "removed: delete it"),
                     (
@@ -437,9 +441,23 @@ impl Errors {
                 }
                 mode
             });
+            let keep = entry.get("keep").is_some_and(|v| {
+                let keep = v.as_bool();
+                if keep.is_none() {
+                    self.push(format!("`{at}.keep` must be true or false"));
+                }
+                keep.unwrap_or(false)
+            });
             match content {
                 Some(content) => {
-                    files.insert(path.clone(), FileEntry { content, mode });
+                    files.insert(
+                        path.clone(),
+                        FileEntry {
+                            content,
+                            mode,
+                            keep,
+                        },
+                    );
                 }
                 None => self.push(format!("`{at}` needs `content`")),
             }

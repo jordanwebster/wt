@@ -361,3 +361,29 @@ fn unknown_config_keys_are_ignored_with_a_warning_naming_the_file() {
     let wt = fx.wt();
     assert!(wt.settings().warnings[0].contains("unknown key `future`"));
 }
+
+#[test]
+fn a_kept_file_is_written_when_missing_and_never_overwritten() {
+    let fx = Fixture::new();
+    fx.config(
+        "[files.\"state.toml\"]\ncontent = \"tree = \\\"{{name}}\\\"\\n\"\nkeep = true\n\
+         [files.\"rendered.txt\"]\ncontent = \"{{name}}\"\n",
+    );
+    let tree = make(&fx.wt(), &fx.repo, wt::PlanRequest::named("t"))
+        .unwrap()
+        .tree;
+    let state = tree.root.join("state.toml");
+    let rendered = tree.root.join("rendered.txt");
+    assert_eq!(fs::read_to_string(&state).unwrap(), "tree = \"t\"\n");
+    assert!(tree.config().unwrap().warnings.is_empty());
+
+    fs::write(&state, "tree = \"edited\"\n").unwrap();
+    fs::write(&rendered, "edited").unwrap();
+    tree.env().unwrap();
+    assert_eq!(fs::read_to_string(&state).unwrap(), "tree = \"edited\"\n");
+    assert_eq!(fs::read_to_string(&rendered).unwrap(), "t");
+
+    fs::remove_file(&state).unwrap();
+    stdout(&fx.cli(&tree.root, &["exec", "--", "true"]));
+    assert_eq!(fs::read_to_string(&state).unwrap(), "tree = \"t\"\n");
+}

@@ -67,6 +67,7 @@ DATABASE_URL = "postgres://localhost:{{ports.server}}/app_{{name_snake}}"
 [files.".mcp.json"]
 content = """{ "url": "http://localhost:{{ports.web}}/mcp" }"""
 # mode = "0755"
+# keep = true                        # write it only when it is missing
 
 [lifecycle]
 create = "just setup"                # after the tree is made
@@ -97,6 +98,13 @@ substitutions, with no logic. They can use:
 
 An unknown name is an error. A file that needs literal `{{` belongs in
 `copy` instead.
+
+**Kept files:** a rendered file is rewritten whenever the tree is entered,
+so edits to it are lost. For a file that is also state the tree edits,
+such as a tool's per-tree settings, set `keep = true`: wt writes it only
+when it is missing and never overwrites it. Changes to its template don't
+reach a file already there; delete the file and the next `wt exec`,
+`wt shell` or `wt env` renders it afresh.
 
 **Hooks** run with `sh -c` at the tree's root. They aren't templated: they
 read the same values from the environment, which has:
