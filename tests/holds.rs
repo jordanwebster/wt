@@ -881,3 +881,63 @@ fn removal_waits_out_a_running_stop_hook_but_not_a_real_holder() {
     assert!(matches!(removal.finish("the removal"), Err(Error::Held(_))));
     assert!(held.root.exists());
 }
+
+#[test]
+fn removal_skips_the_stop_hook_of_a_tree_already_stopped() {
+    let fx = Fixture::new();
+    let log = fx.root.join("hooks.log");
+    let fail = fx.root.join("fail");
+    fx.config(&format!(
+        "[lifecycle]\nstart = \"echo start $WT_NAME >> {log}\"\nstop = \"test ! -e {fail} && echo stop $WT_NAME >> {log}\"\ndelete = \"echo delete $WT_NAME >> {log}\"\n",
+        log = log.display(),
+        fail = fail.display(),
+    ));
+    let wt = fx.wt();
+    let marker = |t: &Tree| t.root.join(".wt/stopped").exists();
+
+    let t = tree(&fx, "a");
+    assert!(ran(stop_in_background(&t).finish("the stopper")).succeeded());
+    assert!(marker(&t));
+    wt.remove(&t, Remove::default()).unwrap();
+    assert_eq!(read(&log), "stop a\ndelete a\n", "the stop hook ran twice");
+
+    // A hold may start things by hand, so it clears the marker.
+    fs::remove_file(&log).unwrap();
+    let held = tree(&fx, "b");
+    t_stop(&held);
+    drop(held.hold().unwrap());
+    assert!(!marker(&held));
+    wt.remove(&held, Remove::default()).unwrap();
+    assert_eq!(read(&log), "stop b\nstop b\ndelete b\n");
+
+    // So does a start, and a stop that fails leaves none.
+    fs::remove_file(&log).unwrap();
+    let started = tree(&fx, "c");
+    t_stop(&started);
+    assert!(
+        started
+            .run_hook(Hook::Start, RunHook::default())
+            .unwrap()
+            .succeeded()
+    );
+    assert!(!marker(&started));
+    t_stop(&started);
+    fs::write(&fail, "").unwrap();
+    assert!(
+        !started
+            .run_hook(Hook::Stop, RunHook::default())
+            .unwrap()
+            .succeeded()
+    );
+    assert!(!marker(&started));
+    assert!(!started.stopped());
+}
+
+fn t_stop(t: &Tree) {
+    assert!(
+        t.run_hook(Hook::Stop, RunHook::default())
+            .unwrap()
+            .succeeded()
+    );
+    assert!(t.stopped());
+}

@@ -173,11 +173,19 @@ impl Tree {
         // In a process group of its own the hook is in the terminal's
         // background, where reading the terminal would stop it.
         command.stdin(Stdio::null()).process_group(0);
+        if hook == Hook::Start {
+            self.set_stopped(false)?;
+        }
         let child = command.spawn().map_err(io_at(
             &format!("running the {} hook of", hook.name()),
             &self.root,
         ))?;
         let outcome = wait(child, config.lifecycle.time_limit(hook), options.forward)?;
+        if hook == Hook::Stop {
+            // Only a stop that succeeded says the tree is stopped; one that
+            // didn't leaves it in a state nobody knows.
+            self.set_stopped(outcome == Outcome::Succeeded)?;
+        }
         Ok(self.ran(hook, outcome, log))
     }
 

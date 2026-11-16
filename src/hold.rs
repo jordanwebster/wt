@@ -11,6 +11,12 @@
 //! - `.wt/pinned`: a person ran `wt start`, so a stopper leaves the tree
 //!   running.
 //! - `.wt/owner`: who made the tree, an opaque string.
+//! - `.wt/stopped`: the stop hook succeeded and nothing has started the tree
+//!   since, so removal needn't stop it again. Written after a stop hook
+//!   succeeds; removed before a start hook runs, after a stop hook that
+//!   doesn't succeed, and whenever a hold is taken, since a holder may start
+//!   things by hand. Unlike a "started" record it can't go stale the
+//!   dangerous way: a reboot or a crash only makes it more true.
 //!
 //! Lock order: holds before lifecycle. Nothing blocks on the holds lock
 //! while it holds the lifecycle lock, except a hook's own `wt exec`, which
@@ -29,6 +35,7 @@ pub(crate) const HOLDS: &str = "holds.lock";
 pub(crate) const LIFECYCLE: &str = "lifecycle.lock";
 const PINNED: &str = ".wt/pinned";
 const OWNER: &str = ".wt/owner";
+const STOPPED: &str = ".wt/stopped";
 
 /// A shared hold on a tree, released when dropped (or when the process
 /// ends). While any hold exists, [`Tree::stop_when_unheld`] waits and
@@ -71,6 +78,7 @@ impl Tree {
         let path = self.holds_path();
         run::wait_for_lock(&file, true, None, &path)?;
         self.current(&file, &path)?;
+        self.set_stopped(false)?;
         Ok(Hold { _file: file })
     }
 
@@ -85,6 +93,7 @@ impl Tree {
             Err(TryLockError::Error(error)) => return Err(io_at("locking", &path)(error)),
         }
         self.current(&file, &path)?;
+        self.set_stopped(false)?;
         Ok(Some(Hold { _file: file }))
     }
 
@@ -171,6 +180,21 @@ impl Tree {
             return false;
         };
         matches!(file.try_lock_shared(), Err(TryLockError::WouldBlock))
+    }
+
+    /// Whether the tree's stop hook succeeded and nothing has started or
+    /// held the tree since. Removal skips the stop hook then.
+    pub fn stopped(&self) -> bool {
+        self.root.join(STOPPED).exists()
+    }
+
+    pub(crate) fn set_stopped(&self, stopped: bool) -> Result<()> {
+        let path = self.root.join(STOPPED);
+        if stopped {
+            fsx::write_atomic(&path, b"", None)
+        } else {
+            remove_if_there(&path)
+        }
     }
 
     /// Whether a person pinned the tree running with `wt start`.

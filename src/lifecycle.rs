@@ -475,7 +475,14 @@ impl Wt {
         let branch = tree.branch();
         if tree.root.is_dir() {
             let lifecycle = tree.lock_lifecycle(options.hooks.forward)?;
-            for hook in [Hook::Stop, Hook::Delete] {
+            // A tree its stop hook already stopped, and nothing has started
+            // or held since, needn't be stopped again.
+            let hooks: &[Hook] = if tree.stopped() {
+                &[Hook::Delete]
+            } else {
+                &[Hook::Stop, Hook::Delete]
+            };
+            for &hook in hooks {
                 match tree.run_locked(hook, options.hooks, &lifecycle, exclusive.as_ref()) {
                     // A person asked to give up: nothing more is torn down.
                     Ok(ran) if matches!(ran.outcome, Outcome::Interrupted(_)) => {
