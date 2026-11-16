@@ -124,7 +124,13 @@ impl Tree {
             let lifecycle = run::open_lock(self, LIFECYCLE)?;
             match lifecycle.try_lock() {
                 Ok(()) => {
-                    let ran = self.run_locked(Hook::Stop, options, &lifecycle, Some(&holds))?;
+                    let ran = self.run_locked(Hook::Stop, options, &lifecycle, Some(&holds));
+                    // The hold before the lifecycle lock: a removal that finds
+                    // the lifecycle lock free must find the hold free too, or
+                    // it would take the end of a stop for a holder.
+                    drop(holds);
+                    drop(lifecycle);
+                    let ran = ran?;
                     return Ok(Stopped::Ran(ran));
                 }
                 Err(TryLockError::WouldBlock) => {

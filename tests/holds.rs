@@ -830,3 +830,54 @@ fn a_hook_past_its_time_limit_is_killed_even_when_whatever_ran_it_is_gone() {
         "the hold outlived the limit"
     );
 }
+
+#[test]
+fn removal_waits_out_a_running_stop_hook_but_not_a_real_holder() {
+    let fx = Fixture::new();
+    let started = fx.root.join("started");
+    let gate = fx.root.join("gate");
+    fx.config(&format!(
+        "[lifecycle]\nstop = \"touch {s}; {w}\"\nstart = \"touch {s}; {w}\"\n",
+        s = started.display(),
+        w = wait_for(&gate),
+    ));
+
+    // The stop hook has the tree to itself, but nobody else holds it.
+    let t = tree(&fx, "t");
+    let stopper = stop_in_background(&t);
+    wait_until("the stop hook", || started.exists());
+    let (remover, home) = (t.clone(), fx.home.clone());
+    let removal = Background::start(move || {
+        Wt::with_home(&home)
+            .unwrap()
+            .remove(&remover, Remove::default())
+    });
+    assert!(
+        removal.still_running(Duration::from_millis(300)),
+        "removal refused a tree only its stop hook had"
+    );
+    fs::write(&gate, "").unwrap();
+    assert!(ran(stopper.finish("the stopper")).succeeded());
+    removal.finish("the removal").unwrap();
+    assert!(!t.root.exists());
+
+    // A real holder is still refused, once the running hook is done.
+    fs::remove_file(&gate).unwrap();
+    fs::remove_file(&started).unwrap();
+    let held = tree(&fx, "held");
+    let _hold = held.hold().unwrap();
+    let starter = held.clone();
+    let start = Background::start(move || starter.run_hook(Hook::Start, RunHook::default()));
+    wait_until("the start hook", || started.exists());
+    let (remover, home) = (held.clone(), fx.home.clone());
+    let removal = Background::start(move || {
+        Wt::with_home(&home)
+            .unwrap()
+            .remove(&remover, Remove::default())
+    });
+    assert!(removal.still_running(Duration::from_millis(300)));
+    fs::write(&gate, "").unwrap();
+    start.finish("the start hook").unwrap();
+    assert!(matches!(removal.finish("the removal"), Err(Error::Held(_))));
+    assert!(held.root.exists());
+}

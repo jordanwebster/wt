@@ -414,18 +414,32 @@ impl Wt {
     }
 
     /// The exclusive hold, when the tree exists and nothing else holds it.
+    /// Never waits for a holder, but does wait for a running hook, which
+    /// may have the tree to itself (a stop) without being a holder.
     fn check_holders(&self, tree: &Tree, options: Remove) -> Result<Option<fs::File>> {
         if !tree.root.is_dir() {
             return Ok(None);
         }
-        match tree.try_hold_exclusively()? {
-            Some(file) => Ok(Some(file)),
-            None if options.ignore_holders => Ok(None),
-            None => Err(Error::Held(format!(
-                "{} is in use: a `wt shell`, a `wt exec` or another program holds it; \
-                 pass --force to remove it anyway",
-                tree.id()
-            ))),
+        loop {
+            if let Some(file) = tree.try_hold_exclusively()? {
+                return Ok(Some(file));
+            }
+            // A running stop hook has the tree to itself, and that is not a
+            // holder: perhaps a process that died mid-stop left it running.
+            // Wait for it, as for any running hook, and look again.
+            if tree.hook_running() {
+                drop(tree.lock_lifecycle(options.hooks.forward)?);
+                continue;
+            }
+            return if options.ignore_holders {
+                Ok(None)
+            } else {
+                Err(Error::Held(format!(
+                    "{} is in use: a `wt shell`, a `wt exec` or another program holds it; \
+                     pass --force to remove it anyway",
+                    tree.id()
+                )))
+            };
         }
     }
 
