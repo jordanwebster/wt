@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.1
+
+- **Faster new trees:** a tree on a new branch fetches the branch and
+  origin's default branch at the same time instead of one after the other,
+  which takes about a second and a half off `wt new` against a remote over
+  ssh.
+
 ## 0.6.0
 
 wt is rewritten as a small library with a CLI over it, so other programs
