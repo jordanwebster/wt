@@ -314,26 +314,53 @@ impl Wt {
             return Err(Error::Taken(format!("branch `{branch}` already exists")));
         }
         let remote_ref = format!("refs/remotes/origin/{branch}");
+        let origin = request.fetch && git::has_origin(&main);
         // A branch asked for by name may be someone else's on origin: fetch
         // it, so that it is checked out rather than started afresh. It may
         // equally be new, so a failed fetch says nothing. A fresh branch is
         // fetched to make sure nobody has it.
-        if !local
-            && (named_branch || request.fresh_branch)
-            && request.fetch
-            && git::has_origin(&main)
-        {
-            let _ = git::run_timeout(
-                &main,
-                &[
-                    "fetch",
-                    "--quiet",
-                    "origin",
-                    &format!("+refs/heads/{branch}:{remote_ref}"),
-                ],
-                FETCH_TIMEOUT,
-            );
-        }
+        let fetch_branch = origin && !local && (named_branch || request.fresh_branch);
+        // The default branch is fetched alongside, before knowing whether
+        // the tree starts from it: each fetch is a round trip to origin of
+        // its own, over ssh most of the time a new tree takes, and a tree
+        // that starts afresh needs both. One fetch can't ask for both,
+        // since it fails outright when the branch isn't on origin, which
+        // is the usual case. They update different refs and write no
+        // FETCH_HEAD, so they don't meet.
+        let default = (origin && !local && request.from.is_none())
+            .then(|| git::default_branch(&main))
+            .flatten();
+        let fetched_default = std::thread::scope(|scope| {
+            let fetching_default = default.as_deref().map(|default| {
+                scope.spawn(|| {
+                    git::run_timeout(
+                        &main,
+                        &[
+                            "fetch",
+                            "--quiet",
+                            "--no-write-fetch-head",
+                            "origin",
+                            default,
+                        ],
+                        FETCH_TIMEOUT,
+                    )
+                })
+            });
+            if fetch_branch {
+                let _ = git::run_timeout(
+                    &main,
+                    &[
+                        "fetch",
+                        "--quiet",
+                        "--no-write-fetch-head",
+                        "origin",
+                        &format!("+refs/heads/{branch}:{remote_ref}"),
+                    ],
+                    FETCH_TIMEOUT,
+                );
+            }
+            fetching_default.map(|fetching| fetching.join().expect("a fetch doesn't panic"))
+        });
         let remote = !local && git::ref_exists(&main, &remote_ref);
         if remote && request.fresh_branch {
             return Err(Error::Taken(format!(
@@ -353,7 +380,7 @@ impl Wt {
         let start = match &request.from {
             Some(from) => from.clone(),
             None if local || remote => String::new(),
-            None => start_point(&main, request.fetch, &mut warnings),
+            None => start_point(&main, default, fetched_default, &mut warnings),
         };
         // checkout.workers=0 checks files out in parallel, one worker per
         // core: on large repositories that is several times faster.
@@ -597,24 +624,26 @@ fn delete_if_empty(main: &Path, branch: &str) -> Result<bool> {
 
 /// `origin/<default>` after fetching it, or the main checkout's HEAD for a
 /// repository without a usable remote.
-fn start_point(main: &Path, fetch: bool, warnings: &mut Vec<String>) -> String {
+/// Where a fresh tree starts: origin's default branch, as fetched just now
+/// or else as fetched last, or the main checkout's HEAD when there is no
+/// origin or it doesn't say which branch is its default.
+fn start_point(
+    main: &Path,
+    default: Option<String>,
+    fetched: Option<Result<String>>,
+    warnings: &mut Vec<String>,
+) -> String {
     if !git::has_origin(main) {
         return "HEAD".to_owned();
     }
-    let Some(default) = git::default_branch(main) else {
+    let Some(default) = default.or_else(|| git::default_branch(main)) else {
         warnings.push(
             "couldn't tell origin's default branch; starting from the main checkout's HEAD"
                 .to_owned(),
         );
         return "HEAD".to_owned();
     };
-    if fetch
-        && let Err(error) = git::run_timeout(
-            main,
-            &["fetch", "--quiet", "origin", &default],
-            FETCH_TIMEOUT,
-        )
-    {
+    if let Some(Err(error)) = fetched {
         warnings.push(format!(
             "couldn't fetch origin/{default} ({error}); starting from the copy fetched last"
         ));
