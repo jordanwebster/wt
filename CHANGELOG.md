@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.2
+
+- **Immediate lock release:** `stop_when_unheld`, `run_hook` and dropping a
+  `Hold` now unlock their `flock` before closing the file descriptor, and
+  the hook wrapper waits for its watchdog subshell to exit before returning,
+  so an immediate `try_hold` in a multi-threaded process never sees a stale
+  lock from a finishing hook or a concurrent `fork`.
+
 ## 0.6.1
 
 - **Faster new trees:** a tree on a new branch fetches the branch and

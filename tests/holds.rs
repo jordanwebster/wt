@@ -974,3 +974,22 @@ fn a_create_hook_clears_the_stopped_mark() {
     t.spawn_create().unwrap().unwrap().wait().unwrap();
     assert!(!t.stopped(), "a detached create left the mark");
 }
+
+#[test]
+fn stop_when_unheld_releases_the_exclusive_hold_before_returning() {
+    let fx = Fixture::new();
+    fx.config("[lifecycle]\nstop = \"true\"\n");
+    let t = tree(&fx, "t");
+    for round in 0..25 {
+        let hold = t.try_hold().unwrap().unwrap_or_else(|| {
+            panic!("round {round}: the previous stop still held the exclusive lock")
+        });
+        let stopper = stop_in_background(&t);
+        drop(hold);
+        assert!(ran(stopper.finish("the stopper")).succeeded());
+    }
+    assert!(
+        t.try_hold().unwrap().is_some(),
+        "the exclusive hold outlived stop_when_unheld"
+    );
+}

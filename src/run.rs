@@ -148,7 +148,9 @@ impl Tree {
     /// describes.
     pub fn run_hook(&self, hook: Hook, options: RunHook) -> Result<Ran> {
         let lock = self.lock_lifecycle(options.forward)?;
-        self.run_locked(hook, options, &lock, None)
+        let ran = self.run_locked(hook, options, &lock, None);
+        let _ = lock.unlock();
+        ran
     }
 
     /// Runs `hook` while the caller holds the lifecycle lock in `lock`, and,
