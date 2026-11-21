@@ -199,13 +199,15 @@ exit "$code""#;
 /// the hook is gone, which would otherwise leave a hung hook holding the
 /// locks for good. It gives the runner's own, exact limit time to act first:
 /// it fires a little later, sending SIGTERM and then SIGKILL to the process
-/// group, wrapper included. It holds no lock and none of the hook's output.
+/// group, wrapper included. It holds no lock and none of the hook's output,
+/// and the wrapper waits for it to exit after killing it so a fast hook
+/// cannot return before the forked subshell has closed fd 8 and fd 9.
 const HOOK_WRAPPER: &str = r#"trap : INT TERM HUP
 watchdog=
 if [ -n "$2" ]; then
   (
     trap '' INT HUP
-    trap 'kill "$s" 2>/dev/null; exit 0' TERM
+    trap 'kill "${s:-$!}" 2>/dev/null; exit 0' TERM
     sleep "$2" & s=$!
     wait "$s"
     trap '' TERM
@@ -217,7 +219,10 @@ if [ -n "$2" ]; then
 fi
 sh -c "$1" 8>&- 9>&-
 code=$?
-[ -n "$watchdog" ] && kill "$watchdog" 2>/dev/null
+if [ -n "$watchdog" ]; then
+  kill "$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
+fi
 exit "$code""#;
 
 /// How much later than the time limit a hook's own wrapper kills it: after

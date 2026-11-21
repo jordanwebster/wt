@@ -42,7 +42,17 @@ const STOPPED: &str = ".wt/stopped";
 /// [`crate::Wt::remove`] refuses.
 #[derive(Debug)]
 pub struct Hold {
-    _file: File,
+    file: File,
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        // Explicitly unlock before closing: in a multi-threaded process,
+        // another thread mid-fork() can transiently hold a duplicated fd to
+        // this open file description until exec() closes it via O_CLOEXEC,
+        // which would otherwise keep the flock held past drop().
+        let _ = self.file.unlock();
+    }
 }
 
 /// What [`Tree::stop_when_unheld`] did once nothing held the tree.
@@ -79,7 +89,7 @@ impl Tree {
         run::wait_for_lock(&file, true, None, &path)?;
         self.current(&file, &path)?;
         self.set_stopped(false)?;
-        Ok(Hold { _file: file })
+        Ok(Hold { file })
     }
 
     /// Like [`Tree::hold`], but `None` instead of waiting for a running
@@ -94,7 +104,7 @@ impl Tree {
         }
         self.current(&file, &path)?;
         self.set_stopped(false)?;
-        Ok(Some(Hold { _file: file }))
+        Ok(Some(Hold { file }))
     }
 
     /// Blocks until nothing holds the tree, then runs its stop hook, keeping holders
@@ -125,19 +135,26 @@ impl Tree {
             // by `wt rm --keep` while this waited.
             let managed = state::read(&self.wt.home)?.tree_at(&self.root).is_some();
             if !is_current(&holds, &path) || !managed {
+                let _ = holds.unlock();
                 return Ok(Stopped::Gone);
             }
             if self.pinned() {
+                let _ = holds.unlock();
                 return Ok(Stopped::Pinned);
             }
             let lifecycle = run::open_lock(self, LIFECYCLE)?;
             match lifecycle.try_lock() {
                 Ok(()) => {
                     let ran = self.run_locked(Hook::Stop, options, &lifecycle, Some(&holds));
+                    // Unlock before closing: another thread mid-fork() may
+                    // still hold a pre-exec copy of the fd, which would keep
+                    // an unlocked-only-by-close flock alive after we return.
                     // The hold before the lifecycle lock: a removal that finds
                     // the lifecycle lock free must find the hold free too, or
                     // it would take the end of a stop for a holder.
+                    let _ = holds.unlock();
                     drop(holds);
+                    let _ = lifecycle.unlock();
                     drop(lifecycle);
                     let ran = ran?;
                     return Ok(Stopped::Ran(ran));
@@ -148,8 +165,10 @@ impl Tree {
                         .map_err(io_at("unlocking", &self.holds_path()))?;
                     let lifecycle_path = self.root.join(".wt").join(LIFECYCLE);
                     run::wait_for_lock(&lifecycle, false, options.forward, &lifecycle_path)?;
+                    let _ = lifecycle.unlock();
                 }
                 Err(TryLockError::Error(error)) => {
+                    let _ = holds.unlock();
                     return Err(io_at("locking", &self.root.join(".wt").join(LIFECYCLE))(
                         error,
                     ));
@@ -165,9 +184,15 @@ impl Tree {
             return InUse::No;
         };
         match file.try_lock() {
-            Ok(()) => InUse::No,
+            Ok(()) => {
+                let _ = file.unlock();
+                InUse::No
+            }
             Err(_) => match file.try_lock_shared() {
-                Ok(()) => InUse::Held,
+                Ok(()) => {
+                    let _ = file.unlock();
+                    InUse::Held
+                }
                 Err(_) => InUse::Stopping,
             },
         }
@@ -179,7 +204,14 @@ impl Tree {
         let Ok(file) = File::open(self.root.join(".wt").join(LIFECYCLE)) else {
             return false;
         };
-        matches!(file.try_lock_shared(), Err(TryLockError::WouldBlock))
+        match file.try_lock_shared() {
+            Ok(()) => {
+                let _ = file.unlock();
+                false
+            }
+            Err(TryLockError::WouldBlock) => true,
+            Err(_) => false,
+        }
     }
 
     /// Whether the tree's stop hook succeeded and nothing has started or
