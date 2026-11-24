@@ -154,6 +154,11 @@ checkout already holds a binary:
 mytool: not ready in app/fix-scroll: the create hook is still running (or was interrupted); see …/.wt/create.log
 ```
 
+Build the tool somewhere other than `.wt/bin`, such as `target/` or
+`.wt/build/`. wt writes the wrappers in `.wt/bin`, so it writes no wrapper for
+a `[bin]` path there, and warns that the binary doesn't get the not-ready
+check.
+
 Point any environment the tool reads at the tree too, so the tree's build
 doesn't talk to the copy you use day to day:
 

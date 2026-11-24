@@ -128,6 +128,27 @@ fn bin_wrappers_run_the_trees_build_or_say_why_not() {
 }
 
 #[test]
+fn a_binary_built_into_the_wrapper_directory_is_never_overwritten() {
+    let fx = Fixture::new();
+    fx.config("[bin]\ntool = \".wt/bin/tool\"\n");
+    let path = fx.worktree("t");
+    let tree = fx.wt().init(&path, Init::default()).unwrap();
+    let binary = path.join(".wt/bin/tool");
+
+    // A wrapper an older wt wrote there, which execs itself, is removed.
+    fs::create_dir_all(path.join(".wt/bin")).unwrap();
+    fs::write(&binary, "#!/bin/sh\n# wt:bin\nexec \"$0\" \"$@\"\n").unwrap();
+    tree.env().unwrap();
+    assert!(!binary.exists());
+
+    // The tree's build, once there, is left alone.
+    fs::write(&binary, "#!/bin/sh\necho built\n").unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    tree.env().unwrap();
+    assert_eq!(stdout(&Command::new(&binary).output().unwrap()), "built\n");
+}
+
+#[test]
 fn rendered_paths_are_excluded_from_git() {
     let fx = Fixture::new();
     fx.config("[files.\"generated.json\"]\ncontent = \"{}\"\n[bin]\ntool = \"x\"\n");

@@ -167,6 +167,20 @@ impl Config {
                     for (name, path) in errors.string_map(value, "bin") {
                         errors.name(&name, "a [bin] entry");
                         errors.relative(&path, &format!("bin.{name}"));
+                        // `.wt/bin` is where wt writes the wrappers, so a
+                        // wrapper for a binary built there would overwrite
+                        // it and then exec itself forever. Such a binary is
+                        // already first on PATH and needs no wrapper. A
+                        // warning, not an error, so trees on older branches
+                        // keep working, and their stale wrapper is removed.
+                        if Path::new(&path).starts_with(".wt/bin") {
+                            errors.warnings.push(format!(
+                                "`bin.{name}`: `{path}` is inside .wt/bin, where wt writes the \
+                                 [bin] wrappers; it is already on PATH, so no wrapper is written. \
+                                 Build it elsewhere to have one"
+                            ));
+                            continue;
+                        }
                         config.bin.insert(name, path);
                     }
                 }
@@ -665,6 +679,20 @@ mod tests {
         let error = Config::parse("copy = [\"../x\"]\n[bin]\nx = \"/usr/bin/x\"").unwrap_err();
         assert!(error.contains("copy"), "{error}");
         assert!(error.contains("bin.x"), "{error}");
+    }
+
+    #[test]
+    fn a_bin_inside_the_wrapper_directory_gets_no_wrapper() {
+        let config =
+            Config::parse("[bin]\namux = \".wt/bin/amux\"\nok = \".wt/build/ok\"\n").unwrap();
+        assert!(!config.bin.contains_key("amux"), "{:?}", config.bin);
+        assert_eq!(config.bin["ok"], ".wt/build/ok");
+        assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+        assert!(
+            config.warnings[0].contains("bin.amux"),
+            "{:?}",
+            config.warnings
+        );
     }
 
     #[test]
