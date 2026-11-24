@@ -202,8 +202,16 @@ exit "$code""#;
 /// group, wrapper included. It holds no lock and none of the hook's output,
 /// and the wrapper waits for it to exit after killing it so a fast hook
 /// cannot return before the forked subshell has closed fd 8 and fd 9.
-const HOOK_WRAPPER: &str = r#"trap : INT TERM HUP
-watchdog=
+///
+/// The wrapper sets its own traps only after forking the watchdog. A forked
+/// subshell starts with its parent's traps in force until it clears them,
+/// and a signal caught in that moment is dropped (dash nearly always, bash
+/// now and then): with the wrapper's `trap :` already set, a hook that
+/// ended before the watchdog reached its own TERM trap lost the wrapper's
+/// kill, and the wrapper then waited out the whole time limit for it. With
+/// TERM at its default action until the watchdog's trap, an early kill ends
+/// the watchdog before it starts its sleep.
+const HOOK_WRAPPER: &str = r#"watchdog=
 if [ -n "$2" ]; then
   (
     trap '' INT HUP
@@ -217,6 +225,7 @@ if [ -n "$2" ]; then
   ) < /dev/null > /dev/null 2>&1 8>&- 9>&- &
   watchdog=$!
 fi
+trap : INT TERM HUP
 sh -c "$1" 8>&- 9>&-
 code=$?
 if [ -n "$watchdog" ]; then
@@ -817,5 +826,64 @@ impl Tree {
     /// Where the `create` hook's output is kept.
     pub fn create_log(&self) -> PathBuf {
         self.root.join(".wt/create.log")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// The wrapper with its hook taken out: it kills the watchdog the moment
+    /// it has forked it, as it does when a hook ends before the watchdog has
+    /// been scheduled, which is when a kill used to be lost.
+    fn without_its_hook() -> String {
+        let hook = "sh -c \"$1\" 8>&- 9>&-\n";
+        assert!(HOOK_WRAPPER.contains(hook), "the wrapper runs its hook");
+        HOOK_WRAPPER.replace(hook, "")
+    }
+
+    /// The shell that drops a signal caught as a subshell starts most often,
+    /// where there is one, else the system's.
+    fn shell() -> &'static str {
+        ["/bin/dash", "/usr/bin/dash"]
+            .into_iter()
+            .find(|dash| Path::new(dash).exists())
+            .unwrap_or("sh")
+    }
+
+    #[test]
+    fn a_watchdog_killed_as_it_starts_ends_rather_than_wait_out_the_limit() {
+        let script = without_its_hook();
+        for round in 0..40 {
+            let started = Instant::now();
+            let mut wrapper = Command::new(shell())
+                .arg("-c")
+                .arg(&script)
+                .args(["wt-stop", "true", "60"])
+                .stdin(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let deadline = started + Duration::from_secs(10);
+            let status = loop {
+                if let Some(status) = wrapper.try_wait().unwrap() {
+                    break Some(status);
+                }
+                if Instant::now() >= deadline {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            if status.is_none() {
+                // SAFETY: a plain signal to the wrapper's own process group.
+                unsafe { libc::kill(-(wrapper.id() as i32), libc::SIGKILL) };
+                let _ = wrapper.wait();
+                panic!(
+                    "round {round}: the wrapper waited on a watchdog its kill missed ({})",
+                    shell()
+                );
+            }
+        }
     }
 }
