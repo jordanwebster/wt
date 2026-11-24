@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.3
+
+- **No more five-minute stops:** a `start`, `stop` or `delete` hook that
+  ended before its watchdog had been scheduled could miss the wrapper's kill
+  of the watchdog, and since 0.6.2 the wrapper waits for the watchdog, so
+  the hook then took its whole time limit plus slack to return (five minutes
+  by default), holding the tree's locks throughout. The wrapper now sets its
+  own signal traps only after starting the watchdog.
+
 ## 0.6.2
 
 - **Immediate lock release:** `stop_when_unheld`, `run_hook` and dropping a
