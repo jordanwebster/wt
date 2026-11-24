@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.3
 
 - **No more five-minute stops:** a `start`, `stop` or `delete` hook that
   ended before its watchdog had been scheduled could miss the wrapper's kill
