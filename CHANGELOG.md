@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.4
+
+- **No more five-minute removals for a `[bin]` built into `.wt/bin`:** a
+  `[bin]` entry whose binary is built at `.wt/bin/<name>`, where wt writes
+  its wrappers, had the binary overwritten by a wrapper that ran itself
+  forever, so a stop hook calling it hung until its time limit. Such an
+  entry now gets no wrapper, only a warning, and a looping wrapper left by
+  an older wt is removed.
+
 ## 0.6.3
 
 - **No more five-minute stops:** a `start`, `stop` or `delete` hook that
